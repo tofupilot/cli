@@ -4,10 +4,6 @@
 
 Run hardware tests, manage stations, and upload results from the command line.
 
-## Documentation
-
-See [tofupilot.com/docs](https://tofupilot.com/docs) for full documentation.
-
 ## License
 
 MIT
