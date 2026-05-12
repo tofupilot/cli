@@ -6,11 +6,7 @@ Run hardware tests, manage stations, and upload results from the command line.
 
 ## Install
 
-```sh
-curl -fsSL tofupilot.sh/install | sh
-```
-
-Same one-liner the dashboard prints when configuring a station.
+Get the install command from the station setup page in the TofuPilot dashboard.
 
 ## License
 
