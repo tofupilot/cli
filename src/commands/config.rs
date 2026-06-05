@@ -619,7 +619,7 @@ fn windows_desktop_dir() -> crate::error::CliResult<std::path::PathBuf> {
     // OneDrive, and `WshShell.SaveAs` then throws DirectoryNotFoundException.
     directories::UserDirs::new()
         .and_then(|d| d.desktop_dir().map(std::path::Path::to_path_buf))
-        .ok_or_else(|| "Could not resolve Desktop folder".to_string())
+        .ok_or_else(|| "Could not resolve Desktop folder".into())
 }
 
 #[cfg(target_os = "windows")]
