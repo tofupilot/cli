@@ -1,14 +1,15 @@
 //! In-process WebSocket + static-file server for the kiosk operator UI.
 //!
-//! Embeds the `apps/operator-ui` Vite build, serves it on loopback, and
-//! bridges the engine's `StationEvent` broadcast and `StationCommand` mpsc to
-//! the browser. The wire format and lifecycle are documented below.
+//! Embeds the operator-ui Vite build (`operator-ui/dist`), serves it on
+//! loopback, and bridges the engine's `StationEvent` broadcast and
+//! `StationCommand` mpsc to the browser. The wire format and lifecycle are
+//! documented below.
 
-// Local WebSocket server for the operator UI air-gap mode. Embeds
-// the `apps/operator-ui` Vite build, serves it on loopback, and
-// proxies the existing `StationEvent` broadcast / `StationCommand`
-// mpsc that the engine already exposes. The browser-side state
-// machine and reducer are unchanged — we just swap the transport.
+// Local WebSocket server for the operator UI air-gap mode. Embeds the
+// operator-ui Vite build, serves it on loopback, and proxies the
+// existing `StationEvent` broadcast / `StationCommand` mpsc that the
+// engine already exposes. The browser-side state machine and reducer
+// are unchanged — we just swap the transport.
 //
 // Wire format on the WS:
 //   * server → client (first frame): `{type:"hello", station_id, station_name, procedures}`
@@ -540,8 +541,8 @@ impl Server {
         if !has_index {
             crate::log::warn(
                 "local-ui: embedded SPA has no index.html; only the placeholder page \
-                 will render. Did you build operator-ui? \
-                 Run `pnpm --filter operator-ui build` and rebuild the CLI.",
+                 will render. Build the operator-ui SPA into operator-ui/dist and \
+                 rebuild the CLI.",
             );
         } else if asset_count <= 1 {
             crate::log::warn(&format!(

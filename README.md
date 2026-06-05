@@ -1,6 +1,5 @@
 # TofuPilot CLI
 
-[![Test CLI](https://github.com/tofupilot/cli/actions/workflows/test-cli.yml/badge.svg)](https://github.com/tofupilot/cli/actions/workflows/test-cli.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
 Run, deploy, and manage [TofuPilot](https://tofupilot.com) test procedures from the terminal.

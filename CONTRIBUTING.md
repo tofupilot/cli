@@ -30,7 +30,8 @@ cargo clippy --all-targets -- -D warnings  # lints, warnings are errors
 cargo test                                 # Rust unit tests
 ```
 
-CI runs the same three on every pull request (`.github/workflows/test-cli.yml`).
+Run all three locally before opening a pull request; maintainers run the same
+gate upstream before changes are mirrored here.
 
 ## Agent-protocol tests (Python harness)
 
