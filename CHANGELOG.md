@@ -39,7 +39,7 @@ Open-source readiness pass. No user-facing behavior changes.
 
 ### Fixed
 - Headless runs no longer hang on unit identification when no UI surface is
-  available; they now fail fast with actionable guidance (`#1424`).
+  available; they now fail fast with actionable guidance.
 
 ### Changed
 - `whoami` is cache-first for instant offline identity.
@@ -48,10 +48,10 @@ Open-source readiness pass. No user-facing behavior changes.
 ### Added
 - `link` / `unlink`: bind a local procedure directory to a remote procedure for
   run upload.
-- Operator helper text on identify-unit fields (`#1387`).
-- Robot Framework connector mirroring the pytest connector (`#1291`).
+- Operator helper text on identify-unit fields.
+- Robot Framework connector mirroring the pytest connector.
 - Auto-bootstrap of a virtualenv on local-path runs and monorepo workspace
-  bootstrap via `uv sync` (`#1338`, `#1339`).
+  bootstrap via `uv sync`.
 
 [Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.17...HEAD
 [0.22.17]: https://github.com/tofupilot/cli/compare/v0.22.16...v0.22.17
