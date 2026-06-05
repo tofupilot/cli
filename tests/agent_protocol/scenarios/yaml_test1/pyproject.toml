@@ -1,0 +1,4 @@
+[project]
+name = "ohtf-test"
+version = "0.1.0"
+dependencies = ["openhtf>=1.6"]

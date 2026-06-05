@@ -1,0 +1,10 @@
+name: Y38 Duplicate Keys
+version: 1.0.0
+
+main:
+  - key: dup
+    name: Dup 1
+    python: phases.p1
+  - key: dup
+    name: Dup 2
+    python: phases.p2

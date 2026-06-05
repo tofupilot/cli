@@ -1,0 +1,5 @@
+[project]
+name = "pytest-test10"
+version = "0.1.0"
+dependencies = ["pytest>=8"]
+# No [tool.tofupilot] block — identify-unit must prompt.

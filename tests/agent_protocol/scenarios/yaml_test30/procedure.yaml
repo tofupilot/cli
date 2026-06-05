@@ -1,0 +1,21 @@
+name: Y30 Then Fail Stop
+version: 1.0.0
+
+execution:
+  on_first_failure: continue
+
+main:
+  - key: a
+    name: A
+    python: phases.a
+    then:
+      fail: stop
+    measurements:
+      - name: v
+        validators:
+          - operator: "<"
+            expected_value: 0  # will fail
+  - key: b
+    name: B
+    python: phases.b
+    depends_on: [a]

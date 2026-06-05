@@ -1,0 +1,5 @@
+[project]
+name = "robot-test3"
+version = "0.1.0"
+dependencies = ["robotframework>=7"]
+# No [tool.tofupilot] block — identify-unit must prompt.

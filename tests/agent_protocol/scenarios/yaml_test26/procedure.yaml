@@ -1,0 +1,24 @@
+name: Y26 Plug State Persists
+version: 1.0.0
+
+plugs:
+  - name: Counter
+    python: instruments.counter:Counter
+
+main:
+  - key: inc_a
+    name: Inc A
+    python: phases.inc_a
+  - key: inc_b
+    name: Inc B
+    python: phases.inc_b
+    depends_on: [inc_a]
+  - key: check
+    name: Check
+    python: phases.check
+    depends_on: [inc_b]
+    measurements:
+      - name: total
+        validators:
+          - operator: "=="
+            expected_value: 2

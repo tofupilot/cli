@@ -1,0 +1,11 @@
+name: Y32 Disabled Phase
+version: 1.0.0
+
+main:
+  - key: off_
+    name: Off
+    python: phases.off_
+    enabled: false
+  - key: on_
+    name: On
+    python: phases.on_

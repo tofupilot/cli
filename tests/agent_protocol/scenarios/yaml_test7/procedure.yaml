@@ -1,0 +1,6 @@
+name: Y7 Missing Module
+version: 1.0.0
+main:
+  - key: ghost
+    name: Ghost
+    python: phases.does_not_exist

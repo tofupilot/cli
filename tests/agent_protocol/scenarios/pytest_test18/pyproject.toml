@@ -1,0 +1,9 @@
+[project]
+name = "pytest-test18"
+version = "0.1.0"
+dependencies = ["pytest>=8"]
+
+[tool.tofupilot]
+serial_number = "SN-PYT-18"
+part_number = "PCB-COLLIDE"
+auto_identify = true

@@ -1,0 +1,11 @@
+name: Y25 Plug Init Raises
+version: 1.0.0
+
+plugs:
+  - name: Broken
+    python: instruments.broken:Broken
+
+main:
+  - key: run
+    name: Run
+    python: phases.run

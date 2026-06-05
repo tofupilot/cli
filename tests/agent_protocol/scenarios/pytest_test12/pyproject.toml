@@ -1,0 +1,9 @@
+[project]
+name = "pytest-test12"
+version = "0.1.0"
+dependencies = ["pytest>=8"]
+
+[tool.tofupilot]
+part_number = "PCB-PYT-12"
+serial_number = "SN-PYT-12"
+auto_identify = true

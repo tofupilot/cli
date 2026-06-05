@@ -1,0 +1,20 @@
+name: Y6 Parallel
+version: 1.0.0
+execution:
+  workers: 4
+main:
+  - key: init
+    name: Init
+    python: phases.init
+  - key: v
+    name: V
+    python: phases.v
+    depends_on: [init]
+  - key: i
+    name: I
+    python: phases.i
+    depends_on: [init]
+  - key: t
+    name: T
+    python: phases.t
+    depends_on: [init]

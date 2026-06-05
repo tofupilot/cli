@@ -1,0 +1,13 @@
+name: Y22 UI Required No Answer
+version: 1.0.0
+
+main:
+  - key: confirm
+    name: Confirm
+    python: phases.confirm
+    ui:
+      components:
+        - type: switch
+          key: accepted
+          label: Accept
+          required: true

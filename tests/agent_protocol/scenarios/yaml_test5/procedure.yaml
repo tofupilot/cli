@@ -1,0 +1,10 @@
+name: Y5 Dependencies
+version: 1.0.0
+main:
+  - key: a
+    name: A
+    python: phases.a
+  - key: b
+    name: B
+    python: phases.b
+    depends_on: [a]

@@ -1,0 +1,9 @@
+name: Y8 Bad YAML
+version: 1.0.0
+main:
+  - key: a
+    name: A
+    python: phases.a
+  - key: b  # missing colon after key
+    name B
+    python: phases.b

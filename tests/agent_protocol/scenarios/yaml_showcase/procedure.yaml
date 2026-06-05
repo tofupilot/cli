@@ -1,0 +1,201 @@
+name: TUI Showcase
+version: 1.0.0
+
+main:
+  - key: image_only
+    name: Image
+    python: phases.noop
+    ui:
+      requires_input: true
+      components:
+        - type: image
+          key: board_photo
+          default_value: board.jpg
+
+  - key: display_only
+    name: Display Only
+    python: phases.noop
+    ui:
+      requires_input: true
+      components:
+        - type: text
+          key: intro
+          default_value: "Displays: text, image, progress, artificial_horizon. Press Enter to continue."
+        - type: image
+          key: board_photo
+          default_value: board.jpg
+        - type: progress
+          key: boot
+          label: Boot
+          default_value: 72
+          max: 100
+        - type: artificial_horizon
+          key: horizon
+          label: Horizon
+
+  - key: text_inputs
+    name: Text Inputs
+    python: phases.noop
+    ui:
+      components:
+        - type: text_input
+          key: serial
+          label: Serial number
+          placeholder: SN-0001
+          required: true
+          min_length: 3
+          max_length: 16
+        - type: number_input
+          key: voltage
+          label: Voltage (V)
+          placeholder: "5.0"
+          min: 0
+          max: 24
+        - type: textarea
+          key: notes
+          label: Notes
+          placeholder: free-form observations
+
+  - key: toggles
+    name: Toggles
+    python: phases.noop
+    ui:
+      components:
+        - type: switch
+          key: powered
+          label: Device powered on
+          required: true
+        - type: slider
+          key: brightness
+          label: Brightness
+          default_value: 50
+          min: 0
+          max: 100
+          step: 5
+
+  - key: single_choice
+    name: Single Choice
+    python: phases.noop
+    ui:
+      components:
+        - type: radio
+          key: mode
+          label: Operating mode
+          required: true
+          options:
+            - value: normal
+              label: Normal
+            - value: diag
+              label: Diagnostic
+            - value: prod
+              label: Production
+        - type: select
+          key: region
+          label: Region
+          options:
+            - value: eu
+              label: Europe
+            - value: us
+              label: Americas
+            - value: ap
+              label: Asia-Pacific
+
+  - key: multi_choice
+    name: Multi Choice
+    python: phases.noop
+    ui:
+      components:
+        - type: multiselect
+          key: plugs
+          label: Plugs connected
+          options:
+            - value: usb
+              label: USB
+            - value: eth
+              label: Ethernet
+            - value: jtag
+              label: JTAG
+        - type: checklist
+          key: checks
+          label: Pre-flight checks
+          required: true
+          options:
+            - value: lid
+              label: Lid closed
+            - value: cables
+              label: Cables seated
+            - value: esd
+              label: ESD strap worn
+
+  - key: image_choices
+    name: Image Choices
+    python: phases.noop
+    ui:
+      components:
+        - type: image_choice
+          key: revision
+          label: Pick the board revision you see
+          required: true
+          options:
+            - value: rev_a
+              label: Rev A
+              image: rev_a.jpg
+            - value: rev_b
+              label: Rev B
+              image: rev_b.jpg
+        - type: image_checklist
+          key: defects
+          label: Defects found
+          options:
+            - value: scratch
+              label: Scratch
+              image: board.jpg
+            - value: dent
+              label: Dent
+              image: board.jpg
+            - value: none
+              label: None
+
+  - key: voltage_sweep
+    name: Voltage Sweep
+    python: phases.voltage_sweep
+    measurements:
+      - name: v_idle
+        unit: V
+        validators:
+          - operator: ">="
+            expected_value: 4.8
+          - operator: "<="
+            expected_value: 5.2
+      - name: v_load
+        unit: V
+        validators:
+          - operator: ">="
+            expected_value: 4.5
+          - operator: "<="
+            expected_value: 5.0
+      - name: v_peak
+        unit: V
+        validators:
+          - operator: "<="
+            expected_value: 5.5
+
+  - key: current_draw
+    name: Current Draw
+    python: phases.current_draw
+    measurements:
+      - name: i_idle
+        unit: mA
+        validators:
+          - operator: "<="
+            expected_value: 50
+      - name: i_load
+        unit: mA
+        validators:
+          - operator: "<="
+            expected_value: 500
+      - name: i_peak
+        unit: mA
+        validators:
+          - operator: "<="
+            expected_value: 800

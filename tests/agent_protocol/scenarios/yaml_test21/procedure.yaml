@@ -1,0 +1,42 @@
+name: Y21 Full Journey
+version: 1.0.0
+
+execution:
+  workers: 3
+
+main:
+  - key: setup
+    name: Setup
+    python: phases.setup
+    ui:
+      components:
+        - type: switch
+          key: fixture_closed
+          label: Fixture closed?
+          required: true
+  - key: voltage
+    name: Voltage
+    python: phases.voltage
+    depends_on: [setup]
+    measurements:
+      - name: v
+        unit: V
+        validators:
+          - operator: ">="
+            expected_value: 4.5
+          - operator: "<="
+            expected_value: 5.5
+  - key: current
+    name: Current
+    python: phases.current
+    depends_on: [setup]
+    measurements:
+      - name: i
+        unit: mA
+        validators:
+          - operator: "<="
+            expected_value: 500
+  - key: report
+    name: Report
+    python: phases.report
+    depends_on: [voltage, current]

@@ -1,0 +1,7 @@
+name: Y12 Unknown Dependency
+version: 1.0.0
+main:
+  - key: a
+    name: A
+    python: phases.a
+    depends_on: [ghost_phase_does_not_exist]

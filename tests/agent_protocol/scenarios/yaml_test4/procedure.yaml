@@ -1,0 +1,6 @@
+name: Y4 Phase Exception
+version: 1.0.0
+main:
+  - key: boom
+    name: Boom
+    python: phases.boom

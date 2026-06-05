@@ -1,0 +1,22 @@
+name: Y40 Plug Scope All vs Each
+version: 1.0.0
+
+execution:
+  slots:
+    - key: slot_a
+      name: Slot A
+    - key: slot_b
+      name: Slot B
+
+plugs:
+  - name: Shared Counter
+    python: instruments.counter:Counter
+    scope: all
+  - name: Per Slot Counter
+    python: instruments.counter:Counter
+    scope: each
+
+main:
+  - key: inc
+    name: Inc
+    python: phases.inc

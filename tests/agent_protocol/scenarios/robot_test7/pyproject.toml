@@ -1,0 +1,9 @@
+[project]
+name = "robot-test7"
+version = "0.1.0"
+dependencies = ["robotframework>=7"]
+
+[tool.tofupilot]
+serial_number = "SN-ROBOT-7"
+part_number = "PCB-ROBOT"
+auto_identify = true

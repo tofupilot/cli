@@ -1,0 +1,15 @@
+name: Y23 Unit Metadata
+version: 1.0.0
+
+unit:
+  serial_number:
+    default_value: "SN-1000"
+  part_number:
+    default_value: "PN-42"
+  revision_number:
+    default_value: "R1"
+
+main:
+  - key: run
+    name: Run
+    python: phases.run

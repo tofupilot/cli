@@ -1,0 +1,7 @@
+name: Y17 Attachments
+version: 1.0.0
+
+main:
+  - key: collect
+    name: Collect
+    python: phases.collect

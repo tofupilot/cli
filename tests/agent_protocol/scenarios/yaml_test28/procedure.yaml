@@ -1,0 +1,8 @@
+name: Y28 Phase Timeout
+version: 1.0.0
+
+main:
+  - key: slow
+    name: Slow
+    python: phases.slow
+    timeout: "1s"

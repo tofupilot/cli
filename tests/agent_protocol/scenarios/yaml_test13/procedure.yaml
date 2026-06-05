@@ -1,0 +1,62 @@
+name: Y13 All UI Components
+version: 1.0.0
+
+main:
+  - key: all_inputs
+    name: All Inputs
+    python: phases.all_inputs
+    ui:
+      components:
+        - type: text_input
+          key: text_field
+          label: Text
+          required: true
+        - type: textarea
+          key: textarea_field
+          label: Textarea
+        - type: switch
+          key: switch_field
+          label: Accept
+          required: true
+        - type: number_input
+          key: number_field
+          label: Number
+        - type: slider
+          key: slider_field
+          label: Slider
+          min: 0
+          max: 100
+          step: 5
+        - type: radio
+          key: radio_field
+          label: Radio
+          required: true
+          options:
+            - value: a
+              label: A
+            - value: b
+              label: B
+        - type: select
+          key: select_field
+          label: Select
+          options:
+            - value: x
+              label: X
+            - value: y
+              label: Y
+        - type: multiselect
+          key: multi_field
+          label: Multi
+          options:
+            - value: m1
+              label: M1
+            - value: m2
+              label: M2
+        - type: checklist
+          key: checklist_field
+          label: Checklist
+          options:
+            - value: c1
+              label: C1
+            - value: c2
+              label: C2

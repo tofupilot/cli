@@ -1,0 +1,7 @@
+name: Y39 Force Kill Mid Phase
+version: 1.0.0
+
+main:
+  - key: long
+    name: Long
+    python: phases.long

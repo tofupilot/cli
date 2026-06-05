@@ -1,0 +1,22 @@
+name: Y18 UI Bound to Measurement
+version: 1.0.0
+
+main:
+  - key: enter_values
+    name: Enter Values
+    python: phases.enter_values
+    ui:
+      components:
+        - type: number_input
+          key: voltage_input
+          label: Voltage
+          required: true
+          bind: measurement.voltage
+    measurements:
+      - name: voltage
+        unit: V
+        validators:
+          - operator: ">="
+            expected_value: 0
+          - operator: "<="
+            expected_value: 10

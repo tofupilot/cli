@@ -1,0 +1,14 @@
+name: Y33 Multi Slot
+version: 1.0.0
+
+execution:
+  slots:
+    - key: slot_a
+      name: Slot A
+    - key: slot_b
+      name: Slot B
+
+main:
+  - key: run
+    name: Run
+    python: phases.run

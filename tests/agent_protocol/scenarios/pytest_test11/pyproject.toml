@@ -1,0 +1,8 @@
+[project]
+name = "pytest-test11"
+version = "0.1.0"
+dependencies = ["pytest>=8"]
+
+[tool.tofupilot]
+serial_number = "SN-PYT-11"
+auto_identify = true

@@ -1,0 +1,12 @@
+name: Y36 Timeout Then Retry
+version: 1.0.0
+
+main:
+  - key: sometimes_slow
+    name: Sometimes Slow
+    python: phases.sometimes_slow
+    timeout: "1s"
+    retry:
+      limit: 2
+    then:
+      timeout: retry

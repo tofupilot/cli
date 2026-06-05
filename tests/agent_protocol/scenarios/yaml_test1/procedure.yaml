@@ -1,0 +1,7 @@
+name: Y1 Happy
+version: 1.0.0
+
+main:
+  - key: hello
+    name: Hello
+    python: phases.hello

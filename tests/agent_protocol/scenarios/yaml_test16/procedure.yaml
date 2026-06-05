@@ -1,0 +1,30 @@
+name: Y16 Image Choices
+version: 1.0.0
+
+main:
+  - key: pick
+    name: Pick
+    python: phases.pick
+    ui:
+      components:
+        - type: image_choice
+          key: variant
+          label: Select variant
+          required: true
+          options:
+            - value: rev_a
+              label: Rev A
+              image: https://example.com/a.png
+            - value: rev_b
+              label: Rev B
+              image: https://example.com/b.png
+        - type: image_checklist
+          key: defects
+          label: Defects found
+          options:
+            - value: scratch
+              label: Scratch
+            - value: dent
+              label: Dent
+            - value: none
+              label: None

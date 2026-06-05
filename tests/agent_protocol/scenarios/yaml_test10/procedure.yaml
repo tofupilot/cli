@@ -1,0 +1,6 @@
+name: Y10 Python SyntaxError
+version: 1.0.0
+main:
+  - key: broken
+    name: Broken
+    python: phases.broken

@@ -1,0 +1,9 @@
+name: Y29 Retry Limit
+version: 1.0.0
+
+main:
+  - key: flaky
+    name: Flaky
+    python: phases.flaky
+    retry:
+      limit: 3

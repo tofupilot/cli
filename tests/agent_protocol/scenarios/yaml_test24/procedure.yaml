@@ -1,0 +1,21 @@
+name: Y24 Plug Simple
+version: 1.0.0
+
+plugs:
+  - name: Power Supply
+    python: instruments.power_supply:PowerSupply
+
+main:
+  - key: cfg
+    name: Configure
+    python: phases.cfg
+  - key: measure
+    name: Measure
+    python: phases.measure
+    depends_on: [cfg]
+    measurements:
+      - name: v
+        unit: V
+        validators:
+          - operator: "=="
+            expected_value: 5.0

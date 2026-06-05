@@ -1,0 +1,11 @@
+name: Y27 Plug Missing File
+version: 1.0.0
+
+plugs:
+  - name: Ghost
+    python: instruments.ghost:Ghost
+
+main:
+  - key: run
+    name: Run
+    python: phases.run

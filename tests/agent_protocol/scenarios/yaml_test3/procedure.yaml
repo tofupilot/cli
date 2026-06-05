@@ -1,0 +1,12 @@
+name: Y3 Failing Measurement
+version: 1.0.0
+main:
+  - key: voltage
+    name: Voltage
+    python: phases.voltage
+    measurements:
+      - name: v
+        unit: V
+        validators:
+          - operator: "<="
+            expected_value: 3.0

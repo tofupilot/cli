@@ -1,0 +1,15 @@
+name: Y14 Display Only
+version: 1.0.0
+
+main:
+  - key: show_progress
+    name: Show Progress
+    python: phases.show_progress
+    ui:
+      components:
+        - type: text
+          key: message
+          default_value: "Running calibration..."
+        - type: progress
+          key: bar
+          max: 100

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Operator UI not built</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1.5rem; color: #1a1a1a; }
+    code { background: #f4f4f5; padding: 0.15rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+    h1 { font-size: 1.4rem; }
+  </style>
+</head>
+<body>
+  <h1>Operator UI bundle missing</h1>
+  <p>The CLI was built without the operator UI assets. Build the SPA, then re-run:</p>
+  <pre><code>pnpm --filter @repo/operator-ui build
+cargo build -p tofupilot</code></pre>
+</body>
+</html>

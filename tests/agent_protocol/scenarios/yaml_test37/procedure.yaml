@@ -1,0 +1,12 @@
+name: Y37 Circular Deps
+version: 1.0.0
+
+main:
+  - key: a
+    name: A
+    python: phases.a
+    depends_on: [b]
+  - key: b
+    name: B
+    python: phases.b
+    depends_on: [a]

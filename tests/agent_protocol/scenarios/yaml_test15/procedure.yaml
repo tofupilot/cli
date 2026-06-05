@@ -1,0 +1,35 @@
+name: Y15 Parallel UI Prompts
+version: 1.0.0
+
+execution:
+  workers: 3
+
+main:
+  - key: init
+    name: Init
+    python: phases.init
+  - key: visual_a
+    name: Visual A
+    python: phases.visual_a
+    depends_on: [init]
+    ui:
+      components:
+        - type: radio
+          key: verdict_a
+          label: Verdict A
+          required: true
+          options:
+            - value: ok
+              label: OK
+            - value: fail
+              label: Fail
+  - key: visual_b
+    name: Visual B
+    python: phases.visual_b
+    depends_on: [init]
+    ui:
+      components:
+        - type: switch
+          key: accepted_b
+          label: Accept B
+          required: true

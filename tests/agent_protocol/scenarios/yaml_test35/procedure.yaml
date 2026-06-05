@@ -1,0 +1,9 @@
+name: Y35 Shell Phase
+version: 1.0.0
+
+main:
+  - key: shell
+    name: Shell
+    executable:
+      command: "echo hello from shell"
+      shell: "bash"

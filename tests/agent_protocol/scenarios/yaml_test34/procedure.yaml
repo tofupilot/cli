@@ -1,0 +1,22 @@
+name: Y34 Sub-Units
+version: 1.0.0
+
+unit:
+  serial_number:
+    default_value: "MAIN-100"
+  part_number:
+    default_value: "PN-1"
+  sub_units:
+    - label: Battery
+      key: battery
+      serial_number:
+        default_value: "BAT-01"
+    - label: Motor
+      key: motor
+      serial_number:
+        default_value: "MTR-01"
+
+main:
+  - key: check
+    name: Check
+    python: phases.check

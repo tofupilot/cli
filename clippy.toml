@@ -1,0 +1,7 @@
+# Clippy configuration for the TofuPilot CLI.
+# Baseline target: `cargo clippy --all-targets -- -D warnings` passes clean.
+# `clippy::pedantic` is run advisory-only in CI, not gated.
+
+# Allow slightly longer functions before the cognitive-complexity lint fires;
+# the run/ event pipeline has inherently branchy dispatch.
+too-many-arguments-threshold = 9

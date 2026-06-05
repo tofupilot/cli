@@ -1,0 +1,19 @@
+name: Y31 On First Failure Continue
+version: 1.0.0
+
+execution:
+  on_first_failure: continue
+
+main:
+  - key: fails
+    name: Fails
+    python: phases.fails
+    measurements:
+      - name: v
+        validators:
+          - operator: "<"
+            expected_value: 0
+  - key: later
+    name: Later
+    python: phases.later
+    depends_on: [fails]

@@ -1,0 +1,5 @@
+# Robot listener output dir (created on every run; not part of fixtures).
+.tofupilot_robot_output/
+# Pytest cache (created on every run).
+.pytest_cache/
+__pycache__/

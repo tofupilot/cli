@@ -1,0 +1,15 @@
+name: Y2 Measurements Pass
+version: 1.0.0
+
+main:
+  - key: voltage
+    name: Voltage
+    python: phases.voltage
+    measurements:
+      - name: v
+        unit: V
+        validators:
+          - operator: ">="
+            expected_value: 4.5
+          - operator: "<="
+            expected_value: 5.5
