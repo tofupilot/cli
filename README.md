@@ -8,8 +8,16 @@ Run, deploy, and manage [TofuPilot](https://tofupilot.com) test procedures from 
 
 ### Pre-built binary (recommended)
 
+macOS / Linux:
+
 ```bash
-curl -fsSL https://www.tofupilot.app/install | bash
+curl -fsSL https://tofupilot.sh/install | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+iwr -useb https://tofupilot.sh/install.ps1 | iex
 ```
 
 Or download a binary from the [latest release](https://github.com/tofupilot/cli/releases/latest) and verify it against the published `sha256` checksums.
@@ -18,7 +26,7 @@ Or download a binary from the [latest release](https://github.com/tofupilot/cli/
 |----------|---------------|
 | macOS    | x86_64, aarch64 |
 | Linux    | x86_64, aarch64 |
-| Windows  | x86_64 |
+| Windows  | x86_64, aarch64 |
 
 ### From source
 

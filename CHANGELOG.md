@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.19]
+
+### Fixed
+- Corrected the install command in the README: the one-liner now points at the
+  real installer (`https://tofupilot.sh/install`) instead of a URL that served
+  the website, and adds the Windows PowerShell installer.
+
 ## [0.22.18]
 
 ### Fixed
@@ -61,7 +68,8 @@ Open-source readiness pass. No user-facing behavior changes.
 - Auto-bootstrap of a virtualenv on local-path runs and monorepo workspace
   bootstrap via `uv sync`.
 
-[Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.18...HEAD
+[Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.19...HEAD
+[0.22.19]: https://github.com/tofupilot/cli/compare/v0.22.18...v0.22.19
 [0.22.18]: https://github.com/tofupilot/cli/compare/v0.22.17...v0.22.18
 [0.22.17]: https://github.com/tofupilot/cli/compare/v0.22.16...v0.22.17
 [0.22.16]: https://github.com/tofupilot/cli/releases/tag/v0.22.16
