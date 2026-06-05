@@ -7,7 +7,7 @@ The robot analogue of `pytest_drive.py`. Each scenario ships a
 optionally `[tool.tofupilot]` defaults) plus one or more `.robot`
 files. The shared `/tmp/ohtf_test/.venv` is expected to have
 `robotframework` installed; symlink each scenario's `.venv` to that
-shared venv (see `apps/cli/tests/agent_protocol/README.md`).
+shared venv (see `tests/agent_protocol/README.md`).
 """
 from __future__ import annotations
 

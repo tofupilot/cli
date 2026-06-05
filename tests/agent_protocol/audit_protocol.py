@@ -17,6 +17,7 @@ Invariants checked:
  10. Each `phase_started.phase_key` also appears in `plan.phases`.
 """
 import json
+import os
 import subprocess
 import sys
 
@@ -280,10 +281,13 @@ cases = [
     ("boot-exception", "/tmp/ohtf_test19"),
     ("mid-phase-sysexit", "/tmp/ohtf_test20"),
     ("segfault", "/tmp/ohtf_test21"),
-    # Cross-check: the YAML operator-ui procedure should audit identically to
-    # the OpenHTF ones (same canonical event shape). Path is relative to the
-    # current checkout rather than a personal worktree.
-    ("yaml-operator-ui", "apps/studio/procedures/demo-operator-ui"),
+    # Cross-check: a YAML operator-ui procedure should audit identically to the
+    # OpenHTF ones (same canonical event shape). Override the directory with the
+    # OPERATOR_UI_PROCEDURE env var; defaults to a copied scenario under /tmp.
+    (
+        "yaml-operator-ui",
+        os.environ.get("OPERATOR_UI_PROCEDURE", "/tmp/yaml_operator_ui"),
+    ),
 ]
 all_ok = True
 for name, path in cases:

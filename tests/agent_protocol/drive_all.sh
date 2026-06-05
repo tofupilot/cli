@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-set -u
-CLI=/Users/julienbuteau/sources/tofupilot/.claude/worktrees/cli-json-agent-protocol/apps/cli/target/debug/tofupilot
-DRIVER=/tmp/drive_cli.py
+# Drive every OpenHTF scenario end-to-end through the JSON agent protocol.
+# Usage: drive_all.sh <cli-binary> [scenario-root]
+#   <cli-binary>     path to the compiled `tofupilot` binary
+#   [scenario-root]  dir holding the ohtf_test* scenarios (default: /tmp)
+# See README.md for how to materialize the scenarios.
+set -eu
+CLI=${1:?usage: drive_all.sh <cli-binary> [scenario-root]}
+SCENARIO_ROOT=${2:-/tmp}
+DRIVER="$(dirname "$0")/drive_cli.py"
 
-for DIR in /tmp/ohtf_test /tmp/ohtf_test2 /tmp/ohtf_test3 /tmp/ohtf_test4 /tmp/ohtf_test5 /tmp/ohtf_test6 /tmp/ohtf_test7 /tmp/ohtf_test8 /tmp/ohtf_test9 /tmp/ohtf_test10 /tmp/ohtf_test11 /tmp/ohtf_test12 /tmp/ohtf_test13 /tmp/ohtf_test14 /tmp/ohtf_test15 /tmp/ohtf_test16; do
+for DIR in "$SCENARIO_ROOT"/ohtf_test "$SCENARIO_ROOT"/ohtf_test2 "$SCENARIO_ROOT"/ohtf_test3 "$SCENARIO_ROOT"/ohtf_test4 "$SCENARIO_ROOT"/ohtf_test5 "$SCENARIO_ROOT"/ohtf_test6 "$SCENARIO_ROOT"/ohtf_test7 "$SCENARIO_ROOT"/ohtf_test8 "$SCENARIO_ROOT"/ohtf_test9 "$SCENARIO_ROOT"/ohtf_test10 "$SCENARIO_ROOT"/ohtf_test11 "$SCENARIO_ROOT"/ohtf_test12 "$SCENARIO_ROOT"/ohtf_test13 "$SCENARIO_ROOT"/ohtf_test14 "$SCENARIO_ROOT"/ohtf_test15 "$SCENARIO_ROOT"/ohtf_test16; do
   echo
   echo "==================================="
   echo "Scenario: $DIR"

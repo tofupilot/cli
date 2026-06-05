@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.18]
+
+### Fixed
+- Removed monorepo-only and personal filesystem paths from the published repo:
+  the agent-protocol test scripts, the kiosk placeholder page, the architecture
+  doc, and an internal codegen tool now use repo-relative or caller-supplied
+  paths.
+
 ## [0.22.17]
 
 Open-source readiness pass. No user-facing behavior changes.
@@ -53,6 +61,7 @@ Open-source readiness pass. No user-facing behavior changes.
 - Auto-bootstrap of a virtualenv on local-path runs and monorepo workspace
   bootstrap via `uv sync`.
 
-[Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.17...HEAD
+[Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.18...HEAD
+[0.22.18]: https://github.com/tofupilot/cli/compare/v0.22.17...v0.22.18
 [0.22.17]: https://github.com/tofupilot/cli/compare/v0.22.16...v0.22.17
 [0.22.16]: https://github.com/tofupilot/cli/releases/tag/v0.22.16

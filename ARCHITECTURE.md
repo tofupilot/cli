@@ -8,7 +8,7 @@ daemon. This document orients a new contributor; for the command surface run
 ## Workspace layout
 
 ```
-apps/cli/
+.
 ├── src/
 │   ├── main.rs            # clap dispatch, signal handling, top-level commands
 │   ├── commands/          # command implementations (see below)
@@ -24,7 +24,7 @@ apps/cli/
 
 The crate depends on three sibling crates by path:
 
-- **`tofupilot-sdk`** (`clients/rust`) — the generated HTTP SDK for the V2 API.
+- **`tofupilot-sdk`** (`crates/tofupilot-sdk`) — the generated HTTP SDK for the V2 API.
 - **`station-protocol`** (`crates/station-protocol`) — `StationEvent` /
   `StationCommand` wire types shared with the dashboard.
 - **`execution-engine`** (`crates/execution-engine`) — the framework-agnostic

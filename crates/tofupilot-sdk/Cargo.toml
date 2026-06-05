@@ -6,6 +6,7 @@ rust-version = "1.75"
 description = "TofuPilot APIv2: TofuPilot REST API for managing runs, units, procedures, and more."
 license = "MIT"
 readme = "README.md"
+homepage = "https://tofupilot.com"
 repository = "https://github.com/tofupilot/cli"
 keywords = ["tofupilot", "test", "manufacturing", "api", "sdk"]
 categories = ["api-bindings"]

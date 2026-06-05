@@ -28,9 +28,11 @@ originally created). To run from this checkout, copy `scenarios/*` to
 `/tmp/` and set up a venv with `openhtf` installed, then point each
 scenario's `.venv` symlink at it:
 
+Run these from the crate root (the directory holding `Cargo.toml`):
+
 ```bash
 # 1. Copy fixtures into /tmp
-cp -r apps/cli/tests/agent_protocol/scenarios/* /tmp/
+cp -r tests/agent_protocol/scenarios/* /tmp/
 
 # 2. Create one shared venv with OpenHTF (used by every scenario)
 python3 -m venv /tmp/ohtf_test/.venv
@@ -42,14 +44,17 @@ for d in /tmp/ohtf_test* /tmp/yaml_test*; do
 done
 
 # 4. Build the CLI
-cd apps/cli && cargo build && cd -
+cargo build
 
-# 5. Run the suites
-python3 apps/cli/tests/agent_protocol/audit_protocol.py  ./apps/cli/target/debug/tofupilot
-python3 apps/cli/tests/agent_protocol/yaml_audit.py      ./apps/cli/target/debug/tofupilot
-python3 apps/cli/tests/agent_protocol/stress_test.py     ./apps/cli/target/debug/tofupilot
-python3 apps/cli/tests/agent_protocol/test_protocol.py   ./apps/cli/target/debug/tofupilot apps/studio/procedures/demo-operator-ui
+# 5. Run the suites (CLI binary path, then a procedure dir where needed)
+python3 tests/agent_protocol/audit_protocol.py  ./target/debug/tofupilot
+python3 tests/agent_protocol/yaml_audit.py      ./target/debug/tofupilot
+python3 tests/agent_protocol/stress_test.py     ./target/debug/tofupilot <procedure-dir>
+python3 tests/agent_protocol/test_protocol.py   ./target/debug/tofupilot <procedure-dir>
 ```
+
+`<procedure-dir>` is any OpenHTF or YAML procedure directory (for example one of
+the copied scenarios under `/tmp`).
 
 ## Coverage (last green run)
 

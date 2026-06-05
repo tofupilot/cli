@@ -11,8 +11,8 @@
 </head>
 <body>
   <h1>Operator UI bundle missing</h1>
-  <p>The CLI was built without the operator UI assets. Build the SPA, then re-run:</p>
-  <pre><code>pnpm --filter @repo/operator-ui build
-cargo build -p tofupilot</code></pre>
+  <p>This CLI build has no operator UI assets embedded. Build the operator-ui
+     SPA into <code>operator-ui/dist</code>, then rebuild the CLI:</p>
+  <pre><code>cargo build --release</code></pre>
 </body>
 </html>

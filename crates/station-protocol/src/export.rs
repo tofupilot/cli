@@ -41,10 +41,15 @@ fn main() {
         output.push('\n');
     }
 
-    let out_dir = std::path::Path::new("../../packages/shared/types/generated");
+    // Internal codegen tool: emits the TypeScript bindings for these wire
+    // types. Output dir is taken from STATION_PROTOCOL_TS_OUT (the monorepo
+    // points it at packages/shared/types/generated); defaults to the current
+    // directory so a standalone run never writes outside the checkout.
+    let out_dir = std::env::var("STATION_PROTOCOL_TS_OUT").unwrap_or_else(|_| ".".to_string());
+    let out_dir = std::path::Path::new(&out_dir);
     std::fs::create_dir_all(out_dir).expect("create output dir");
     std::fs::write(out_dir.join("station-protocol.ts"), &output).expect("write TS types");
 
-    println!("Exported to packages/shared/types/generated/station-protocol.ts");
+    println!("Exported to {}", out_dir.join("station-protocol.ts").display());
     print!("{output}");
 }

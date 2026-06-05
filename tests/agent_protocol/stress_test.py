@@ -19,11 +19,9 @@ import threading
 import time
 from collections import defaultdict
 
+# Usage: stress_test.py <cli-binary> <procedure-dir>
 CLI = sys.argv[1]
-PROC_YAML = (
-    "/Users/julienbuteau/sources/tofupilot/.claude/worktrees/"
-    "cli-json-agent-protocol/apps/studio/procedures/demo-operator-ui"
-)
+PROC_YAML = sys.argv[2] if len(sys.argv) > 2 else "./procedure"
 
 RESULTS = []
 
