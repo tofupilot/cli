@@ -1,4 +1,4 @@
-# RunGetPhasesOutcome
+# PhaseGetOutcome
 
 Overall result of the phase execution. Use PASS when phase succeeds, FAIL when phase fails but execution completed successfully, ERROR when phase execution fails, SKIP when phase was not executed.
 
@@ -6,7 +6,7 @@ Overall result of the phase execution. Use PASS when phase succeeds, FAIL when p
 
 | Variant | Wire Value |
 | --- | --- |
-| `RunGetPhasesOutcome::Pass` | `PASS` |
-| `RunGetPhasesOutcome::Fail` | `FAIL` |
-| `RunGetPhasesOutcome::Skip` | `SKIP` |
-| `RunGetPhasesOutcome::Error` | `ERROR` |
+| `PhaseGetOutcome::Pass` | `PASS` |
+| `PhaseGetOutcome::Fail` | `FAIL` |
+| `PhaseGetOutcome::Skip` | `SKIP` |
+| `PhaseGetOutcome::Error` | `ERROR` |

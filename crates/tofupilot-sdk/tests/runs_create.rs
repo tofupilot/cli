@@ -14,7 +14,9 @@ async fn create_run_with_procedure_version() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -26,11 +28,7 @@ async fn create_run_with_procedure_version() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     assert!(fetched.procedure.version.is_some());
     assert_eq!("1.2.3", fetched.procedure.version.unwrap().tag);
@@ -42,7 +40,9 @@ async fn create_run_with_docstring() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -54,11 +54,7 @@ async fn create_run_with_docstring() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     match &fetched.docstring {
         NullableField::Value(v) => assert_eq!("Test docstring for verification", v),
@@ -72,7 +68,9 @@ async fn create_run_with_phases() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -89,20 +87,14 @@ async fn create_run_with_phases() {
                 .outcome(ValidatorsOutcome::Pass)
                 .measured_value(serde_json::json!(3.3))
                 .build()
-                .unwrap()
-            ])
+                .unwrap()])
             .build()
-            .unwrap()
-        ])
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.expect("phases should be present");
     assert!(!phases.is_empty());
@@ -117,7 +109,9 @@ async fn create_run_with_logs() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -144,16 +138,16 @@ async fn create_run_with_logs() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let logs = fetched.logs.expect("logs should be present");
     assert_eq!(2, logs.len());
-    assert!(logs.iter().any(|l| l.message == "Test started successfully"));
-    assert!(logs.iter().any(|l| l.message == "Voltage slightly above nominal"));
+    assert!(logs
+        .iter()
+        .any(|l| l.message == "Test started successfully"));
+    assert!(logs
+        .iter()
+        .any(|l| l.message == "Voltage slightly above nominal"));
 }
 
 #[tokio::test]
@@ -161,7 +155,9 @@ async fn create_run_empty_serial_number_fails() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let result = client().runs().create()
+    let result = client()
+        .runs()
+        .create()
         .serial_number("")
         .procedure_id(proc_id)
         .part_number(format!("PART-{}", uid()))
@@ -178,7 +174,9 @@ async fn create_run_empty_serial_number_fails() {
 async fn create_run_invalid_procedure_id_fails() {
     let now = chrono::Utc::now();
 
-    let result = client().runs().create()
+    let result = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{}", uid()))
         .procedure_id(uuid::Uuid::new_v4().to_string())
         .part_number(format!("PART-{}", uid()))
@@ -198,7 +196,9 @@ async fn create_run_with_legacy_limits() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -217,22 +217,16 @@ async fn create_run_with_legacy_limits() {
                 .lower_limit(10.0)
                 .upper_limit(40.0)
                 .build()
-                .unwrap()
-            ])
+                .unwrap()])
             .build()
-            .unwrap()
-        ])
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
     assert!(!created.id.is_empty());
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.expect("phases should be present");
     assert_eq!(1, phases.len());
@@ -245,7 +239,9 @@ async fn create_run_with_aggregations() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -265,14 +261,11 @@ async fn create_run_with_aggregations() {
                     .r#type("avg")
                     .value(serde_json::json!(72.3))
                     .build()
-                    .unwrap()
-                ])
+                    .unwrap()])
                 .build()
-                .unwrap()
-            ])
+                .unwrap()])
             .build()
-            .unwrap()
-        ])
+            .unwrap()])
         .send()
         .await
         .unwrap();
@@ -290,7 +283,9 @@ async fn create_run_with_sub_units() {
     let sub2 = format!("SUB2-{uid_val}");
 
     for sub in [&sub1, &sub2] {
-        client().runs().create()
+        client()
+            .runs()
+            .create()
             .serial_number(sub)
             .procedure_id(proc_id)
             .part_number(format!("SUB-PART-{uid_val}"))
@@ -302,7 +297,9 @@ async fn create_run_with_sub_units() {
             .unwrap();
     }
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -314,15 +311,12 @@ async fn create_run_with_sub_units() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let sub_units = fetched.sub_units.expect("sub_units should be present");
     assert_eq!(2, sub_units.len());
-    let sub_serials: Vec<String> = sub_units.iter()
+    let sub_serials: Vec<String> = sub_units
+        .iter()
         .map(|s| s.serial_number.to_lowercase())
         .collect();
     assert!(sub_serials.contains(&sub1.to_lowercase()));
@@ -335,7 +329,9 @@ async fn create_run_with_retry_count() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -353,9 +349,10 @@ async fn create_run_with_retry_count() {
                     .name("voltage")
                     .outcome(ValidatorsOutcome::Fail)
                     .measured_value(serde_json::json!(2.0))
-                    .build().unwrap()
-                ])
-                .build().unwrap(),
+                    .build()
+                    .unwrap()])
+                .build()
+                .unwrap(),
             RunCreatePhases::builder()
                 .name("retried_phase")
                 .outcome(PhasesOutcome::Pass)
@@ -366,19 +363,16 @@ async fn create_run_with_retry_count() {
                     .name("voltage")
                     .outcome(ValidatorsOutcome::Pass)
                     .measured_value(serde_json::json!(3.3))
-                    .build().unwrap()
-                ])
-                .build().unwrap(),
+                    .build()
+                    .unwrap()])
+                .build()
+                .unwrap(),
         ])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.unwrap();
     assert_eq!(2, phases.len());
@@ -392,7 +386,9 @@ async fn create_run_retry_count_defaults_to_zero() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -408,19 +404,15 @@ async fn create_run_retry_count_defaults_to_zero() {
                 .name("test_val")
                 .outcome(ValidatorsOutcome::Pass)
                 .measured_value(serde_json::json!(1.0))
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     assert_eq!(0, fetched.phases.unwrap()[0].retry_count);
 }
@@ -432,7 +424,9 @@ async fn create_run_legacy_limits_both_bounds() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -450,19 +444,15 @@ async fn create_run_legacy_limits_both_bounds() {
                 .measured_value(serde_json::json!(25.0))
                 .lower_limit(10.0)
                 .upper_limit(40.0)
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.unwrap();
     let validators = phases[0].measurements[0].validators.as_ref().unwrap();
@@ -476,7 +466,9 @@ async fn create_run_legacy_limits_only_lower() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -493,19 +485,15 @@ async fn create_run_legacy_limits_only_lower() {
                 .outcome(ValidatorsOutcome::Pass)
                 .measured_value(serde_json::json!(0.5))
                 .lower_limit(0.0)
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.unwrap();
     let validators = phases[0].measurements[0].validators.as_ref().unwrap();
@@ -519,7 +507,9 @@ async fn create_run_legacy_limits_only_upper() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -536,19 +526,15 @@ async fn create_run_legacy_limits_only_upper() {
                 .outcome(ValidatorsOutcome::Pass)
                 .measured_value(serde_json::json!(3.0))
                 .upper_limit(5.0)
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.unwrap();
     let validators = phases[0].measurements[0].validators.as_ref().unwrap();
@@ -562,7 +548,9 @@ async fn create_run_legacy_limits_failure() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -580,21 +568,19 @@ async fn create_run_legacy_limits_failure() {
                 .measured_value(serde_json::json!(50.0))
                 .lower_limit(0.0)
                 .upper_limit(10.0)
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
-    assert!(fetched.phases.unwrap()[0].measurements[0].validators.is_some());
+    assert!(fetched.phases.unwrap()[0].measurements[0]
+        .validators
+        .is_some());
 }
 
 #[tokio::test]
@@ -604,7 +590,9 @@ async fn create_run_legacy_limits_negative_values() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -622,10 +610,10 @@ async fn create_run_legacy_limits_negative_values() {
                 .measured_value(serde_json::json!(-5.0))
                 .lower_limit(-10.0)
                 .upper_limit(0.0)
-                .build().unwrap()
-            ])
-            .build().unwrap()
-        ])
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap()])
         .send()
         .await
         .unwrap();
@@ -638,11 +626,7 @@ async fn create_run_sub_units_without_sub_units() {
     let uid_val = uid();
     let created = create_test_run(&uid_val).await;
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let sub_units = fetched.sub_units.unwrap_or_default();
     assert!(sub_units.is_empty());
@@ -655,7 +639,9 @@ async fn create_run_sub_units_single() {
     let proc_id = procedure_id().await;
 
     let sub_serial = format!("SUB-{uid_val}");
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(&sub_serial)
         .procedure_id(proc_id)
         .part_number(format!("SUB-PART-{uid_val}"))
@@ -666,7 +652,9 @@ async fn create_run_sub_units_single() {
         .await
         .unwrap();
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -678,15 +666,14 @@ async fn create_run_sub_units_single() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let sub_units = fetched.sub_units.expect("sub_units should be present");
     assert_eq!(1, sub_units.len());
-    assert_eq!(sub_serial.to_lowercase(), sub_units[0].serial_number.to_lowercase());
+    assert_eq!(
+        sub_serial.to_lowercase(),
+        sub_units[0].serial_number.to_lowercase()
+    );
 }
 
 #[tokio::test]
@@ -695,7 +682,9 @@ async fn create_run_sub_units_empty_list() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -707,11 +696,7 @@ async fn create_run_sub_units_empty_list() {
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let sub_units = fetched.sub_units.unwrap_or_default();
     assert!(sub_units.is_empty());
@@ -723,7 +708,9 @@ async fn create_run_multiple_phases_measurements() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    let created = client().runs().create()
+    let created = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -738,34 +725,39 @@ async fn create_run_multiple_phases_measurements() {
                 .ended_at(now - chrono::Duration::minutes(7))
                 .measurements(vec![
                     RunCreateMeasurements::builder()
-                        .name("v1").outcome(ValidatorsOutcome::Pass)
-                        .measured_value(serde_json::json!(3.3)).build().unwrap(),
+                        .name("v1")
+                        .outcome(ValidatorsOutcome::Pass)
+                        .measured_value(serde_json::json!(3.3))
+                        .build()
+                        .unwrap(),
                     RunCreateMeasurements::builder()
-                        .name("v2").outcome(ValidatorsOutcome::Pass)
-                        .measured_value(serde_json::json!(5.0)).build().unwrap(),
+                        .name("v2")
+                        .outcome(ValidatorsOutcome::Pass)
+                        .measured_value(serde_json::json!(5.0))
+                        .build()
+                        .unwrap(),
                 ])
-                .build().unwrap(),
+                .build()
+                .unwrap(),
             RunCreatePhases::builder()
                 .name("phase_b")
                 .outcome(PhasesOutcome::Pass)
                 .started_at(now - chrono::Duration::minutes(6))
                 .ended_at(now - chrono::Duration::minutes(3))
-                .measurements(vec![
-                    RunCreateMeasurements::builder()
-                        .name("temp").outcome(ValidatorsOutcome::Pass)
-                        .measured_value(serde_json::json!(25.0)).build().unwrap(),
-                ])
-                .build().unwrap(),
+                .measurements(vec![RunCreateMeasurements::builder()
+                    .name("temp")
+                    .outcome(ValidatorsOutcome::Pass)
+                    .measured_value(serde_json::json!(25.0))
+                    .build()
+                    .unwrap()])
+                .build()
+                .unwrap(),
         ])
         .send()
         .await
         .unwrap();
 
-    let fetched = client().runs().get()
-        .id(&created.id)
-        .send()
-        .await
-        .unwrap();
+    let fetched = client().runs().get().id(&created.id).send().await.unwrap();
 
     let phases = fetched.phases.unwrap();
     assert_eq!(2, phases.len());

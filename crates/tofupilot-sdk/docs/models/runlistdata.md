@@ -10,7 +10,7 @@
 | `started_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the run execution started. |
 | `ended_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the run execution ended. |
 | `duration` | `String` | :heavy_check_mark: | ISO 8601 duration of the run (computed from started_at and ended_at). |
-| `outcome` | `RunGetOutcome` | :heavy_check_mark: | Final result of the run execution. |
+| `outcome` | `LogGetOutcome` | :heavy_check_mark: | Final result of the run execution. |
 | `docstring` | `NullableField<String>` | :heavy_minus_sign: | Additional notes or documentation about this test run. |
 | `created_by_user` | `NullableField<RunListCreatedByUser>` | :heavy_minus_sign: | User whose API key was used to create this run. Only returned if `all` or `created_by` is included. |
 | `created_by_station` | `NullableField<RunListCreatedByStation>` | :heavy_minus_sign: | Station whose API key was used to create this run. Only returned if `all` or `created_by` is included. |

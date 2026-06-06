@@ -18,6 +18,10 @@ pub mod batches;
 pub mod stations;
 pub mod users;
 pub mod imports;
+pub mod logs;
+pub mod phases;
+pub mod measurements;
+pub mod deployments;
 pub mod upload;
 
 pub use client::TofuPilot;

@@ -26,6 +26,11 @@ use tokio::sync::{broadcast, mpsc};
 use execution_engine::ui::UiRequestData;
 use station_protocol::{PhasePlan, RunMeasurement, StationEvent};
 use tofupilot_sdk::types::*;
+// SDK enum names track the alphabetically-first endpoint; alias back to the
+// names this crate uses (see connector/mod.rs).
+use tofupilot_sdk::types::{
+    LogGetOutcome as RunGetOutcome, PhaseGetOutcome as RunGetPhasesOutcome,
+};
 
 use super::super::agent_proto::{AgentProtoCtx, CliEvent};
 use super::super::queue::{upload_queued_run, QueuedRun};
@@ -1281,7 +1286,6 @@ dependencies = ["pytest>=8"]
         // ERROR at the SDK boundary because empty collection is a
         // procedure-config bug, not a genuine skipped run. The live
         // agent_proto wire still carries "SKIP" as a string.
-        use tofupilot_sdk::types::RunGetOutcome;
         assert!(matches!(parse_outcome("SKIP"), RunGetOutcome::Error));
         assert!(matches!(parse_outcome("PASS"), RunGetOutcome::Pass));
         assert!(matches!(parse_outcome("FAIL"), RunGetOutcome::Fail));

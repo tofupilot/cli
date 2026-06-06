@@ -15,6 +15,11 @@ use execution_engine::ui::UiRequestData;
 use execution_engine::EventSink;
 use station_protocol::{PhaseLogLine, PhasePlan, RunMeasurement, StationEvent, ValidatorResult};
 use tofupilot_sdk::types::*;
+// SDK enum names track the alphabetically-first endpoint; alias back to the
+// names this crate uses (see connector/mod.rs).
+use tofupilot_sdk::types::{
+    LogGetOutcome as RunGetOutcome, PhaseGetOutcome as RunGetPhasesOutcome,
+};
 
 use super::agent_proto::events::to_agent_ui_component;
 use super::agent_proto::{
@@ -915,8 +920,7 @@ fn stage_scope_str(s: &StageScope) -> &'static str {
     }
 }
 
-fn engine_outcome_to_sdk(outcome: &Outcome) -> tofupilot_sdk::types::RunGetOutcome {
-    use tofupilot_sdk::types::RunGetOutcome;
+fn engine_outcome_to_sdk(outcome: &Outcome) -> RunGetOutcome {
     match outcome {
         Outcome::Pass => RunGetOutcome::Pass,
         Outcome::Fail => RunGetOutcome::Fail,
@@ -928,8 +932,7 @@ fn engine_outcome_to_sdk(outcome: &Outcome) -> tofupilot_sdk::types::RunGetOutco
     }
 }
 
-fn engine_outcome_to_phase(outcome: &Outcome) -> tofupilot_sdk::types::RunGetPhasesOutcome {
-    use tofupilot_sdk::types::RunGetPhasesOutcome;
+fn engine_outcome_to_phase(outcome: &Outcome) -> RunGetPhasesOutcome {
     match outcome {
         Outcome::Pass => RunGetPhasesOutcome::Pass,
         Outcome::Skip => RunGetPhasesOutcome::Skip,
@@ -1101,7 +1104,7 @@ fn build_run_request(
         .run_outcome
         .as_ref()
         .map(engine_outcome_to_sdk)
-        .unwrap_or(tofupilot_sdk::types::RunGetOutcome::Error);
+        .unwrap_or(RunGetOutcome::Error);
 
     let started_at = data.start_time.unwrap_or_else(chrono::Utc::now);
     let ended_at = data.end_time.unwrap_or_else(chrono::Utc::now);

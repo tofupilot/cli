@@ -203,6 +203,26 @@ enum Commands {
         #[command(subcommand)]
         command: api::imports::ImportsCommand,
     },
+    /// Query test logs
+    Logs {
+        #[command(subcommand)]
+        command: api::logs::LogsCommand,
+    },
+    /// Query test phases
+    Phases {
+        #[command(subcommand)]
+        command: api::phases::PhasesCommand,
+    },
+    /// Query measurements
+    Measurements {
+        #[command(subcommand)]
+        command: api::measurements::MeasurementsCommand,
+    },
+    /// Manage deployments
+    Deployments {
+        #[command(subcommand)]
+        command: api::deployments::DeploymentsCommand,
+    },
     /// Show local station configuration
     Config,
     /// Manage the station daemon (systemd / launchd unit)
@@ -470,6 +490,16 @@ async fn main() {
         Some(Commands::Users { command }) => api_cmd!(api::users::execute, command, json_mode),
         Some(Commands::Imports { command }) => {
             api_cmd!(api::imports::execute, command, json_mode)
+        }
+        Some(Commands::Logs { command }) => api_cmd!(api::logs::execute, command, json_mode),
+        Some(Commands::Phases { command }) => {
+            api_cmd!(api::phases::execute, command, json_mode)
+        }
+        Some(Commands::Measurements { command }) => {
+            api_cmd!(api::measurements::execute, command, json_mode)
+        }
+        Some(Commands::Deployments { command }) => {
+            api_cmd!(api::deployments::execute, command, json_mode)
         }
         Some(Commands::Config) => match commands::db::open() {
             Ok(db) => match db.list_config() {

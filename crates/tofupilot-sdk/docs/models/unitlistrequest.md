@@ -12,7 +12,7 @@
 | `revision_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `batch_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `procedure_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
-| `outcomes` | `Option<Vec<RunGetOutcome>>` | :heavy_minus_sign: | N/A |
+| `outcomes` | `Option<Vec<LogGetOutcome>>` | :heavy_minus_sign: | N/A |
 | `started_after` | `Option<chrono::DateTime<chrono::Utc>>` | :heavy_minus_sign: | N/A |
 | `started_before` | `Option<chrono::DateTime<chrono::Utc>>` | :heavy_minus_sign: | N/A |
 | `latest_only` | `Option<bool>` | :heavy_minus_sign: | N/A |

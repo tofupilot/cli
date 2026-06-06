@@ -27,7 +27,7 @@ async fn main() -> tofupilot::Result<()> {
     let client = TofuPilot::new("your-api-key");
 
     let result = client.runs().create()
-        .outcome(RunGetOutcome::default())
+        .outcome(LogGetOutcome::default())
         .procedure_id("550e8400-e29b-41d4-a716-446655440000")
         .started_at(chrono::Utc::now())
         .ended_at(chrono::Utc::now())
@@ -44,7 +44,7 @@ async fn main() -> tofupilot::Result<()> {
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `outcome` | `RunGetOutcome` | :heavy_check_mark: | Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption. |
+| `outcome` | `LogGetOutcome` | :heavy_check_mark: | Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption. |
 | `procedure_id` | `String` | :heavy_check_mark: | Procedure ID. Create the procedure in the app first, then find the auto-generated ID on the procedure page. |
 | `deployment_id` | `NullableField<String>` | :heavy_minus_sign: | Deployment ID this run was executed from. Set by the CLI when running a pulled deployment so the run is linked back to the exact build it ran. Validated against the procedure; left null for ad-hoc or local runs. |
 | `procedure_version` | `NullableField<String>` | :heavy_minus_sign: | Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version. |
@@ -107,9 +107,11 @@ async fn main() -> tofupilot::Result<()> {
 | --- | --- | --- | --- |
 | `search_query` | `Option<String>` | :heavy_minus_sign: | N/A |
 | `ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
-| `outcomes` | `Option<Vec<RunGetOutcome>>` | :heavy_minus_sign: | N/A |
+| `outcomes` | `Option<Vec<LogGetOutcome>>` | :heavy_minus_sign: | N/A |
 | `procedure_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `procedure_versions` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `deployment_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `environments` | `Option<Vec<Environment>>` | :heavy_minus_sign: | N/A |
 | `serial_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `samples` | `Option<Vec<Sample>>` | :heavy_minus_sign: | N/A |
 | `part_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |

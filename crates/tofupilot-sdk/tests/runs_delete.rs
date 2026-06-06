@@ -4,7 +4,9 @@ use common::*;
 #[tokio::test]
 async fn delete_run_returns_ids() {
     let created = create_test_run(&uid()).await;
-    let deleted = client().runs().delete()
+    let deleted = client()
+        .runs()
+        .delete()
         .ids(vec![created.id.clone()])
         .send()
         .await
@@ -19,7 +21,9 @@ async fn delete_multiple_runs_returns_ids() {
     let run1 = create_test_run(&uid()).await;
     let run2 = create_test_run(&uid()).await;
 
-    let deleted = client().runs().delete()
+    let deleted = client()
+        .runs()
+        .delete()
         .ids(vec![run1.id.clone(), run2.id.clone()])
         .send()
         .await
@@ -32,7 +36,9 @@ async fn delete_multiple_runs_returns_ids() {
 
 #[tokio::test]
 async fn delete_run_nonexistent_returns_not_found() {
-    let result = client().runs().delete()
+    let result = client()
+        .runs()
+        .delete()
         .ids(vec![uuid::Uuid::new_v4().to_string()])
         .send()
         .await;

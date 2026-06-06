@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
-use tofupilot::TofuPilot;
 use tofupilot::config::ClientConfig;
 use tofupilot::types::*;
+use tofupilot::TofuPilot;
 
 static CLIENT: OnceLock<TofuPilot> = OnceLock::new();
 static PROCEDURE_ID: OnceLock<String> = OnceLock::new();
@@ -19,7 +19,9 @@ fn load_env() {
     if let Ok(contents) = std::fs::read_to_string(&env_path) {
         for line in contents.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
             if let Some(idx) = trimmed.find('=') {
                 let key = &trimmed[..idx];
                 let val = &trimmed[idx + 1..];
@@ -36,13 +38,10 @@ pub fn client() -> &'static TofuPilot {
         load_env();
         let api_key = std::env::var("TOFUPILOT_API_KEY_USER")
             .expect("TOFUPILOT_API_KEY_USER must be set — check clients/.env.local");
-        let url = std::env::var("TOFUPILOT_URL")
-            .unwrap_or_else(|_| "http://localhost:3000".to_string());
+        let url =
+            std::env::var("TOFUPILOT_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-        TofuPilot::with_config(
-            ClientConfig::new(api_key)
-                .base_url(format!("{}/api", url)),
-        )
+        TofuPilot::with_config(ClientConfig::new(api_key).base_url(format!("{}/api", url)))
     })
 }
 
@@ -52,7 +51,9 @@ pub async fn procedure_id() -> &'static str {
     }
 
     let c = client();
-    let proc = c.procedures().create()
+    let proc = c
+        .procedures()
+        .create()
         .name(format!("Rust Test {}", uid()))
         .send()
         .await
@@ -66,7 +67,8 @@ pub async fn create_test_run(uid_val: &str) -> RunCreateResponse {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    c.runs().create()
+    c.runs()
+        .create()
         .serial_number(format!("SN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))

@@ -200,6 +200,125 @@ impl std::fmt::Display for ImportStructuredImporter {
     }
 }
 
+/// Field to sort results by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogListSortBy {
+    #[serde(rename = "created_at")]
+    CreatedAt,
+    #[serde(rename = "level")]
+    Level,
+    #[serde(rename = "run_id")]
+    RunId,
+    #[serde(rename = "outcome")]
+    Outcome,
+}
+
+impl std::fmt::Display for LogListSortBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreatedAt => write!(f, "created_at"),
+            Self::Level => write!(f, "level"),
+            Self::RunId => write!(f, "run_id"),
+            Self::Outcome => write!(f, "outcome"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhaseListQueryParamSample {
+    #[serde(rename = "production")]
+    Production,
+    #[serde(rename = "golden")]
+    Golden,
+    #[serde(rename = "failing")]
+    Failing,
+}
+
+impl std::fmt::Display for PhaseListQueryParamSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Production => write!(f, "production"),
+            Self::Golden => write!(f, "golden"),
+            Self::Failing => write!(f, "failing"),
+        }
+    }
+}
+
+/// Field to sort results by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhaseListSortBy {
+    #[serde(rename = "started_at")]
+    StartedAt,
+    #[serde(rename = "duration")]
+    Duration,
+    #[serde(rename = "outcome")]
+    Outcome,
+    #[serde(rename = "serial_number")]
+    SerialNumber,
+    #[serde(rename = "phase_name")]
+    PhaseName,
+}
+
+impl std::fmt::Display for PhaseListSortBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StartedAt => write!(f, "started_at"),
+            Self::Duration => write!(f, "duration"),
+            Self::Outcome => write!(f, "outcome"),
+            Self::SerialNumber => write!(f, "serial_number"),
+            Self::PhaseName => write!(f, "phase_name"),
+        }
+    }
+}
+
+/// Field to sort results by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeasurementListSortBy {
+    #[serde(rename = "started_at")]
+    StartedAt,
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "outcome")]
+    Outcome,
+    #[serde(rename = "serial_number")]
+    SerialNumber,
+    #[serde(rename = "phase_name")]
+    PhaseName,
+    #[serde(rename = "measurement_name")]
+    MeasurementName,
+}
+
+impl std::fmt::Display for MeasurementListSortBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StartedAt => write!(f, "started_at"),
+            Self::Value => write!(f, "value"),
+            Self::Outcome => write!(f, "outcome"),
+            Self::SerialNumber => write!(f, "serial_number"),
+            Self::PhaseName => write!(f, "phase_name"),
+            Self::MeasurementName => write!(f, "measurement_name"),
+        }
+    }
+}
+
+/// Deployment mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeploymentGetDeploymentMode {
+    #[serde(rename = "sync")]
+    Sync,
+    #[serde(rename = "standalone")]
+    Standalone,
+}
+
+impl std::fmt::Display for DeploymentGetDeploymentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sync => write!(f, "sync"),
+            Self::Standalone => write!(f, "standalone"),
+        }
+    }
+}
+
 /// Git provider
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provider {
@@ -220,7 +339,7 @@ impl std::fmt::Display for Provider {
 
 /// Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunGetOutcome {
+pub enum LogGetOutcome {
     #[serde(rename = "PASS")]
     Pass,
     #[serde(rename = "FAIL")]
@@ -233,7 +352,7 @@ pub enum RunGetOutcome {
     Aborted,
 }
 
-impl std::fmt::Display for RunGetOutcome {
+impl std::fmt::Display for LogGetOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pass => write!(f, "PASS"),
@@ -247,7 +366,7 @@ impl std::fmt::Display for RunGetOutcome {
 
 /// Overall result of the phase execution. Use PASS when phase succeeds, FAIL when phase fails but execution completed successfully, ERROR when phase execution fails, SKIP when phase was not executed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunGetPhasesOutcome {
+pub enum PhaseGetOutcome {
     #[serde(rename = "PASS")]
     Pass,
     #[serde(rename = "FAIL")]
@@ -258,7 +377,7 @@ pub enum RunGetPhasesOutcome {
     Error,
 }
 
-impl std::fmt::Display for RunGetPhasesOutcome {
+impl std::fmt::Display for PhaseGetOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pass => write!(f, "PASS"),
@@ -317,6 +436,27 @@ impl std::fmt::Display for Level {
     }
 }
 
+/// Deployment environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Environment {
+    #[serde(rename = "production")]
+    Production,
+    #[serde(rename = "preview")]
+    Preview,
+    #[serde(rename = "development")]
+    Development,
+}
+
+impl std::fmt::Display for Environment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Production => write!(f, "production"),
+            Self::Preview => write!(f, "preview"),
+            Self::Development => write!(f, "development"),
+        }
+    }
+}
+
 /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Sample {
@@ -349,6 +489,78 @@ impl std::fmt::Display for ListSortOrder {
         match self {
             Self::Asc => write!(f, "asc"),
             Self::Desc => write!(f, "desc"),
+        }
+    }
+}
+
+/// Value type of the measurement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeasurementType {
+    #[serde(rename = "numeric")]
+    Numeric,
+    #[serde(rename = "boolean")]
+    Boolean,
+    #[serde(rename = "string")]
+    String,
+    #[serde(rename = "multidimensional")]
+    Multidimensional,
+    #[serde(rename = "empty")]
+    Empty,
+    #[serde(rename = "json")]
+    Json,
+}
+
+impl std::fmt::Display for MeasurementType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Numeric => write!(f, "numeric"),
+            Self::Boolean => write!(f, "boolean"),
+            Self::String => write!(f, "string"),
+            Self::Multidimensional => write!(f, "multidimensional"),
+            Self::Empty => write!(f, "empty"),
+            Self::Json => write!(f, "json"),
+        }
+    }
+}
+
+/// Build status of the deployment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeploymentGetStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "building")]
+    Building,
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+impl std::fmt::Display for DeploymentGetStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Building => write!(f, "building"),
+            Self::Ready => write!(f, "ready"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// How the deployment was triggered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Trigger {
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "manual")]
+    Manual,
+}
+
+impl std::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Manual => write!(f, "manual"),
         }
     }
 }
@@ -752,7 +964,7 @@ pub struct ProcedureGetRecentRuns {
     /// ISO 8601 timestamp when the run started.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Run outcome.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// Unit information.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<ProcedureGetUnit>,
@@ -770,7 +982,7 @@ impl ProcedureGetRecentRuns {
 pub struct ProcedureGetRecentRunsBuilder {
     id: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
-    outcome: Option<RunGetOutcome>,
+    outcome: Option<LogGetOutcome>,
     unit: Option<ProcedureGetUnit>,
 }
 
@@ -794,7 +1006,7 @@ impl ProcedureGetRecentRunsBuilder {
     /// Set the `outcome` field.
     ///
     /// Run outcome.
-    pub fn outcome(mut self, value: impl Into<RunGetOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -2686,7 +2898,7 @@ pub struct RunCreatePhases {
     /// Name identifier for the test phase. Each phase should have a descriptive name that identifies the specific stage of testing being performed. Analytics at phase level are computed using this name as unique identifier.
     pub name: String,
     /// Overall result of the phase execution. Use PASS when phase succeeds, FAIL when phase fails but execution completed successfully, ERROR when phase execution fails, SKIP when phase was not executed.
-    pub outcome: RunGetPhasesOutcome,
+    pub outcome: PhaseGetOutcome,
     /// ISO 8601 timestamp when the phase execution began.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ISO 8601 timestamp when the phase execution completed.
@@ -2713,7 +2925,7 @@ impl RunCreatePhases {
 #[derive(Debug, Default)]
 pub struct RunCreatePhasesBuilder {
     name: Option<String>,
-    outcome: Option<RunGetPhasesOutcome>,
+    outcome: Option<PhaseGetOutcome>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     ended_at: Option<chrono::DateTime<chrono::Utc>>,
     docstring: NullableField<String>,
@@ -2733,7 +2945,7 @@ impl RunCreatePhasesBuilder {
     /// Set the `outcome` field.
     ///
     /// Overall result of the phase execution. Use PASS when phase succeeds, FAIL when phase fails but execution completed successfully, ERROR when phase execution fails, SKIP when phase was not executed.
-    pub fn outcome(mut self, value: impl Into<RunGetPhasesOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<PhaseGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -2825,7 +3037,7 @@ pub struct RunCreateLogs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunCreateRequest {
     /// Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// Procedure ID. Create the procedure in the app first, then find the auto-generated ID on the procedure page.
     pub procedure_id: String,
     /// Deployment ID this run was executed from. Set by the CLI when running a pulled deployment so the run is linked back to the exact build it ran. Validated against the procedure; left null for ad-hoc or local runs.
@@ -2882,7 +3094,7 @@ impl RunCreateRequest {
 /// Builder for [`RunCreateRequest`].
 #[derive(Debug, Default)]
 pub struct RunCreateRequestBuilder {
-    outcome: Option<RunGetOutcome>,
+    outcome: Option<LogGetOutcome>,
     procedure_id: Option<String>,
     deployment_id: NullableField<String>,
     procedure_version: NullableField<String>,
@@ -2905,7 +3117,7 @@ impl RunCreateRequestBuilder {
     /// Set the `outcome` field.
     ///
     /// Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption.
-    pub fn outcome(mut self, value: impl Into<RunGetOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -3220,11 +3432,15 @@ pub struct RunListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcomes: Option<Vec<RunGetOutcome>>,
+    pub outcomes: Option<Vec<LogGetOutcome>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure_versions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<Environment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_numbers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3288,9 +3504,11 @@ impl RunListRequest {
 pub struct RunListRequestBuilder {
     search_query: Option<String>,
     ids: Option<Vec<String>>,
-    outcomes: Option<Vec<RunGetOutcome>>,
+    outcomes: Option<Vec<LogGetOutcome>>,
     procedure_ids: Option<Vec<String>>,
     procedure_versions: Option<Vec<String>>,
+    deployment_ids: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
     part_numbers: Option<Vec<String>>,
@@ -3329,7 +3547,7 @@ impl RunListRequestBuilder {
     }
 
     /// Set the `outcomes` field.
-    pub fn outcomes(mut self, value: impl Into<Vec<RunGetOutcome>>) -> Self {
+    pub fn outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
         self.outcomes = Some(value.into());
         self
     }
@@ -3343,6 +3561,18 @@ impl RunListRequestBuilder {
     /// Set the `procedure_versions` field.
     pub fn procedure_versions(mut self, value: impl Into<Vec<String>>) -> Self {
         self.procedure_versions = Some(value.into());
+        self
+    }
+
+    /// Set the `deployment_ids` field.
+    pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` field.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
         self
     }
 
@@ -3496,6 +3726,8 @@ impl RunListRequestBuilder {
             outcomes: self.outcomes,
             procedure_ids: self.procedure_ids,
             procedure_versions: self.procedure_versions,
+            deployment_ids: self.deployment_ids,
+            environments: self.environments,
             serial_numbers: self.serial_numbers,
             samples: self.samples,
             part_numbers: self.part_numbers,
@@ -3872,7 +4104,7 @@ pub struct RunListData {
     /// ISO 8601 duration of the run (computed from started_at and ended_at).
     pub duration: String,
     /// Final result of the run execution.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// Additional notes or documentation about this test run.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub docstring: NullableField<String>,
@@ -3909,7 +4141,7 @@ pub struct RunListDataBuilder {
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     ended_at: Option<chrono::DateTime<chrono::Utc>>,
     duration: Option<String>,
-    outcome: Option<RunGetOutcome>,
+    outcome: Option<LogGetOutcome>,
     docstring: NullableField<String>,
     created_by_user: NullableField<RunListCreatedByUser>,
     created_by_station: NullableField<RunListCreatedByStation>,
@@ -3963,7 +4195,7 @@ impl RunListDataBuilder {
     /// Set the `outcome` field.
     ///
     /// Final result of the run execution.
-    pub fn outcome(mut self, value: impl Into<RunGetOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -5585,7 +5817,7 @@ pub struct RunGetPhases {
     /// Phase name.
     pub name: String,
     /// Phase execution result.
-    pub outcome: RunGetPhasesOutcome,
+    pub outcome: PhaseGetOutcome,
     /// ISO 8601 timestamp when the phase started.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ISO 8601 timestamp when the phase ended.
@@ -5614,7 +5846,7 @@ impl RunGetPhases {
 pub struct RunGetPhasesBuilder {
     id: Option<String>,
     name: Option<String>,
-    outcome: Option<RunGetPhasesOutcome>,
+    outcome: Option<PhaseGetOutcome>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     ended_at: Option<chrono::DateTime<chrono::Utc>>,
     duration: Option<String>,
@@ -5643,7 +5875,7 @@ impl RunGetPhasesBuilder {
     /// Set the `outcome` field.
     ///
     /// Phase execution result.
-    pub fn outcome(mut self, value: impl Into<RunGetPhasesOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<PhaseGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -5933,7 +6165,7 @@ pub struct RunGetResponse {
     /// ISO 8601 duration of the run (computed from started_at and ended_at).
     pub duration: String,
     /// Final result of the run execution.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// Additional notes or documentation about this test run.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub docstring: NullableField<String>,
@@ -6361,7 +6593,7 @@ pub struct UnitListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcomes: Option<Vec<RunGetOutcome>>,
+    pub outcomes: Option<Vec<LogGetOutcome>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_after: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6420,7 +6652,7 @@ pub struct UnitListRequestBuilder {
     revision_numbers: Option<Vec<String>>,
     batch_numbers: Option<Vec<String>>,
     procedure_ids: Option<Vec<String>>,
-    outcomes: Option<Vec<RunGetOutcome>>,
+    outcomes: Option<Vec<LogGetOutcome>>,
     started_after: Option<chrono::DateTime<chrono::Utc>>,
     started_before: Option<chrono::DateTime<chrono::Utc>>,
     latest_only: Option<bool>,
@@ -6484,7 +6716,7 @@ impl UnitListRequestBuilder {
     }
 
     /// Set the `outcomes` field.
-    pub fn outcomes(mut self, value: impl Into<Vec<RunGetOutcome>>) -> Self {
+    pub fn outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
         self.outcomes = Some(value.into());
         self
     }
@@ -6756,7 +6988,7 @@ pub struct UnitListLastRun {
     /// Unique identifier for the run.
     pub id: String,
     /// Final result of the test run execution.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// ISO 8601 timestamp when the run execution started.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ISO 8601 timestamp when the run execution completed. Null if still running.
@@ -6778,7 +7010,7 @@ impl UnitListLastRun {
 #[derive(Debug, Default)]
 pub struct UnitListLastRunBuilder {
     id: Option<String>,
-    outcome: Option<RunGetOutcome>,
+    outcome: Option<LogGetOutcome>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     ended_at: Option<chrono::DateTime<chrono::Utc>>,
     procedure: Option<UnitListProcedure>,
@@ -6796,7 +7028,7 @@ impl UnitListLastRunBuilder {
     /// Set the `outcome` field.
     ///
     /// Final result of the test run execution.
-    pub fn outcome(mut self, value: impl Into<RunGetOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -7572,7 +7804,7 @@ pub struct UnitGetCreatedDuring {
     /// ISO 8601 duration of the run (computed from started_at and ended_at).
     pub duration: String,
     /// Final result of the run execution.
-    pub outcome: RunGetOutcome,
+    pub outcome: LogGetOutcome,
     /// Procedure information.
     pub procedure: UnitGetProcedure,
 }
@@ -10449,7 +10681,7 @@ pub struct ImportTabularOutcome1 {
     pub column: String,
     #[serde(rename = "valueMap")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value_map: Option<std::collections::HashMap<String, RunGetOutcome>>,
+    pub value_map: Option<std::collections::HashMap<String, LogGetOutcome>>,
 }
 
 impl ImportTabularOutcome1 {
@@ -10463,7 +10695,7 @@ impl ImportTabularOutcome1 {
 #[derive(Debug, Default)]
 pub struct ImportTabularOutcome1Builder {
     column: Option<String>,
-    value_map: Option<std::collections::HashMap<String, RunGetOutcome>>,
+    value_map: Option<std::collections::HashMap<String, LogGetOutcome>>,
 }
 
 impl ImportTabularOutcome1Builder {
@@ -10474,7 +10706,7 @@ impl ImportTabularOutcome1Builder {
     }
 
     /// Set the `valueMap` field.
-    pub fn value_map(mut self, value: impl Into<std::collections::HashMap<String, RunGetOutcome>>) -> Self {
+    pub fn value_map(mut self, value: impl Into<std::collections::HashMap<String, LogGetOutcome>>) -> Self {
         self.value_map = Some(value.into());
         self
     }
@@ -10491,7 +10723,7 @@ impl ImportTabularOutcome1Builder {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportTabularOutcome2 {
-    pub value: RunGetOutcome,
+    pub value: LogGetOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10929,7 +11161,7 @@ pub struct ImportTabularPhases {
     pub ended_column: Option<String>,
     #[serde(rename = "valueMap")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value_map: Option<std::collections::HashMap<String, RunGetPhasesOutcome>>,
+    pub value_map: Option<std::collections::HashMap<String, PhaseGetOutcome>>,
 }
 
 impl ImportTabularPhases {
@@ -10946,7 +11178,7 @@ pub struct ImportTabularPhasesBuilder {
     outcome_column: Option<String>,
     started_column: Option<String>,
     ended_column: Option<String>,
-    value_map: Option<std::collections::HashMap<String, RunGetPhasesOutcome>>,
+    value_map: Option<std::collections::HashMap<String, PhaseGetOutcome>>,
 }
 
 impl ImportTabularPhasesBuilder {
@@ -10975,7 +11207,7 @@ impl ImportTabularPhasesBuilder {
     }
 
     /// Set the `valueMap` field.
-    pub fn value_map(mut self, value: impl Into<std::collections::HashMap<String, RunGetPhasesOutcome>>) -> Self {
+    pub fn value_map(mut self, value: impl Into<std::collections::HashMap<String, PhaseGetOutcome>>) -> Self {
         self.value_map = Some(value.into());
         self
     }
@@ -11260,5 +11492,4854 @@ pub struct ImportTabularResponse {
     pub id: String,
     /// ID of the file import record that links this run to the uploaded file.
     pub file_import_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LogListRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<Level>>,
+    /// Filter logs with timestamp after this date (inclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_after: Option<chrono::DateTime<chrono::Utc>>,
+    /// Filter logs with timestamp before this date (inclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_before: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_outcomes: Option<Vec<LogGetOutcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_versions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<Environment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<Sample>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_station_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_ids: Option<Vec<String>>,
+    /// Field to sort results by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<LogListSortBy>,
+    /// Sort order direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<ListSortOrder>,
+    /// Maximum number of logs to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+}
+
+impl LogListRequest {
+    /// Create a builder for this type.
+    pub fn builder() -> LogListRequestBuilder {
+        LogListRequestBuilder::default()
+    }
+}
+
+/// Builder for [`LogListRequest`].
+#[derive(Debug, Default)]
+pub struct LogListRequestBuilder {
+    procedure_ids: Option<Vec<String>>,
+    search_query: Option<String>,
+    levels: Option<Vec<Level>>,
+    timestamp_after: Option<chrono::DateTime<chrono::Utc>>,
+    timestamp_before: Option<chrono::DateTime<chrono::Utc>>,
+    source_files: Option<Vec<String>>,
+    run_ids: Option<Vec<String>>,
+    run_outcomes: Option<Vec<LogGetOutcome>>,
+    procedure_versions: Option<Vec<String>>,
+    deployment_ids: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
+    serial_numbers: Option<Vec<String>>,
+    part_numbers: Option<Vec<String>>,
+    revision_numbers: Option<Vec<String>>,
+    batch_numbers: Option<Vec<String>>,
+    samples: Option<Vec<Sample>>,
+    created_by_station_ids: Option<Vec<String>>,
+    created_by_user_ids: Option<Vec<String>>,
+    sort_by: Option<LogListSortBy>,
+    sort_order: Option<ListSortOrder>,
+    limit: Option<i64>,
+    cursor: Option<i64>,
+}
+
+impl LogListRequestBuilder {
+    /// Set the `procedure_ids` field.
+    pub fn procedure_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.procedure_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `search_query` field.
+    pub fn search_query(mut self, value: impl Into<String>) -> Self {
+        self.search_query = Some(value.into());
+        self
+    }
+
+    /// Set the `levels` field.
+    pub fn levels(mut self, value: impl Into<Vec<Level>>) -> Self {
+        self.levels = Some(value.into());
+        self
+    }
+
+    /// Set the `timestamp_after` field.
+    ///
+    /// Filter logs with timestamp after this date (inclusive).
+    pub fn timestamp_after(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.timestamp_after = Some(value.into());
+        self
+    }
+
+    /// Set the `timestamp_before` field.
+    ///
+    /// Filter logs with timestamp before this date (inclusive).
+    pub fn timestamp_before(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.timestamp_before = Some(value.into());
+        self
+    }
+
+    /// Set the `source_files` field.
+    pub fn source_files(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.source_files = Some(value.into());
+        self
+    }
+
+    /// Set the `run_ids` field.
+    pub fn run_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.run_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `run_outcomes` field.
+    pub fn run_outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
+        self.run_outcomes = Some(value.into());
+        self
+    }
+
+    /// Set the `procedure_versions` field.
+    pub fn procedure_versions(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.procedure_versions = Some(value.into());
+        self
+    }
+
+    /// Set the `deployment_ids` field.
+    pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` field.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_numbers` field.
+    pub fn serial_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.serial_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `part_numbers` field.
+    pub fn part_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.part_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `revision_numbers` field.
+    pub fn revision_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.revision_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `batch_numbers` field.
+    pub fn batch_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.batch_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `samples` field.
+    pub fn samples(mut self, value: impl Into<Vec<Sample>>) -> Self {
+        self.samples = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_station_ids` field.
+    pub fn created_by_station_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_station_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_user_ids` field.
+    pub fn created_by_user_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_user_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_by` field.
+    ///
+    /// Field to sort results by.
+    pub fn sort_by(mut self, value: impl Into<LogListSortBy>) -> Self {
+        self.sort_by = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_order` field.
+    ///
+    /// Sort order direction.
+    pub fn sort_order(mut self, value: impl Into<ListSortOrder>) -> Self {
+        self.sort_order = Some(value.into());
+        self
+    }
+
+    /// Set the `limit` field.
+    ///
+    /// Maximum number of logs to return.
+    pub fn limit(mut self, value: impl Into<i64>) -> Self {
+        self.limit = Some(value.into());
+        self
+    }
+
+    /// Set the `cursor` field.
+    pub fn cursor(mut self, value: impl Into<i64>) -> Self {
+        self.cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<LogListRequest, String> {
+        Ok(LogListRequest {
+            procedure_ids: self.procedure_ids,
+            search_query: self.search_query,
+            levels: self.levels,
+            timestamp_after: self.timestamp_after,
+            timestamp_before: self.timestamp_before,
+            source_files: self.source_files,
+            run_ids: self.run_ids,
+            run_outcomes: self.run_outcomes,
+            procedure_versions: self.procedure_versions,
+            deployment_ids: self.deployment_ids,
+            environments: self.environments,
+            serial_numbers: self.serial_numbers,
+            part_numbers: self.part_numbers,
+            revision_numbers: self.revision_numbers,
+            batch_numbers: self.batch_numbers,
+            samples: self.samples,
+            created_by_station_ids: self.created_by_station_ids,
+            created_by_user_ids: self.created_by_user_ids,
+            sort_by: self.sort_by,
+            sort_order: self.sort_order,
+            limit: self.limit,
+            cursor: self.cursor,
+        })
+    }
+}
+
+/// Run information for this log entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListRun {
+    /// ID of the run this log belongs to.
+    pub id: String,
+    /// Outcome of the run.
+    pub outcome: LogGetOutcome,
+    /// When the run started.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Unit information for this log entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListUnit {
+    /// ID of the unit tested.
+    pub id: String,
+    /// Serial number of the unit.
+    pub serial_number: String,
+}
+
+/// Procedure information for this log entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListProcedure {
+    /// ID of the procedure.
+    pub id: String,
+    /// Name of the procedure.
+    pub name: String,
+}
+
+/// User who created this log. Null if created by a station or system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListCreatedByUser {
+    /// Unique identifier for the user.
+    pub id: String,
+    /// Display name of the user who created this log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Email of the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl LogListCreatedByUser {
+    /// Create a builder for this type.
+    pub fn builder() -> LogListCreatedByUserBuilder {
+        LogListCreatedByUserBuilder::default()
+    }
+}
+
+/// Builder for [`LogListCreatedByUser`].
+#[derive(Debug, Default)]
+pub struct LogListCreatedByUserBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    email: Option<String>,
+}
+
+impl LogListCreatedByUserBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the user.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    ///
+    /// Display name of the user who created this log.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `email` field.
+    ///
+    /// Email of the user.
+    pub fn email(mut self, value: impl Into<String>) -> Self {
+        self.email = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<LogListCreatedByUser, String> {
+        Ok(LogListCreatedByUser {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name,
+            email: self.email,
+        })
+    }
+}
+
+/// Station that created this log. Null if created by a user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListCreatedByStation {
+    /// Unique identifier for the station.
+    pub id: String,
+    /// Name of the station that created this log.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListData {
+    /// Unique identifier for the log entry.
+    pub id: String,
+    /// Log level indicating the severity.
+    pub level: Level,
+    /// The log message content.
+    pub message: String,
+    /// ISO 8601 timestamp when the log was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Source file where the log originated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// Line number in the source file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<i64>,
+    /// Run information for this log entry.
+    pub run: LogListRun,
+    /// Unit information for this log entry.
+    pub unit: LogListUnit,
+    /// Procedure information for this log entry.
+    pub procedure: LogListProcedure,
+    /// User who created this log. Null if created by a station or system.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub created_by_user: NullableField<LogListCreatedByUser>,
+    /// Station that created this log. Null if created by a user.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub created_by_station: NullableField<LogListCreatedByStation>,
+}
+
+impl LogListData {
+    /// Create a builder for this type.
+    pub fn builder() -> LogListDataBuilder {
+        LogListDataBuilder::default()
+    }
+}
+
+/// Builder for [`LogListData`].
+#[derive(Debug, Default)]
+pub struct LogListDataBuilder {
+    id: Option<String>,
+    level: Option<Level>,
+    message: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    source_file: Option<String>,
+    line_number: Option<i64>,
+    run: Option<LogListRun>,
+    unit: Option<LogListUnit>,
+    procedure: Option<LogListProcedure>,
+    created_by_user: NullableField<LogListCreatedByUser>,
+    created_by_station: NullableField<LogListCreatedByStation>,
+}
+
+impl LogListDataBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the log entry.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `level` field.
+    ///
+    /// Log level indicating the severity.
+    pub fn level(mut self, value: impl Into<Level>) -> Self {
+        self.level = Some(value.into());
+        self
+    }
+
+    /// Set the `message` field.
+    ///
+    /// The log message content.
+    pub fn message(mut self, value: impl Into<String>) -> Self {
+        self.message = Some(value.into());
+        self
+    }
+
+    /// Set the `created_at` field.
+    ///
+    /// ISO 8601 timestamp when the log was created.
+    pub fn created_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.created_at = Some(value.into());
+        self
+    }
+
+    /// Set the `source_file` field.
+    ///
+    /// Source file where the log originated.
+    pub fn source_file(mut self, value: impl Into<String>) -> Self {
+        self.source_file = Some(value.into());
+        self
+    }
+
+    /// Set the `line_number` field.
+    ///
+    /// Line number in the source file.
+    pub fn line_number(mut self, value: impl Into<i64>) -> Self {
+        self.line_number = Some(value.into());
+        self
+    }
+
+    /// Set the `run` field.
+    ///
+    /// Run information for this log entry.
+    pub fn run(mut self, value: impl Into<LogListRun>) -> Self {
+        self.run = Some(value.into());
+        self
+    }
+
+    /// Set the `unit` field.
+    ///
+    /// Unit information for this log entry.
+    pub fn unit(mut self, value: impl Into<LogListUnit>) -> Self {
+        self.unit = Some(value.into());
+        self
+    }
+
+    /// Set the `procedure` field.
+    ///
+    /// Procedure information for this log entry.
+    pub fn procedure(mut self, value: impl Into<LogListProcedure>) -> Self {
+        self.procedure = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_user` field.
+    ///
+    /// User who created this log. Null if created by a station or system.
+    pub fn created_by_user(mut self, value: impl Into<LogListCreatedByUser>) -> Self {
+        self.created_by_user = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `created_by_user` to null.
+    pub fn created_by_user_null(mut self) -> Self {
+        self.created_by_user = NullableField::Null;
+        self
+    }
+
+    /// Set the `created_by_station` field.
+    ///
+    /// Station that created this log. Null if created by a user.
+    pub fn created_by_station(mut self, value: impl Into<LogListCreatedByStation>) -> Self {
+        self.created_by_station = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `created_by_station` to null.
+    pub fn created_by_station_null(mut self) -> Self {
+        self.created_by_station = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<LogListData, String> {
+        Ok(LogListData {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            level: self.level
+                .ok_or_else(|| "missing required field: level".to_string())?,
+            message: self.message
+                .ok_or_else(|| "missing required field: message".to_string())?,
+            created_at: self.created_at
+                .ok_or_else(|| "missing required field: created_at".to_string())?,
+            source_file: self.source_file,
+            line_number: self.line_number,
+            run: self.run
+                .ok_or_else(|| "missing required field: run".to_string())?,
+            unit: self.unit
+                .ok_or_else(|| "missing required field: unit".to_string())?,
+            procedure: self.procedure
+                .ok_or_else(|| "missing required field: procedure".to_string())?,
+            created_by_user: self.created_by_user,
+            created_by_station: self.created_by_station,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListMeta {
+    /// Whether there are more results available for pagination.
+    pub has_more: bool,
+    /// Cursor value to fetch the next page of results. Use this value as the cursor parameter in the next request. Null if no more results available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+}
+
+impl LogListMeta {
+    /// Create a builder for this type.
+    pub fn builder() -> LogListMetaBuilder {
+        LogListMetaBuilder::default()
+    }
+}
+
+/// Builder for [`LogListMeta`].
+#[derive(Debug, Default)]
+pub struct LogListMetaBuilder {
+    has_more: Option<bool>,
+    next_cursor: Option<i64>,
+}
+
+impl LogListMetaBuilder {
+    /// Set the `has_more` field.
+    ///
+    /// Whether there are more results available for pagination.
+    pub fn has_more(mut self, value: impl Into<bool>) -> Self {
+        self.has_more = Some(value.into());
+        self
+    }
+
+    /// Set the `next_cursor` field.
+    ///
+    /// Cursor value to fetch the next page of results. Use this value as the cursor parameter in the next request. Null if no more results available.
+    pub fn next_cursor(mut self, value: impl Into<i64>) -> Self {
+        self.next_cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<LogListMeta, String> {
+        Ok(LogListMeta {
+            has_more: self.has_more
+                .ok_or_else(|| "missing required field: has_more".to_string())?,
+            next_cursor: self.next_cursor,
+        })
+    }
+}
+
+/// Logs retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogListResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<LogListData>,
+    pub meta: LogListMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetRequest {
+    /// Unique identifier for the log entry.
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetRun {
+    pub id: String,
+    pub outcome: LogGetOutcome,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetUnit {
+    pub id: String,
+    pub serial_number: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetProcedure {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetCreatedByUser {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl LogGetCreatedByUser {
+    /// Create a builder for this type.
+    pub fn builder() -> LogGetCreatedByUserBuilder {
+        LogGetCreatedByUserBuilder::default()
+    }
+}
+
+/// Builder for [`LogGetCreatedByUser`].
+#[derive(Debug, Default)]
+pub struct LogGetCreatedByUserBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    email: Option<String>,
+}
+
+impl LogGetCreatedByUserBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `email` field.
+    pub fn email(mut self, value: impl Into<String>) -> Self {
+        self.email = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<LogGetCreatedByUser, String> {
+        Ok(LogGetCreatedByUser {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name,
+            email: self.email,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetCreatedByStation {
+    pub id: String,
+    pub name: String,
+}
+
+/// Log retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogGetResponse {
+    pub id: String,
+    pub level: Level,
+    pub message: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<i64>,
+    pub run: LogGetRun,
+    pub unit: LogGetUnit,
+    pub procedure: LogGetProcedure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user: Option<LogGetCreatedByUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_station: Option<LogGetCreatedByStation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseListRequest {
+    /// Procedure to list phases for. Required: phases are scoped to a single procedure.
+    pub procedure_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<Vec<PhaseGetOutcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_before: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_retries: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_outcomes: Option<Vec<LogGetOutcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_versions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<Environment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_station_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<PhaseListQueryParamSample>>,
+    /// Field to sort results by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<PhaseListSortBy>,
+    /// Sort order direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<ListSortOrder>,
+    /// Maximum number of phases to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+}
+
+impl PhaseListRequest {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseListRequestBuilder {
+        PhaseListRequestBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseListRequest`].
+#[derive(Debug, Default)]
+pub struct PhaseListRequestBuilder {
+    procedure_id: Option<String>,
+    names: Option<Vec<String>>,
+    outcomes: Option<Vec<PhaseGetOutcome>>,
+    started_after: Option<chrono::DateTime<chrono::Utc>>,
+    started_before: Option<chrono::DateTime<chrono::Utc>>,
+    exclude_retries: Option<bool>,
+    run_outcomes: Option<Vec<LogGetOutcome>>,
+    ids: Option<Vec<String>>,
+    duration_min: Option<String>,
+    duration_max: Option<String>,
+    deployment_ids: Option<Vec<String>>,
+    procedure_versions: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
+    operated_by_ids: Option<Vec<String>>,
+    created_by_station_ids: Option<Vec<String>>,
+    created_by_user_ids: Option<Vec<String>>,
+    serial_numbers: Option<Vec<String>>,
+    part_numbers: Option<Vec<String>>,
+    revision_numbers: Option<Vec<String>>,
+    batch_numbers: Option<Vec<String>>,
+    samples: Option<Vec<PhaseListQueryParamSample>>,
+    sort_by: Option<PhaseListSortBy>,
+    sort_order: Option<ListSortOrder>,
+    limit: Option<i64>,
+    cursor: Option<i64>,
+}
+
+impl PhaseListRequestBuilder {
+    /// Set the `procedure_id` field.
+    ///
+    /// Procedure to list phases for. Required: phases are scoped to a single procedure.
+    pub fn procedure_id(mut self, value: impl Into<String>) -> Self {
+        self.procedure_id = Some(value.into());
+        self
+    }
+
+    /// Set the `names` field.
+    pub fn names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.names = Some(value.into());
+        self
+    }
+
+    /// Set the `outcomes` field.
+    pub fn outcomes(mut self, value: impl Into<Vec<PhaseGetOutcome>>) -> Self {
+        self.outcomes = Some(value.into());
+        self
+    }
+
+    /// Set the `started_after` field.
+    pub fn started_after(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_after = Some(value.into());
+        self
+    }
+
+    /// Set the `started_before` field.
+    pub fn started_before(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_before = Some(value.into());
+        self
+    }
+
+    /// Set the `exclude_retries` field.
+    pub fn exclude_retries(mut self, value: impl Into<bool>) -> Self {
+        self.exclude_retries = Some(value.into());
+        self
+    }
+
+    /// Set the `run_outcomes` field.
+    pub fn run_outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
+        self.run_outcomes = Some(value.into());
+        self
+    }
+
+    /// Set the `ids` field.
+    pub fn ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.ids = Some(value.into());
+        self
+    }
+
+    /// Set the `duration_min` field.
+    pub fn duration_min(mut self, value: impl Into<String>) -> Self {
+        self.duration_min = Some(value.into());
+        self
+    }
+
+    /// Set the `duration_max` field.
+    pub fn duration_max(mut self, value: impl Into<String>) -> Self {
+        self.duration_max = Some(value.into());
+        self
+    }
+
+    /// Set the `deployment_ids` field.
+    pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `procedure_versions` field.
+    pub fn procedure_versions(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.procedure_versions = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` field.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
+        self
+    }
+
+    /// Set the `operated_by_ids` field.
+    pub fn operated_by_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_station_ids` field.
+    pub fn created_by_station_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_station_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_user_ids` field.
+    pub fn created_by_user_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_user_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_numbers` field.
+    pub fn serial_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.serial_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `part_numbers` field.
+    pub fn part_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.part_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `revision_numbers` field.
+    pub fn revision_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.revision_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `batch_numbers` field.
+    pub fn batch_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.batch_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `samples` field.
+    pub fn samples(mut self, value: impl Into<Vec<PhaseListQueryParamSample>>) -> Self {
+        self.samples = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_by` field.
+    ///
+    /// Field to sort results by.
+    pub fn sort_by(mut self, value: impl Into<PhaseListSortBy>) -> Self {
+        self.sort_by = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_order` field.
+    ///
+    /// Sort order direction.
+    pub fn sort_order(mut self, value: impl Into<ListSortOrder>) -> Self {
+        self.sort_order = Some(value.into());
+        self
+    }
+
+    /// Set the `limit` field.
+    ///
+    /// Maximum number of phases to return.
+    pub fn limit(mut self, value: impl Into<i64>) -> Self {
+        self.limit = Some(value.into());
+        self
+    }
+
+    /// Set the `cursor` field.
+    ///
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    pub fn cursor(mut self, value: impl Into<i64>) -> Self {
+        self.cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseListRequest, String> {
+        Ok(PhaseListRequest {
+            procedure_id: self.procedure_id
+                .ok_or_else(|| "missing required field: procedure_id".to_string())?,
+            names: self.names,
+            outcomes: self.outcomes,
+            started_after: self.started_after,
+            started_before: self.started_before,
+            exclude_retries: self.exclude_retries,
+            run_outcomes: self.run_outcomes,
+            ids: self.ids,
+            duration_min: self.duration_min,
+            duration_max: self.duration_max,
+            deployment_ids: self.deployment_ids,
+            procedure_versions: self.procedure_versions,
+            environments: self.environments,
+            operated_by_ids: self.operated_by_ids,
+            created_by_station_ids: self.created_by_station_ids,
+            created_by_user_ids: self.created_by_user_ids,
+            serial_numbers: self.serial_numbers,
+            part_numbers: self.part_numbers,
+            revision_numbers: self.revision_numbers,
+            batch_numbers: self.batch_numbers,
+            samples: self.samples,
+            sort_by: self.sort_by,
+            sort_order: self.sort_order,
+            limit: self.limit,
+            cursor: self.cursor,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseListData {
+    /// Unique identifier for the phase.
+    pub id: String,
+    /// Name of the phase.
+    pub name: String,
+    /// Outcome of the phase.
+    pub outcome: PhaseGetOutcome,
+    /// ISO 8601 timestamp when the phase started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// ISO 8601 timestamp when the phase ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Phase duration in milliseconds. Null when start or end is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// Retry attempt number of the phase (0 for the first attempt).
+    pub retry_count: i64,
+    /// True when this is the final attempt of the phase.
+    pub is_final_attempt: bool,
+    /// ID of the run this phase belongs to.
+    pub run_id: String,
+    /// Outcome of the run this phase belongs to.
+    pub run_outcome: LogGetOutcome,
+    /// Serial number of the unit tested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    /// Sample class of the unit (golden or failing). Null for regular units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Sample>,
+}
+
+impl PhaseListData {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseListDataBuilder {
+        PhaseListDataBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseListData`].
+#[derive(Debug, Default)]
+pub struct PhaseListDataBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    outcome: Option<PhaseGetOutcome>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    duration_ms: Option<i64>,
+    retry_count: Option<i64>,
+    is_final_attempt: Option<bool>,
+    run_id: Option<String>,
+    run_outcome: Option<LogGetOutcome>,
+    serial_number: Option<String>,
+    sample: Option<Sample>,
+}
+
+impl PhaseListDataBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the phase.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    ///
+    /// Name of the phase.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    ///
+    /// Outcome of the phase.
+    pub fn outcome(mut self, value: impl Into<PhaseGetOutcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `started_at` field.
+    ///
+    /// ISO 8601 timestamp when the phase started.
+    pub fn started_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_at = Some(value.into());
+        self
+    }
+
+    /// Set the `ended_at` field.
+    ///
+    /// ISO 8601 timestamp when the phase ended.
+    pub fn ended_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.ended_at = Some(value.into());
+        self
+    }
+
+    /// Set the `duration_ms` field.
+    ///
+    /// Phase duration in milliseconds. Null when start or end is missing.
+    pub fn duration_ms(mut self, value: impl Into<i64>) -> Self {
+        self.duration_ms = Some(value.into());
+        self
+    }
+
+    /// Set the `retry_count` field.
+    ///
+    /// Retry attempt number of the phase (0 for the first attempt).
+    pub fn retry_count(mut self, value: impl Into<i64>) -> Self {
+        self.retry_count = Some(value.into());
+        self
+    }
+
+    /// Set the `is_final_attempt` field.
+    ///
+    /// True when this is the final attempt of the phase.
+    pub fn is_final_attempt(mut self, value: impl Into<bool>) -> Self {
+        self.is_final_attempt = Some(value.into());
+        self
+    }
+
+    /// Set the `run_id` field.
+    ///
+    /// ID of the run this phase belongs to.
+    pub fn run_id(mut self, value: impl Into<String>) -> Self {
+        self.run_id = Some(value.into());
+        self
+    }
+
+    /// Set the `run_outcome` field.
+    ///
+    /// Outcome of the run this phase belongs to.
+    pub fn run_outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
+        self.run_outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_number` field.
+    ///
+    /// Serial number of the unit tested.
+    pub fn serial_number(mut self, value: impl Into<String>) -> Self {
+        self.serial_number = Some(value.into());
+        self
+    }
+
+    /// Set the `sample` field.
+    ///
+    /// Sample class of the unit (golden or failing). Null for regular units.
+    pub fn sample(mut self, value: impl Into<Sample>) -> Self {
+        self.sample = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseListData, String> {
+        Ok(PhaseListData {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name
+                .ok_or_else(|| "missing required field: name".to_string())?,
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
+            duration_ms: self.duration_ms,
+            retry_count: self.retry_count
+                .ok_or_else(|| "missing required field: retry_count".to_string())?,
+            is_final_attempt: self.is_final_attempt
+                .ok_or_else(|| "missing required field: is_final_attempt".to_string())?,
+            run_id: self.run_id
+                .ok_or_else(|| "missing required field: run_id".to_string())?,
+            run_outcome: self.run_outcome
+                .ok_or_else(|| "missing required field: run_outcome".to_string())?,
+            serial_number: self.serial_number,
+            sample: self.sample,
+        })
+    }
+}
+
+/// Pagination metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseListMeta {
+    /// Whether more phases are available beyond this page.
+    pub has_more: bool,
+    /// Cursor to fetch the next page. Null when there are no more results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+}
+
+impl PhaseListMeta {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseListMetaBuilder {
+        PhaseListMetaBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseListMeta`].
+#[derive(Debug, Default)]
+pub struct PhaseListMetaBuilder {
+    has_more: Option<bool>,
+    next_cursor: Option<i64>,
+}
+
+impl PhaseListMetaBuilder {
+    /// Set the `has_more` field.
+    ///
+    /// Whether more phases are available beyond this page.
+    pub fn has_more(mut self, value: impl Into<bool>) -> Self {
+        self.has_more = Some(value.into());
+        self
+    }
+
+    /// Set the `next_cursor` field.
+    ///
+    /// Cursor to fetch the next page. Null when there are no more results.
+    pub fn next_cursor(mut self, value: impl Into<i64>) -> Self {
+        self.next_cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseListMeta, String> {
+        Ok(PhaseListMeta {
+            has_more: self.has_more
+                .ok_or_else(|| "missing required field: has_more".to_string())?,
+            next_cursor: self.next_cursor,
+        })
+    }
+}
+
+/// Phases retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseListResponse {
+    /// The list of phases matching the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<PhaseListData>,
+    /// Pagination metadata.
+    pub meta: PhaseListMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetRequest {
+    /// ID of the phase to retrieve.
+    pub id: String,
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl PhaseGetValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetValidatorsBuilder {
+        PhaseGetValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetValidators`].
+#[derive(Debug, Default)]
+pub struct PhaseGetValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl PhaseGetValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetValidators, String> {
+        Ok(PhaseGetValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetAggregationsValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl PhaseGetAggregationsValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetAggregationsValidatorsBuilder {
+        PhaseGetAggregationsValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetAggregationsValidators`].
+#[derive(Debug, Default)]
+pub struct PhaseGetAggregationsValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl PhaseGetAggregationsValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetAggregationsValidators, String> {
+        Ok(PhaseGetAggregationsValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Aggregation result with computed value and optional validators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetAggregations {
+    /// Unique identifier for the aggregation.
+    pub id: String,
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// Computed aggregation value. Type depends on aggregation type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Unit of measurement for the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub unit: NullableField<String>,
+    /// Validators applied to the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<PhaseGetAggregationsValidators>>,
+}
+
+impl PhaseGetAggregations {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetAggregationsBuilder {
+        PhaseGetAggregationsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetAggregations`].
+#[derive(Debug, Default)]
+pub struct PhaseGetAggregationsBuilder {
+    id: Option<String>,
+    r#type: Option<String>,
+    outcome: Option<Outcome>,
+    value: Option<serde_json::Value>,
+    unit: NullableField<String>,
+    validators: NullableField<Vec<PhaseGetAggregationsValidators>>,
+}
+
+impl PhaseGetAggregationsBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the aggregation.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `type` field.
+    ///
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    pub fn r#type(mut self, value: impl Into<String>) -> Self {
+        self.r#type = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    ///
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `value` field.
+    ///
+    /// Computed aggregation value. Type depends on aggregation type.
+    pub fn value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    /// Set the `unit` field.
+    ///
+    /// Unit of measurement for the aggregated value.
+    pub fn unit(mut self, value: impl Into<String>) -> Self {
+        self.unit = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `unit` to null.
+    pub fn unit_null(mut self) -> Self {
+        self.unit = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    ///
+    /// Validators applied to the aggregated value.
+    pub fn validators(mut self, value: impl Into<Vec<PhaseGetAggregationsValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetAggregations, String> {
+        Ok(PhaseGetAggregations {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            r#type: self.r#type
+                .ok_or_else(|| "missing required field: type".to_string())?,
+            outcome: self.outcome,
+            value: self.value,
+            unit: self.unit,
+            validators: self.validators,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetDataSeriesValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl PhaseGetDataSeriesValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetDataSeriesValidatorsBuilder {
+        PhaseGetDataSeriesValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetDataSeriesValidators`].
+#[derive(Debug, Default)]
+pub struct PhaseGetDataSeriesValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl PhaseGetDataSeriesValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetDataSeriesValidators, String> {
+        Ok(PhaseGetDataSeriesValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetDataSeriesAggregationsValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl PhaseGetDataSeriesAggregationsValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetDataSeriesAggregationsValidatorsBuilder {
+        PhaseGetDataSeriesAggregationsValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetDataSeriesAggregationsValidators`].
+#[derive(Debug, Default)]
+pub struct PhaseGetDataSeriesAggregationsValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl PhaseGetDataSeriesAggregationsValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetDataSeriesAggregationsValidators, String> {
+        Ok(PhaseGetDataSeriesAggregationsValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Aggregation result with computed value and optional validators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetDataSeriesAggregations {
+    /// Unique identifier for the aggregation.
+    pub id: String,
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// Computed aggregation value. Type depends on aggregation type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Unit of measurement for the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub unit: NullableField<String>,
+    /// Validators applied to the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<PhaseGetDataSeriesAggregationsValidators>>,
+}
+
+impl PhaseGetDataSeriesAggregations {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetDataSeriesAggregationsBuilder {
+        PhaseGetDataSeriesAggregationsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetDataSeriesAggregations`].
+#[derive(Debug, Default)]
+pub struct PhaseGetDataSeriesAggregationsBuilder {
+    id: Option<String>,
+    r#type: Option<String>,
+    outcome: Option<Outcome>,
+    value: Option<serde_json::Value>,
+    unit: NullableField<String>,
+    validators: NullableField<Vec<PhaseGetDataSeriesAggregationsValidators>>,
+}
+
+impl PhaseGetDataSeriesAggregationsBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the aggregation.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `type` field.
+    ///
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    pub fn r#type(mut self, value: impl Into<String>) -> Self {
+        self.r#type = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    ///
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `value` field.
+    ///
+    /// Computed aggregation value. Type depends on aggregation type.
+    pub fn value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    /// Set the `unit` field.
+    ///
+    /// Unit of measurement for the aggregated value.
+    pub fn unit(mut self, value: impl Into<String>) -> Self {
+        self.unit = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `unit` to null.
+    pub fn unit_null(mut self) -> Self {
+        self.unit = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    ///
+    /// Validators applied to the aggregated value.
+    pub fn validators(mut self, value: impl Into<Vec<PhaseGetDataSeriesAggregationsValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetDataSeriesAggregations, String> {
+        Ok(PhaseGetDataSeriesAggregations {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            r#type: self.r#type
+                .ok_or_else(|| "missing required field: type".to_string())?,
+            outcome: self.outcome,
+            value: self.value,
+            unit: self.unit,
+            validators: self.validators,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetDataSeries {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub name: NullableField<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub description: NullableField<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<PhaseGetDataSeriesValidators>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub aggregations: NullableField<Vec<PhaseGetDataSeriesAggregations>>,
+}
+
+impl PhaseGetDataSeries {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetDataSeriesBuilder {
+        PhaseGetDataSeriesBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetDataSeries`].
+#[derive(Debug, Default)]
+pub struct PhaseGetDataSeriesBuilder {
+    data: Option<Vec<f64>>,
+    units: Option<String>,
+    name: NullableField<String>,
+    description: NullableField<String>,
+    validators: NullableField<Vec<PhaseGetDataSeriesValidators>>,
+    aggregations: NullableField<Vec<PhaseGetDataSeriesAggregations>>,
+}
+
+impl PhaseGetDataSeriesBuilder {
+    /// Set the `data` field.
+    pub fn data(mut self, value: impl Into<Vec<f64>>) -> Self {
+        self.data = Some(value.into());
+        self
+    }
+
+    /// Set the `units` field.
+    pub fn units(mut self, value: impl Into<String>) -> Self {
+        self.units = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `name` to null.
+    pub fn name_null(mut self) -> Self {
+        self.name = NullableField::Null;
+        self
+    }
+
+    /// Set the `description` field.
+    pub fn description(mut self, value: impl Into<String>) -> Self {
+        self.description = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `description` to null.
+    pub fn description_null(mut self) -> Self {
+        self.description = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    pub fn validators(mut self, value: impl Into<Vec<PhaseGetDataSeriesValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Set the `aggregations` field.
+    pub fn aggregations(mut self, value: impl Into<Vec<PhaseGetDataSeriesAggregations>>) -> Self {
+        self.aggregations = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `aggregations` to null.
+    pub fn aggregations_null(mut self) -> Self {
+        self.aggregations = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetDataSeries, String> {
+        Ok(PhaseGetDataSeries {
+            data: self.data.unwrap_or_default(),
+            units: self.units,
+            name: self.name,
+            description: self.description,
+            validators: self.validators,
+            aggregations: self.aggregations,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetMeasurements {
+    pub id: String,
+    pub name: String,
+    pub outcome: Outcome,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub units: NullableField<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validators: Option<Vec<PhaseGetValidators>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub aggregations: NullableField<Vec<PhaseGetAggregations>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_series: Option<Vec<PhaseGetDataSeries>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub docstring: NullableField<String>,
+}
+
+impl PhaseGetMeasurements {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetMeasurementsBuilder {
+        PhaseGetMeasurementsBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetMeasurements`].
+#[derive(Debug, Default)]
+pub struct PhaseGetMeasurementsBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    outcome: Option<Outcome>,
+    units: NullableField<String>,
+    validators: Option<Vec<PhaseGetValidators>>,
+    aggregations: NullableField<Vec<PhaseGetAggregations>>,
+    measured_value: Option<serde_json::Value>,
+    data_series: Option<Vec<PhaseGetDataSeries>>,
+    docstring: NullableField<String>,
+}
+
+impl PhaseGetMeasurementsBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `units` field.
+    pub fn units(mut self, value: impl Into<String>) -> Self {
+        self.units = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `units` to null.
+    pub fn units_null(mut self) -> Self {
+        self.units = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    pub fn validators(mut self, value: impl Into<Vec<PhaseGetValidators>>) -> Self {
+        self.validators = Some(value.into());
+        self
+    }
+
+    /// Set the `aggregations` field.
+    pub fn aggregations(mut self, value: impl Into<Vec<PhaseGetAggregations>>) -> Self {
+        self.aggregations = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `aggregations` to null.
+    pub fn aggregations_null(mut self) -> Self {
+        self.aggregations = NullableField::Null;
+        self
+    }
+
+    /// Set the `measured_value` field.
+    pub fn measured_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.measured_value = Some(value.into());
+        self
+    }
+
+    /// Set the `data_series` field.
+    pub fn data_series(mut self, value: impl Into<Vec<PhaseGetDataSeries>>) -> Self {
+        self.data_series = Some(value.into());
+        self
+    }
+
+    /// Set the `docstring` field.
+    pub fn docstring(mut self, value: impl Into<String>) -> Self {
+        self.docstring = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `docstring` to null.
+    pub fn docstring_null(mut self) -> Self {
+        self.docstring = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetMeasurements, String> {
+        Ok(PhaseGetMeasurements {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name
+                .ok_or_else(|| "missing required field: name".to_string())?,
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            units: self.units,
+            validators: self.validators,
+            aggregations: self.aggregations,
+            measured_value: self.measured_value,
+            data_series: self.data_series,
+            docstring: self.docstring,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetRun {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub serial_number: NullableField<String>,
+}
+
+impl PhaseGetRun {
+    /// Create a builder for this type.
+    pub fn builder() -> PhaseGetRunBuilder {
+        PhaseGetRunBuilder::default()
+    }
+}
+
+/// Builder for [`PhaseGetRun`].
+#[derive(Debug, Default)]
+pub struct PhaseGetRunBuilder {
+    id: Option<String>,
+    serial_number: NullableField<String>,
+}
+
+impl PhaseGetRunBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_number` field.
+    pub fn serial_number(mut self, value: impl Into<String>) -> Self {
+        self.serial_number = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `serial_number` to null.
+    pub fn serial_number_null(mut self) -> Self {
+        self.serial_number = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PhaseGetRun, String> {
+        Ok(PhaseGetRun {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            serial_number: self.serial_number,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetProcedure {
+    pub id: String,
+    pub name: String,
+}
+
+/// Phase retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhaseGetResponse {
+    pub id: String,
+    pub name: String,
+    pub outcome: PhaseGetOutcome,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub ended_at: chrono::DateTime<chrono::Utc>,
+    pub duration: String,
+    pub retry_count: i64,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub docstring: NullableField<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measurements: Vec<PhaseGetMeasurements>,
+    pub run: PhaseGetRun,
+    pub procedure: PhaseGetProcedure,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementListRequest {
+    /// Procedure to list measurements for. Required: measurements are scoped to a single procedure.
+    pub procedure_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<Vec<LogGetOutcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_versions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<Environment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_numbers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_station_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_before: Option<chrono::DateTime<chrono::Utc>>,
+    /// Exclude retried phase attempts, keeping only the final attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_retries: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_bool: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_strings: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_outcomes: Option<Vec<Outcome>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_types: Option<Vec<MeasurementType>>,
+    /// Field to sort results by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<MeasurementListSortBy>,
+    /// Sort order direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<ListSortOrder>,
+    /// Maximum number of measurements to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+}
+
+impl MeasurementListRequest {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementListRequestBuilder {
+        MeasurementListRequestBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementListRequest`].
+#[derive(Debug, Default)]
+pub struct MeasurementListRequestBuilder {
+    procedure_id: Option<String>,
+    phase_name: Option<String>,
+    measurement_name: Option<String>,
+    phase_names: Option<Vec<String>>,
+    outcomes: Option<Vec<LogGetOutcome>>,
+    ids: Option<Vec<String>>,
+    duration_min: Option<String>,
+    duration_max: Option<String>,
+    deployment_ids: Option<Vec<String>>,
+    procedure_versions: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
+    serial_numbers: Option<Vec<String>>,
+    part_numbers: Option<Vec<String>>,
+    revision_numbers: Option<Vec<String>>,
+    batch_numbers: Option<Vec<String>>,
+    operated_by_ids: Option<Vec<String>>,
+    created_by_station_ids: Option<Vec<String>>,
+    created_by_user_ids: Option<Vec<String>>,
+    started_after: Option<chrono::DateTime<chrono::Utc>>,
+    started_before: Option<chrono::DateTime<chrono::Utc>>,
+    exclude_retries: Option<bool>,
+    value_min: Option<f64>,
+    value_max: Option<f64>,
+    value_bool: Option<bool>,
+    value_strings: Option<Vec<String>>,
+    measurement_outcomes: Option<Vec<Outcome>>,
+    measurement_types: Option<Vec<MeasurementType>>,
+    sort_by: Option<MeasurementListSortBy>,
+    sort_order: Option<ListSortOrder>,
+    limit: Option<i64>,
+    cursor: Option<i64>,
+}
+
+impl MeasurementListRequestBuilder {
+    /// Set the `procedure_id` field.
+    ///
+    /// Procedure to list measurements for. Required: measurements are scoped to a single procedure.
+    pub fn procedure_id(mut self, value: impl Into<String>) -> Self {
+        self.procedure_id = Some(value.into());
+        self
+    }
+
+    /// Set the `phase_name` field.
+    pub fn phase_name(mut self, value: impl Into<String>) -> Self {
+        self.phase_name = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_name` field.
+    pub fn measurement_name(mut self, value: impl Into<String>) -> Self {
+        self.measurement_name = Some(value.into());
+        self
+    }
+
+    /// Set the `phase_names` field.
+    pub fn phase_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.phase_names = Some(value.into());
+        self
+    }
+
+    /// Set the `outcomes` field.
+    pub fn outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
+        self.outcomes = Some(value.into());
+        self
+    }
+
+    /// Set the `ids` field.
+    pub fn ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.ids = Some(value.into());
+        self
+    }
+
+    /// Set the `duration_min` field.
+    pub fn duration_min(mut self, value: impl Into<String>) -> Self {
+        self.duration_min = Some(value.into());
+        self
+    }
+
+    /// Set the `duration_max` field.
+    pub fn duration_max(mut self, value: impl Into<String>) -> Self {
+        self.duration_max = Some(value.into());
+        self
+    }
+
+    /// Set the `deployment_ids` field.
+    pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `procedure_versions` field.
+    pub fn procedure_versions(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.procedure_versions = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` field.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_numbers` field.
+    pub fn serial_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.serial_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `part_numbers` field.
+    pub fn part_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.part_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `revision_numbers` field.
+    pub fn revision_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.revision_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `batch_numbers` field.
+    pub fn batch_numbers(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.batch_numbers = Some(value.into());
+        self
+    }
+
+    /// Set the `operated_by_ids` field.
+    pub fn operated_by_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_station_ids` field.
+    pub fn created_by_station_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_station_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `created_by_user_ids` field.
+    pub fn created_by_user_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.created_by_user_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `started_after` field.
+    pub fn started_after(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_after = Some(value.into());
+        self
+    }
+
+    /// Set the `started_before` field.
+    pub fn started_before(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_before = Some(value.into());
+        self
+    }
+
+    /// Set the `exclude_retries` field.
+    ///
+    /// Exclude retried phase attempts, keeping only the final attempt.
+    pub fn exclude_retries(mut self, value: impl Into<bool>) -> Self {
+        self.exclude_retries = Some(value.into());
+        self
+    }
+
+    /// Set the `value_min` field.
+    pub fn value_min(mut self, value: impl Into<f64>) -> Self {
+        self.value_min = Some(value.into());
+        self
+    }
+
+    /// Set the `value_max` field.
+    pub fn value_max(mut self, value: impl Into<f64>) -> Self {
+        self.value_max = Some(value.into());
+        self
+    }
+
+    /// Set the `value_bool` field.
+    pub fn value_bool(mut self, value: impl Into<bool>) -> Self {
+        self.value_bool = Some(value.into());
+        self
+    }
+
+    /// Set the `value_strings` field.
+    pub fn value_strings(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.value_strings = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_outcomes` field.
+    pub fn measurement_outcomes(mut self, value: impl Into<Vec<Outcome>>) -> Self {
+        self.measurement_outcomes = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_types` field.
+    pub fn measurement_types(mut self, value: impl Into<Vec<MeasurementType>>) -> Self {
+        self.measurement_types = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_by` field.
+    ///
+    /// Field to sort results by.
+    pub fn sort_by(mut self, value: impl Into<MeasurementListSortBy>) -> Self {
+        self.sort_by = Some(value.into());
+        self
+    }
+
+    /// Set the `sort_order` field.
+    ///
+    /// Sort order direction.
+    pub fn sort_order(mut self, value: impl Into<ListSortOrder>) -> Self {
+        self.sort_order = Some(value.into());
+        self
+    }
+
+    /// Set the `limit` field.
+    ///
+    /// Maximum number of measurements to return.
+    pub fn limit(mut self, value: impl Into<i64>) -> Self {
+        self.limit = Some(value.into());
+        self
+    }
+
+    /// Set the `cursor` field.
+    ///
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    pub fn cursor(mut self, value: impl Into<i64>) -> Self {
+        self.cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementListRequest, String> {
+        Ok(MeasurementListRequest {
+            procedure_id: self.procedure_id
+                .ok_or_else(|| "missing required field: procedure_id".to_string())?,
+            phase_name: self.phase_name,
+            measurement_name: self.measurement_name,
+            phase_names: self.phase_names,
+            outcomes: self.outcomes,
+            ids: self.ids,
+            duration_min: self.duration_min,
+            duration_max: self.duration_max,
+            deployment_ids: self.deployment_ids,
+            procedure_versions: self.procedure_versions,
+            environments: self.environments,
+            serial_numbers: self.serial_numbers,
+            part_numbers: self.part_numbers,
+            revision_numbers: self.revision_numbers,
+            batch_numbers: self.batch_numbers,
+            operated_by_ids: self.operated_by_ids,
+            created_by_station_ids: self.created_by_station_ids,
+            created_by_user_ids: self.created_by_user_ids,
+            started_after: self.started_after,
+            started_before: self.started_before,
+            exclude_retries: self.exclude_retries,
+            value_min: self.value_min,
+            value_max: self.value_max,
+            value_bool: self.value_bool,
+            value_strings: self.value_strings,
+            measurement_outcomes: self.measurement_outcomes,
+            measurement_types: self.measurement_types,
+            sort_by: self.sort_by,
+            sort_order: self.sort_order,
+            limit: self.limit,
+            cursor: self.cursor,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementListValidators {
+    /// Outcome of this validator against the measured value.
+    pub outcome: Outcome,
+    /// Comparison operator (e.g. ">", "<=", "=="). Null for expression-only validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value the operator compares against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable validator expression.
+    pub expression: String,
+    /// Whether this validator drove the measurement outcome. Null if unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True when the validator is defined purely by a custom expression.
+    pub is_expression_only: bool,
+    /// Synthetic operator+value expression for analytics. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True when the user supplied a custom validator expression.
+    pub has_custom_expression: bool,
+}
+
+impl MeasurementListValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementListValidatorsBuilder {
+        MeasurementListValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementListValidators`].
+#[derive(Debug, Default)]
+pub struct MeasurementListValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl MeasurementListValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Outcome of this validator against the measured value.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator (e.g. ">", "<=", "=="). Null for expression-only validators.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value the operator compares against.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable validator expression.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator drove the measurement outcome. Null if unknown.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True when the validator is defined purely by a custom expression.
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic operator+value expression for analytics. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True when the user supplied a custom validator expression.
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementListValidators, String> {
+        Ok(MeasurementListValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementListData {
+    /// Unique identifier for the measurement.
+    pub id: String,
+    /// Name of the phase this measurement belongs to.
+    pub phase_name: String,
+    /// Name of the measurement.
+    pub measurement_name: String,
+    /// ISO 8601 timestamp when the measurement's phase started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Numeric value, when the measurement is numeric. Null otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// Boolean value, when the measurement is boolean. Null otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bool_value: Option<bool>,
+    /// String value, when the measurement is a string. Null otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub string_value: Option<String>,
+    /// Measurement units, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    /// Outcome of the measurement.
+    pub measurement_outcome: Outcome,
+    /// ID of the run this measurement belongs to.
+    pub run_id: String,
+    /// Serial number of the unit tested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    /// Sample class of the unit (golden or failing). Null for regular units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Sample>,
+    /// Value type of the measurement.
+    pub measurement_type: MeasurementType,
+    /// Retry attempt number of the phase this measurement belongs to (0 for the first attempt).
+    pub retry_count: i64,
+    /// True when this measurement comes from the final attempt of its phase.
+    pub is_final_attempt: bool,
+    /// Validators applied to this measurement. Null when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validators: Option<Vec<MeasurementListValidators>>,
+}
+
+impl MeasurementListData {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementListDataBuilder {
+        MeasurementListDataBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementListData`].
+#[derive(Debug, Default)]
+pub struct MeasurementListDataBuilder {
+    id: Option<String>,
+    phase_name: Option<String>,
+    measurement_name: Option<String>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    value: Option<f64>,
+    bool_value: Option<bool>,
+    string_value: Option<String>,
+    units: Option<String>,
+    measurement_outcome: Option<Outcome>,
+    run_id: Option<String>,
+    serial_number: Option<String>,
+    sample: Option<Sample>,
+    measurement_type: Option<MeasurementType>,
+    retry_count: Option<i64>,
+    is_final_attempt: Option<bool>,
+    validators: Option<Vec<MeasurementListValidators>>,
+}
+
+impl MeasurementListDataBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the measurement.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `phase_name` field.
+    ///
+    /// Name of the phase this measurement belongs to.
+    pub fn phase_name(mut self, value: impl Into<String>) -> Self {
+        self.phase_name = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_name` field.
+    ///
+    /// Name of the measurement.
+    pub fn measurement_name(mut self, value: impl Into<String>) -> Self {
+        self.measurement_name = Some(value.into());
+        self
+    }
+
+    /// Set the `started_at` field.
+    ///
+    /// ISO 8601 timestamp when the measurement's phase started.
+    pub fn started_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_at = Some(value.into());
+        self
+    }
+
+    /// Set the `value` field.
+    ///
+    /// Numeric value, when the measurement is numeric. Null otherwise.
+    pub fn value(mut self, value: impl Into<f64>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    /// Set the `bool_value` field.
+    ///
+    /// Boolean value, when the measurement is boolean. Null otherwise.
+    pub fn bool_value(mut self, value: impl Into<bool>) -> Self {
+        self.bool_value = Some(value.into());
+        self
+    }
+
+    /// Set the `string_value` field.
+    ///
+    /// String value, when the measurement is a string. Null otherwise.
+    pub fn string_value(mut self, value: impl Into<String>) -> Self {
+        self.string_value = Some(value.into());
+        self
+    }
+
+    /// Set the `units` field.
+    ///
+    /// Measurement units, when applicable.
+    pub fn units(mut self, value: impl Into<String>) -> Self {
+        self.units = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_outcome` field.
+    ///
+    /// Outcome of the measurement.
+    pub fn measurement_outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.measurement_outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `run_id` field.
+    ///
+    /// ID of the run this measurement belongs to.
+    pub fn run_id(mut self, value: impl Into<String>) -> Self {
+        self.run_id = Some(value.into());
+        self
+    }
+
+    /// Set the `serial_number` field.
+    ///
+    /// Serial number of the unit tested.
+    pub fn serial_number(mut self, value: impl Into<String>) -> Self {
+        self.serial_number = Some(value.into());
+        self
+    }
+
+    /// Set the `sample` field.
+    ///
+    /// Sample class of the unit (golden or failing). Null for regular units.
+    pub fn sample(mut self, value: impl Into<Sample>) -> Self {
+        self.sample = Some(value.into());
+        self
+    }
+
+    /// Set the `measurement_type` field.
+    ///
+    /// Value type of the measurement.
+    pub fn measurement_type(mut self, value: impl Into<MeasurementType>) -> Self {
+        self.measurement_type = Some(value.into());
+        self
+    }
+
+    /// Set the `retry_count` field.
+    ///
+    /// Retry attempt number of the phase this measurement belongs to (0 for the first attempt).
+    pub fn retry_count(mut self, value: impl Into<i64>) -> Self {
+        self.retry_count = Some(value.into());
+        self
+    }
+
+    /// Set the `is_final_attempt` field.
+    ///
+    /// True when this measurement comes from the final attempt of its phase.
+    pub fn is_final_attempt(mut self, value: impl Into<bool>) -> Self {
+        self.is_final_attempt = Some(value.into());
+        self
+    }
+
+    /// Set the `validators` field.
+    ///
+    /// Validators applied to this measurement. Null when none.
+    pub fn validators(mut self, value: impl Into<Vec<MeasurementListValidators>>) -> Self {
+        self.validators = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementListData, String> {
+        Ok(MeasurementListData {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            phase_name: self.phase_name
+                .ok_or_else(|| "missing required field: phase_name".to_string())?,
+            measurement_name: self.measurement_name
+                .ok_or_else(|| "missing required field: measurement_name".to_string())?,
+            started_at: self.started_at,
+            value: self.value,
+            bool_value: self.bool_value,
+            string_value: self.string_value,
+            units: self.units,
+            measurement_outcome: self.measurement_outcome
+                .ok_or_else(|| "missing required field: measurement_outcome".to_string())?,
+            run_id: self.run_id
+                .ok_or_else(|| "missing required field: run_id".to_string())?,
+            serial_number: self.serial_number,
+            sample: self.sample,
+            measurement_type: self.measurement_type
+                .ok_or_else(|| "missing required field: measurement_type".to_string())?,
+            retry_count: self.retry_count
+                .ok_or_else(|| "missing required field: retry_count".to_string())?,
+            is_final_attempt: self.is_final_attempt
+                .ok_or_else(|| "missing required field: is_final_attempt".to_string())?,
+            validators: self.validators,
+        })
+    }
+}
+
+/// Pagination metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementListMeta {
+    /// Whether more measurements are available beyond this page.
+    pub has_more: bool,
+    /// Cursor to fetch the next page. Null when there are no more results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+}
+
+impl MeasurementListMeta {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementListMetaBuilder {
+        MeasurementListMetaBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementListMeta`].
+#[derive(Debug, Default)]
+pub struct MeasurementListMetaBuilder {
+    has_more: Option<bool>,
+    next_cursor: Option<i64>,
+}
+
+impl MeasurementListMetaBuilder {
+    /// Set the `has_more` field.
+    ///
+    /// Whether more measurements are available beyond this page.
+    pub fn has_more(mut self, value: impl Into<bool>) -> Self {
+        self.has_more = Some(value.into());
+        self
+    }
+
+    /// Set the `next_cursor` field.
+    ///
+    /// Cursor to fetch the next page. Null when there are no more results.
+    pub fn next_cursor(mut self, value: impl Into<i64>) -> Self {
+        self.next_cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementListMeta, String> {
+        Ok(MeasurementListMeta {
+            has_more: self.has_more
+                .ok_or_else(|| "missing required field: has_more".to_string())?,
+            next_cursor: self.next_cursor,
+        })
+    }
+}
+
+/// Measurements retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementListResponse {
+    /// The list of measurements matching the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<MeasurementListData>,
+    /// Pagination metadata.
+    pub meta: MeasurementListMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetRequest {
+    /// ID of the measurement to retrieve.
+    pub id: String,
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl MeasurementGetValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetValidatorsBuilder {
+        MeasurementGetValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetValidators`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl MeasurementGetValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetValidators, String> {
+        Ok(MeasurementGetValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetAggregationsValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl MeasurementGetAggregationsValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetAggregationsValidatorsBuilder {
+        MeasurementGetAggregationsValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetAggregationsValidators`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetAggregationsValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl MeasurementGetAggregationsValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetAggregationsValidators, String> {
+        Ok(MeasurementGetAggregationsValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Aggregation result with computed value and optional validators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetAggregations {
+    /// Unique identifier for the aggregation.
+    pub id: String,
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// Computed aggregation value. Type depends on aggregation type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Unit of measurement for the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub unit: NullableField<String>,
+    /// Validators applied to the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<MeasurementGetAggregationsValidators>>,
+}
+
+impl MeasurementGetAggregations {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetAggregationsBuilder {
+        MeasurementGetAggregationsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetAggregations`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetAggregationsBuilder {
+    id: Option<String>,
+    r#type: Option<String>,
+    outcome: Option<Outcome>,
+    value: Option<serde_json::Value>,
+    unit: NullableField<String>,
+    validators: NullableField<Vec<MeasurementGetAggregationsValidators>>,
+}
+
+impl MeasurementGetAggregationsBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the aggregation.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `type` field.
+    ///
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    pub fn r#type(mut self, value: impl Into<String>) -> Self {
+        self.r#type = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    ///
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `value` field.
+    ///
+    /// Computed aggregation value. Type depends on aggregation type.
+    pub fn value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    /// Set the `unit` field.
+    ///
+    /// Unit of measurement for the aggregated value.
+    pub fn unit(mut self, value: impl Into<String>) -> Self {
+        self.unit = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `unit` to null.
+    pub fn unit_null(mut self) -> Self {
+        self.unit = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    ///
+    /// Validators applied to the aggregated value.
+    pub fn validators(mut self, value: impl Into<Vec<MeasurementGetAggregationsValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetAggregations, String> {
+        Ok(MeasurementGetAggregations {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            r#type: self.r#type
+                .ok_or_else(|| "missing required field: type".to_string())?,
+            outcome: self.outcome,
+            value: self.value,
+            unit: self.unit,
+            validators: self.validators,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetDataSeriesValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl MeasurementGetDataSeriesValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetDataSeriesValidatorsBuilder {
+        MeasurementGetDataSeriesValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetDataSeriesValidators`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetDataSeriesValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl MeasurementGetDataSeriesValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetDataSeriesValidators, String> {
+        Ok(MeasurementGetDataSeriesValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Validator result with outcome and comparison details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetDataSeriesAggregationsValidators {
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub outcome: Outcome,
+    /// Comparison operator used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// Expected value for comparison. Type depends on measurement type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
+    /// Human-readable expression string for display.
+    pub expression: String,
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_decisive: Option<bool>,
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub is_expression_only: bool,
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics_expression: Option<String>,
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub has_custom_expression: bool,
+}
+
+impl MeasurementGetDataSeriesAggregationsValidators {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetDataSeriesAggregationsValidatorsBuilder {
+        MeasurementGetDataSeriesAggregationsValidatorsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetDataSeriesAggregationsValidators`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetDataSeriesAggregationsValidatorsBuilder {
+    outcome: Option<Outcome>,
+    operator: Option<String>,
+    expected_value: Option<serde_json::Value>,
+    expression: Option<String>,
+    is_decisive: Option<bool>,
+    is_expression_only: Option<bool>,
+    analytics_expression: Option<String>,
+    has_custom_expression: Option<bool>,
+}
+
+impl MeasurementGetDataSeriesAggregationsValidatorsBuilder {
+    /// Set the `outcome` field.
+    ///
+    /// Validation result: PASS, FAIL, or UNSET.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `operator` field.
+    ///
+    /// Comparison operator used for validation.
+    pub fn operator(mut self, value: impl Into<String>) -> Self {
+        self.operator = Some(value.into());
+        self
+    }
+
+    /// Set the `expected_value` field.
+    ///
+    /// Expected value for comparison. Type depends on measurement type.
+    pub fn expected_value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.expected_value = Some(value.into());
+        self
+    }
+
+    /// Set the `expression` field.
+    ///
+    /// Human-readable expression string for display.
+    pub fn expression(mut self, value: impl Into<String>) -> Self {
+        self.expression = Some(value.into());
+        self
+    }
+
+    /// Set the `is_decisive` field.
+    ///
+    /// Whether this validator is decisive (if it fails, measurement fails). False for marginal/warning validators.
+    pub fn is_decisive(mut self, value: impl Into<bool>) -> Self {
+        self.is_decisive = Some(value.into());
+        self
+    }
+
+    /// Set the `is_expression_only` field.
+    ///
+    /// True if validator only has expression (no structured operator/expected_value).
+    pub fn is_expression_only(mut self, value: impl Into<bool>) -> Self {
+        self.is_expression_only = Some(value.into());
+        self
+    }
+
+    /// Set the `analytics_expression` field.
+    ///
+    /// Synthetic expression from operator+expected_value for analytics tooltip. Null if expression-only.
+    pub fn analytics_expression(mut self, value: impl Into<String>) -> Self {
+        self.analytics_expression = Some(value.into());
+        self
+    }
+
+    /// Set the `has_custom_expression` field.
+    ///
+    /// True if user provided a custom expression (shown in italic with analytics tooltip).
+    pub fn has_custom_expression(mut self, value: impl Into<bool>) -> Self {
+        self.has_custom_expression = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetDataSeriesAggregationsValidators, String> {
+        Ok(MeasurementGetDataSeriesAggregationsValidators {
+            outcome: self.outcome
+                .ok_or_else(|| "missing required field: outcome".to_string())?,
+            operator: self.operator,
+            expected_value: self.expected_value,
+            expression: self.expression
+                .ok_or_else(|| "missing required field: expression".to_string())?,
+            is_decisive: self.is_decisive,
+            is_expression_only: self.is_expression_only
+                .ok_or_else(|| "missing required field: is_expression_only".to_string())?,
+            analytics_expression: self.analytics_expression,
+            has_custom_expression: self.has_custom_expression
+                .ok_or_else(|| "missing required field: has_custom_expression".to_string())?,
+        })
+    }
+}
+
+/// Aggregation result with computed value and optional validators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetDataSeriesAggregations {
+    /// Unique identifier for the aggregation.
+    pub id: String,
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    #[serde(rename = "type")]
+    pub r#type: String,
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// Computed aggregation value. Type depends on aggregation type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Unit of measurement for the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub unit: NullableField<String>,
+    /// Validators applied to the aggregated value.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<MeasurementGetDataSeriesAggregationsValidators>>,
+}
+
+impl MeasurementGetDataSeriesAggregations {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetDataSeriesAggregationsBuilder {
+        MeasurementGetDataSeriesAggregationsBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetDataSeriesAggregations`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetDataSeriesAggregationsBuilder {
+    id: Option<String>,
+    r#type: Option<String>,
+    outcome: Option<Outcome>,
+    value: Option<serde_json::Value>,
+    unit: NullableField<String>,
+    validators: NullableField<Vec<MeasurementGetDataSeriesAggregationsValidators>>,
+}
+
+impl MeasurementGetDataSeriesAggregationsBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the aggregation.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `type` field.
+    ///
+    /// Aggregation type (e.g., MIN, MAX, MEAN, RANGE, STD_DEV).
+    pub fn r#type(mut self, value: impl Into<String>) -> Self {
+        self.r#type = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    ///
+    /// Aggregation validation result: PASS, FAIL, UNSET, or null if no validators.
+    pub fn outcome(mut self, value: impl Into<Outcome>) -> Self {
+        self.outcome = Some(value.into());
+        self
+    }
+
+    /// Set the `value` field.
+    ///
+    /// Computed aggregation value. Type depends on aggregation type.
+    pub fn value(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    /// Set the `unit` field.
+    ///
+    /// Unit of measurement for the aggregated value.
+    pub fn unit(mut self, value: impl Into<String>) -> Self {
+        self.unit = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `unit` to null.
+    pub fn unit_null(mut self) -> Self {
+        self.unit = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    ///
+    /// Validators applied to the aggregated value.
+    pub fn validators(mut self, value: impl Into<Vec<MeasurementGetDataSeriesAggregationsValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetDataSeriesAggregations, String> {
+        Ok(MeasurementGetDataSeriesAggregations {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            r#type: self.r#type
+                .ok_or_else(|| "missing required field: type".to_string())?,
+            outcome: self.outcome,
+            value: self.value,
+            unit: self.unit,
+            validators: self.validators,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetDataSeries {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub name: NullableField<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub description: NullableField<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub validators: NullableField<Vec<MeasurementGetDataSeriesValidators>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub aggregations: NullableField<Vec<MeasurementGetDataSeriesAggregations>>,
+}
+
+impl MeasurementGetDataSeries {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetDataSeriesBuilder {
+        MeasurementGetDataSeriesBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetDataSeries`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetDataSeriesBuilder {
+    data: Option<Vec<f64>>,
+    units: Option<String>,
+    name: NullableField<String>,
+    description: NullableField<String>,
+    validators: NullableField<Vec<MeasurementGetDataSeriesValidators>>,
+    aggregations: NullableField<Vec<MeasurementGetDataSeriesAggregations>>,
+}
+
+impl MeasurementGetDataSeriesBuilder {
+    /// Set the `data` field.
+    pub fn data(mut self, value: impl Into<Vec<f64>>) -> Self {
+        self.data = Some(value.into());
+        self
+    }
+
+    /// Set the `units` field.
+    pub fn units(mut self, value: impl Into<String>) -> Self {
+        self.units = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `name` to null.
+    pub fn name_null(mut self) -> Self {
+        self.name = NullableField::Null;
+        self
+    }
+
+    /// Set the `description` field.
+    pub fn description(mut self, value: impl Into<String>) -> Self {
+        self.description = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `description` to null.
+    pub fn description_null(mut self) -> Self {
+        self.description = NullableField::Null;
+        self
+    }
+
+    /// Set the `validators` field.
+    pub fn validators(mut self, value: impl Into<Vec<MeasurementGetDataSeriesValidators>>) -> Self {
+        self.validators = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `validators` to null.
+    pub fn validators_null(mut self) -> Self {
+        self.validators = NullableField::Null;
+        self
+    }
+
+    /// Set the `aggregations` field.
+    pub fn aggregations(mut self, value: impl Into<Vec<MeasurementGetDataSeriesAggregations>>) -> Self {
+        self.aggregations = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `aggregations` to null.
+    pub fn aggregations_null(mut self) -> Self {
+        self.aggregations = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetDataSeries, String> {
+        Ok(MeasurementGetDataSeries {
+            data: self.data.unwrap_or_default(),
+            units: self.units,
+            name: self.name,
+            description: self.description,
+            validators: self.validators,
+            aggregations: self.aggregations,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetPhase {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetRun {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub outcome: NullableField<String>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub serial_number: NullableField<String>,
+}
+
+impl MeasurementGetRun {
+    /// Create a builder for this type.
+    pub fn builder() -> MeasurementGetRunBuilder {
+        MeasurementGetRunBuilder::default()
+    }
+}
+
+/// Builder for [`MeasurementGetRun`].
+#[derive(Debug, Default)]
+pub struct MeasurementGetRunBuilder {
+    id: Option<String>,
+    outcome: NullableField<String>,
+    serial_number: NullableField<String>,
+}
+
+impl MeasurementGetRunBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `outcome` field.
+    pub fn outcome(mut self, value: impl Into<String>) -> Self {
+        self.outcome = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `outcome` to null.
+    pub fn outcome_null(mut self) -> Self {
+        self.outcome = NullableField::Null;
+        self
+    }
+
+    /// Set the `serial_number` field.
+    pub fn serial_number(mut self, value: impl Into<String>) -> Self {
+        self.serial_number = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `serial_number` to null.
+    pub fn serial_number_null(mut self) -> Self {
+        self.serial_number = NullableField::Null;
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<MeasurementGetRun, String> {
+        Ok(MeasurementGetRun {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            outcome: self.outcome,
+            serial_number: self.serial_number,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetProcedure {
+    pub id: String,
+    pub name: String,
+}
+
+/// Measurement retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeasurementGetResponse {
+    pub id: String,
+    pub name: String,
+    pub outcome: Outcome,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub units: NullableField<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validators: Option<Vec<MeasurementGetValidators>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub aggregations: NullableField<Vec<MeasurementGetAggregations>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_series: Option<Vec<MeasurementGetDataSeries>>,
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub docstring: NullableField<String>,
+    pub phase: MeasurementGetPhase,
+    pub run: MeasurementGetRun,
+    pub procedure: MeasurementGetProcedure,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<Environment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_statuses: Option<Vec<DeploymentGetStatus>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_usernames: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_after: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_before: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_query: Option<String>,
+    /// Maximum number of deployments to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<i64>,
+}
+
+impl DeploymentListRequest {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentListRequestBuilder {
+        DeploymentListRequestBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentListRequest`].
+#[derive(Debug, Default)]
+pub struct DeploymentListRequestBuilder {
+    procedure_ids: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
+    build_statuses: Option<Vec<DeploymentGetStatus>>,
+    pushed: Option<bool>,
+    branch_names: Option<Vec<String>>,
+    author_usernames: Option<Vec<String>>,
+    deployed_after: Option<chrono::DateTime<chrono::Utc>>,
+    deployed_before: Option<chrono::DateTime<chrono::Utc>>,
+    search_query: Option<String>,
+    limit: Option<i64>,
+    cursor: Option<i64>,
+}
+
+impl DeploymentListRequestBuilder {
+    /// Set the `procedure_ids` field.
+    pub fn procedure_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.procedure_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` field.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
+        self
+    }
+
+    /// Set the `build_statuses` field.
+    pub fn build_statuses(mut self, value: impl Into<Vec<DeploymentGetStatus>>) -> Self {
+        self.build_statuses = Some(value.into());
+        self
+    }
+
+    /// Set the `pushed` field.
+    pub fn pushed(mut self, value: impl Into<bool>) -> Self {
+        self.pushed = Some(value.into());
+        self
+    }
+
+    /// Set the `branch_names` field.
+    pub fn branch_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.branch_names = Some(value.into());
+        self
+    }
+
+    /// Set the `author_usernames` field.
+    pub fn author_usernames(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.author_usernames = Some(value.into());
+        self
+    }
+
+    /// Set the `deployed_after` field.
+    pub fn deployed_after(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.deployed_after = Some(value.into());
+        self
+    }
+
+    /// Set the `deployed_before` field.
+    pub fn deployed_before(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.deployed_before = Some(value.into());
+        self
+    }
+
+    /// Set the `search_query` field.
+    pub fn search_query(mut self, value: impl Into<String>) -> Self {
+        self.search_query = Some(value.into());
+        self
+    }
+
+    /// Set the `limit` field.
+    ///
+    /// Maximum number of deployments to return.
+    pub fn limit(mut self, value: impl Into<i64>) -> Self {
+        self.limit = Some(value.into());
+        self
+    }
+
+    /// Set the `cursor` field.
+    ///
+    /// Cursor for pagination. Use next_cursor from the previous response to fetch the next page.
+    pub fn cursor(mut self, value: impl Into<i64>) -> Self {
+        self.cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentListRequest, String> {
+        Ok(DeploymentListRequest {
+            procedure_ids: self.procedure_ids,
+            environments: self.environments,
+            build_statuses: self.build_statuses,
+            pushed: self.pushed,
+            branch_names: self.branch_names,
+            author_usernames: self.author_usernames,
+            deployed_after: self.deployed_after,
+            deployed_before: self.deployed_before,
+            search_query: self.search_query,
+            limit: self.limit,
+            cursor: self.cursor,
+        })
+    }
+}
+
+/// Procedure this deployment targets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListProcedure {
+    pub id: String,
+    pub name: String,
+}
+
+/// Git commit the deployment was built from. Null for non-git deployments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListCommit {
+    pub id: String,
+    pub sha: String,
+    pub message: String,
+    pub author_username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_avatar_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+impl DeploymentListCommit {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentListCommitBuilder {
+        DeploymentListCommitBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentListCommit`].
+#[derive(Debug, Default)]
+pub struct DeploymentListCommitBuilder {
+    id: Option<String>,
+    sha: Option<String>,
+    message: Option<String>,
+    author_username: Option<String>,
+    author_avatar_url: Option<String>,
+    committed_at: Option<chrono::DateTime<chrono::Utc>>,
+    branch: Option<String>,
+}
+
+impl DeploymentListCommitBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `sha` field.
+    pub fn sha(mut self, value: impl Into<String>) -> Self {
+        self.sha = Some(value.into());
+        self
+    }
+
+    /// Set the `message` field.
+    pub fn message(mut self, value: impl Into<String>) -> Self {
+        self.message = Some(value.into());
+        self
+    }
+
+    /// Set the `author_username` field.
+    pub fn author_username(mut self, value: impl Into<String>) -> Self {
+        self.author_username = Some(value.into());
+        self
+    }
+
+    /// Set the `author_avatar_url` field.
+    pub fn author_avatar_url(mut self, value: impl Into<String>) -> Self {
+        self.author_avatar_url = Some(value.into());
+        self
+    }
+
+    /// Set the `committed_at` field.
+    pub fn committed_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.committed_at = Some(value.into());
+        self
+    }
+
+    /// Set the `branch` field.
+    pub fn branch(mut self, value: impl Into<String>) -> Self {
+        self.branch = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentListCommit, String> {
+        Ok(DeploymentListCommit {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            sha: self.sha
+                .ok_or_else(|| "missing required field: sha".to_string())?,
+            message: self.message
+                .ok_or_else(|| "missing required field: message".to_string())?,
+            author_username: self.author_username
+                .ok_or_else(|| "missing required field: author_username".to_string())?,
+            author_avatar_url: self.author_avatar_url,
+            committed_at: self.committed_at,
+            branch: self.branch,
+        })
+    }
+}
+
+/// Source repository provider. Null for non-git deployments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListRepository {
+    pub provider: Provider,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListStations {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListData {
+    /// Unique identifier for the deployment.
+    pub id: String,
+    /// Deployment environment.
+    pub environment: Environment,
+    /// How the deployment was triggered.
+    pub trigger: Trigger,
+    /// Build status of the deployment.
+    pub status: DeploymentGetStatus,
+    /// True when an auto-push deployment was recorded for audit but never enqueued to build.
+    pub skipped: bool,
+    /// ISO 8601 timestamp when the build started. Null if not started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// ISO 8601 timestamp when the build ended. Null if not ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// ISO 8601 timestamp when the deployment was created.
+    pub deployed_at: chrono::DateTime<chrono::Utc>,
+    /// Procedure this deployment targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<DeploymentListProcedure>,
+    /// Git commit the deployment was built from. Null for non-git deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<DeploymentListCommit>,
+    /// Source repository provider. Null for non-git deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<DeploymentListRepository>,
+    /// Stations this deployment has been pushed to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stations: Vec<DeploymentListStations>,
+}
+
+impl DeploymentListData {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentListDataBuilder {
+        DeploymentListDataBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentListData`].
+#[derive(Debug, Default)]
+pub struct DeploymentListDataBuilder {
+    id: Option<String>,
+    environment: Option<Environment>,
+    trigger: Option<Trigger>,
+    status: Option<DeploymentGetStatus>,
+    skipped: Option<bool>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    deployed_at: Option<chrono::DateTime<chrono::Utc>>,
+    procedure: Option<DeploymentListProcedure>,
+    commit: Option<DeploymentListCommit>,
+    repository: Option<DeploymentListRepository>,
+    stations: Option<Vec<DeploymentListStations>>,
+}
+
+impl DeploymentListDataBuilder {
+    /// Set the `id` field.
+    ///
+    /// Unique identifier for the deployment.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `environment` field.
+    ///
+    /// Deployment environment.
+    pub fn environment(mut self, value: impl Into<Environment>) -> Self {
+        self.environment = Some(value.into());
+        self
+    }
+
+    /// Set the `trigger` field.
+    ///
+    /// How the deployment was triggered.
+    pub fn trigger(mut self, value: impl Into<Trigger>) -> Self {
+        self.trigger = Some(value.into());
+        self
+    }
+
+    /// Set the `status` field.
+    ///
+    /// Build status of the deployment.
+    pub fn status(mut self, value: impl Into<DeploymentGetStatus>) -> Self {
+        self.status = Some(value.into());
+        self
+    }
+
+    /// Set the `skipped` field.
+    ///
+    /// True when an auto-push deployment was recorded for audit but never enqueued to build.
+    pub fn skipped(mut self, value: impl Into<bool>) -> Self {
+        self.skipped = Some(value.into());
+        self
+    }
+
+    /// Set the `started_at` field.
+    ///
+    /// ISO 8601 timestamp when the build started. Null if not started.
+    pub fn started_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.started_at = Some(value.into());
+        self
+    }
+
+    /// Set the `ended_at` field.
+    ///
+    /// ISO 8601 timestamp when the build ended. Null if not ended.
+    pub fn ended_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.ended_at = Some(value.into());
+        self
+    }
+
+    /// Set the `deployed_at` field.
+    ///
+    /// ISO 8601 timestamp when the deployment was created.
+    pub fn deployed_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.deployed_at = Some(value.into());
+        self
+    }
+
+    /// Set the `procedure` field.
+    ///
+    /// Procedure this deployment targets.
+    pub fn procedure(mut self, value: impl Into<DeploymentListProcedure>) -> Self {
+        self.procedure = Some(value.into());
+        self
+    }
+
+    /// Set the `commit` field.
+    ///
+    /// Git commit the deployment was built from. Null for non-git deployments.
+    pub fn commit(mut self, value: impl Into<DeploymentListCommit>) -> Self {
+        self.commit = Some(value.into());
+        self
+    }
+
+    /// Set the `repository` field.
+    ///
+    /// Source repository provider. Null for non-git deployments.
+    pub fn repository(mut self, value: impl Into<DeploymentListRepository>) -> Self {
+        self.repository = Some(value.into());
+        self
+    }
+
+    /// Set the `stations` field.
+    ///
+    /// Stations this deployment has been pushed to.
+    pub fn stations(mut self, value: impl Into<Vec<DeploymentListStations>>) -> Self {
+        self.stations = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentListData, String> {
+        Ok(DeploymentListData {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            environment: self.environment
+                .ok_or_else(|| "missing required field: environment".to_string())?,
+            trigger: self.trigger
+                .ok_or_else(|| "missing required field: trigger".to_string())?,
+            status: self.status
+                .ok_or_else(|| "missing required field: status".to_string())?,
+            skipped: self.skipped
+                .ok_or_else(|| "missing required field: skipped".to_string())?,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
+            deployed_at: self.deployed_at
+                .ok_or_else(|| "missing required field: deployed_at".to_string())?,
+            procedure: self.procedure,
+            commit: self.commit,
+            repository: self.repository,
+            stations: self.stations.unwrap_or_default(),
+        })
+    }
+}
+
+/// Pagination metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListMeta {
+    /// Whether more deployments are available beyond this page.
+    pub has_more: bool,
+    /// Cursor to fetch the next page. Null when there are no more results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+}
+
+impl DeploymentListMeta {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentListMetaBuilder {
+        DeploymentListMetaBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentListMeta`].
+#[derive(Debug, Default)]
+pub struct DeploymentListMetaBuilder {
+    has_more: Option<bool>,
+    next_cursor: Option<i64>,
+}
+
+impl DeploymentListMetaBuilder {
+    /// Set the `has_more` field.
+    ///
+    /// Whether more deployments are available beyond this page.
+    pub fn has_more(mut self, value: impl Into<bool>) -> Self {
+        self.has_more = Some(value.into());
+        self
+    }
+
+    /// Set the `next_cursor` field.
+    ///
+    /// Cursor to fetch the next page. Null when there are no more results.
+    pub fn next_cursor(mut self, value: impl Into<i64>) -> Self {
+        self.next_cursor = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentListMeta, String> {
+        Ok(DeploymentListMeta {
+            has_more: self.has_more
+                .ok_or_else(|| "missing required field: has_more".to_string())?,
+            next_cursor: self.next_cursor,
+        })
+    }
+}
+
+/// Deployments retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentListResponse {
+    /// The list of deployments matching the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<DeploymentListData>,
+    /// Pagination metadata.
+    pub meta: DeploymentListMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetRequest {
+    /// The deployment ID to retrieve.
+    pub id: String,
+}
+
+/// Procedure this deployment targets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetProcedure {
+    pub id: String,
+    pub name: String,
+}
+
+/// User who created the deployment. Null for system-created deployments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetCreatedByUser {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+impl DeploymentGetCreatedByUser {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentGetCreatedByUserBuilder {
+        DeploymentGetCreatedByUserBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentGetCreatedByUser`].
+#[derive(Debug, Default)]
+pub struct DeploymentGetCreatedByUserBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    image: Option<String>,
+}
+
+impl DeploymentGetCreatedByUserBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `image` field.
+    pub fn image(mut self, value: impl Into<String>) -> Self {
+        self.image = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentGetCreatedByUser, String> {
+        Ok(DeploymentGetCreatedByUser {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name
+                .ok_or_else(|| "missing required field: name".to_string())?,
+            image: self.image,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetBranch {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetRepository {
+    pub full_name: String,
+    pub provider: Provider,
+}
+
+/// Git commit the deployment was built from. Null for non-git deployments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetCommit {
+    pub id: String,
+    pub sha: String,
+    pub message: String,
+    pub author_username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_avatar_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<DeploymentGetBranch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<DeploymentGetRepository>,
+}
+
+impl DeploymentGetCommit {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentGetCommitBuilder {
+        DeploymentGetCommitBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentGetCommit`].
+#[derive(Debug, Default)]
+pub struct DeploymentGetCommitBuilder {
+    id: Option<String>,
+    sha: Option<String>,
+    message: Option<String>,
+    author_username: Option<String>,
+    author_avatar_url: Option<String>,
+    committed_at: Option<chrono::DateTime<chrono::Utc>>,
+    branch: Option<DeploymentGetBranch>,
+    repository: Option<DeploymentGetRepository>,
+}
+
+impl DeploymentGetCommitBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `sha` field.
+    pub fn sha(mut self, value: impl Into<String>) -> Self {
+        self.sha = Some(value.into());
+        self
+    }
+
+    /// Set the `message` field.
+    pub fn message(mut self, value: impl Into<String>) -> Self {
+        self.message = Some(value.into());
+        self
+    }
+
+    /// Set the `author_username` field.
+    pub fn author_username(mut self, value: impl Into<String>) -> Self {
+        self.author_username = Some(value.into());
+        self
+    }
+
+    /// Set the `author_avatar_url` field.
+    pub fn author_avatar_url(mut self, value: impl Into<String>) -> Self {
+        self.author_avatar_url = Some(value.into());
+        self
+    }
+
+    /// Set the `committed_at` field.
+    pub fn committed_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.committed_at = Some(value.into());
+        self
+    }
+
+    /// Set the `branch` field.
+    pub fn branch(mut self, value: impl Into<DeploymentGetBranch>) -> Self {
+        self.branch = Some(value.into());
+        self
+    }
+
+    /// Set the `repository` field.
+    pub fn repository(mut self, value: impl Into<DeploymentGetRepository>) -> Self {
+        self.repository = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentGetCommit, String> {
+        Ok(DeploymentGetCommit {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            sha: self.sha
+                .ok_or_else(|| "missing required field: sha".to_string())?,
+            message: self.message
+                .ok_or_else(|| "missing required field: message".to_string())?,
+            author_username: self.author_username
+                .ok_or_else(|| "missing required field: author_username".to_string())?,
+            author_avatar_url: self.author_avatar_url,
+            committed_at: self.committed_at,
+            branch: self.branch,
+            repository: self.repository,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetStations {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl DeploymentGetStations {
+    /// Create a builder for this type.
+    pub fn builder() -> DeploymentGetStationsBuilder {
+        DeploymentGetStationsBuilder::default()
+    }
+}
+
+/// Builder for [`DeploymentGetStations`].
+#[derive(Debug, Default)]
+pub struct DeploymentGetStationsBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    image_url: Option<String>,
+    pushed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl DeploymentGetStationsBuilder {
+    /// Set the `id` field.
+    pub fn id(mut self, value: impl Into<String>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+
+    /// Set the `name` field.
+    pub fn name(mut self, value: impl Into<String>) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+
+    /// Set the `image_url` field.
+    pub fn image_url(mut self, value: impl Into<String>) -> Self {
+        self.image_url = Some(value.into());
+        self
+    }
+
+    /// Set the `pushed_at` field.
+    pub fn pushed_at(mut self, value: impl Into<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.pushed_at = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<DeploymentGetStations, String> {
+        Ok(DeploymentGetStations {
+            id: self.id
+                .ok_or_else(|| "missing required field: id".to_string())?,
+            name: self.name
+                .ok_or_else(|| "missing required field: name".to_string())?,
+            image_url: self.image_url,
+            pushed_at: self.pushed_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetBuildLogs {
+    /// Sequence number ordering the log line within the build.
+    pub seq: i64,
+    /// Severity of the build log line.
+    pub level: Level,
+    /// Build log line content.
+    pub message: String,
+    /// ISO 8601 timestamp when the log line was emitted.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Deployment retrieved successfully
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentGetResponse {
+    /// Unique identifier for the deployment.
+    pub id: String,
+    /// Deployment environment.
+    pub environment: Environment,
+    /// How the deployment was triggered.
+    pub trigger: Trigger,
+    /// Build status of the deployment.
+    pub status: DeploymentGetStatus,
+    /// ISO 8601 timestamp when the deployment was created.
+    pub deployed_at: chrono::DateTime<chrono::Utc>,
+    /// ISO 8601 timestamp when the build started. Null if not started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// ISO 8601 timestamp when the build ended. Null if not ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// URL of the built artifact. Null if not built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
+    /// SHA-256 checksum of the artifact. Null if not built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    /// Size of the artifact in bytes. Null if not built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_size_bytes: Option<f64>,
+    /// Deployment mode.
+    pub deployment_mode: DeploymentGetDeploymentMode,
+    /// Target platform. Null if unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Procedure language. Null if unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Runtime version. Null if unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    /// Procedure this deployment targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub procedure: Option<DeploymentGetProcedure>,
+    /// User who created the deployment. Null for system-created deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_user: Option<DeploymentGetCreatedByUser>,
+    /// Git commit the deployment was built from. Null for non-git deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<DeploymentGetCommit>,
+    /// Stations linked to the procedure, with per-station push state. pushed_at is null when this deployment has not been pushed to that station.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stations: Vec<DeploymentGetStations>,
+    /// Build log lines for this deployment, ordered by sequence. Empty if the build has not produced logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub build_logs: Vec<DeploymentGetBuildLogs>,
 }
 

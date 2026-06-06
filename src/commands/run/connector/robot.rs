@@ -32,6 +32,11 @@ use tokio::sync::{broadcast, mpsc};
 use execution_engine::ui::UiRequestData;
 use station_protocol::{PhasePlan, RunMeasurement, StationEvent};
 use tofupilot_sdk::types::*;
+// SDK enum names track the alphabetically-first endpoint; alias back to the
+// names this crate uses (see connector/mod.rs).
+use tofupilot_sdk::types::{
+    LogGetOutcome as RunGetOutcome, PhaseGetOutcome as RunGetPhasesOutcome,
+};
 
 use super::super::agent_proto::{AgentProtoCtx, CliEvent};
 use super::super::queue::{upload_queued_run, QueuedRun};

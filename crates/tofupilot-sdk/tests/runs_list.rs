@@ -7,7 +7,9 @@ async fn list_runs_returns_data() {
     let uid_val = uid();
     create_test_run(&uid_val).await;
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![format!("PART-{uid_val}")])
         .send()
         .await
@@ -22,7 +24,9 @@ async fn list_runs_filter_by_outcome() {
     let proc_id = procedure_id().await;
     let part = format!("PART-OUT-{uid_val}");
 
-    let pass_run = client().runs().create()
+    let pass_run = client()
+        .runs()
+        .create()
         .serial_number(format!("SN-P-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -33,7 +37,9 @@ async fn list_runs_filter_by_outcome() {
         .await
         .unwrap();
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-F-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -44,7 +50,9 @@ async fn list_runs_filter_by_outcome() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .outcomes(vec![Outcome::Pass])
         .part_numbers(vec![part])
         .send()
@@ -63,7 +71,9 @@ async fn list_runs_filter_by_serial_number() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(&serial)
         .procedure_id(proc_id)
         .part_number(format!("PART-{uid_val}"))
@@ -74,7 +84,9 @@ async fn list_runs_filter_by_serial_number() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .serial_numbers(vec![serial.clone()])
         .send()
         .await
@@ -91,7 +103,9 @@ async fn list_runs_pagination() {
     let proc_id = procedure_id().await;
 
     for i in 0..3 {
-        client().runs().create()
+        client()
+            .runs()
+            .create()
             .serial_number(format!("SN-PG-{i}-{uid_val}"))
             .procedure_id(proc_id)
             .part_number(&part)
@@ -103,7 +117,9 @@ async fn list_runs_pagination() {
             .unwrap();
     }
 
-    let page1 = client().runs().list()
+    let page1 = client()
+        .runs()
+        .list()
         .part_numbers(vec![part.clone()])
         .limit(1)
         .send()
@@ -114,7 +130,9 @@ async fn list_runs_pagination() {
     assert!(page1.meta.has_more);
 
     let cursor = *page1.meta.next_cursor.as_ref().unwrap();
-    let page2 = client().runs().list()
+    let page2 = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .limit(1)
         .cursor(cursor)
@@ -129,14 +147,18 @@ async fn list_runs_pagination() {
 #[tokio::test]
 async fn list_runs_filter_by_procedure_id() {
     let uid_val = uid();
-    let proc = client().procedures().create()
+    let proc = client()
+        .procedures()
+        .create()
         .name(format!("Proc FPI {uid_val}"))
         .send()
         .await
         .unwrap();
 
     let now = chrono::Utc::now();
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-FPI-{uid_val}"))
         .procedure_id(&proc.id)
         .part_number(format!("PART-FPI-{uid_val}"))
@@ -147,7 +169,9 @@ async fn list_runs_filter_by_procedure_id() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .procedure_ids(vec![proc.id.clone()])
         .send()
         .await
@@ -162,7 +186,9 @@ async fn list_runs_filter_by_part_number() {
     let uid_val = uid();
     create_test_run(&uid_val).await;
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![format!("PART-{uid_val}")])
         .send()
         .await
@@ -177,7 +203,9 @@ async fn list_runs_filter_by_date_range() {
     create_test_run(&uid_val).await;
     let after = chrono::Utc::now();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![format!("PART-{uid_val}")])
         .created_after(before)
         .created_before(after + chrono::Duration::seconds(1))
@@ -195,7 +223,9 @@ async fn list_runs_sort_order() {
     let proc_id = procedure_id().await;
 
     for i in 0..2 {
-        client().runs().create()
+        client()
+            .runs()
+            .create()
             .serial_number(format!("SN-SORT-{i}-{uid_val}"))
             .procedure_id(proc_id)
             .part_number(&part)
@@ -207,7 +237,9 @@ async fn list_runs_sort_order() {
             .unwrap();
     }
 
-    let desc = client().runs().list()
+    let desc = client()
+        .runs()
+        .list()
         .part_numbers(vec![part.clone()])
         .sort_by(RunListSortBy::StartedAt)
         .sort_order(ListSortOrder::Desc)
@@ -215,7 +247,9 @@ async fn list_runs_sort_order() {
         .await
         .unwrap();
 
-    let asc = client().runs().list()
+    let asc = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .sort_by(RunListSortBy::StartedAt)
         .sort_order(ListSortOrder::Asc)
@@ -236,7 +270,9 @@ async fn list_runs_filter_by_ids() {
     let run1 = create_test_run(&uid()).await;
     let run2 = create_test_run(&uid()).await;
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .ids(vec![run1.id.clone(), run2.id.clone()])
         .send()
         .await
@@ -249,7 +285,9 @@ async fn list_runs_filter_by_ids() {
 
 #[tokio::test]
 async fn list_runs_empty_result() {
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .serial_numbers(vec![format!("NONEXISTENT-{}", uid())])
         .send()
         .await
@@ -265,7 +303,9 @@ async fn list_runs_filter_by_duration_range() {
     let proc_id = procedure_id().await;
 
     // Create a run with ~2 minute duration
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-DUR-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -276,7 +316,9 @@ async fn list_runs_filter_by_duration_range() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .duration_min("PT1M")
         .duration_max("PT5M")
@@ -294,7 +336,9 @@ async fn list_runs_filter_by_ended_at() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-END-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -305,7 +349,9 @@ async fn list_runs_filter_by_ended_at() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .ended_after(now - chrono::Duration::minutes(10))
         .ended_before(now + chrono::Duration::minutes(5))
@@ -323,7 +369,9 @@ async fn list_runs_filter_by_created_at() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-CRT-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -334,7 +382,9 @@ async fn list_runs_filter_by_created_at() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .created_after(now - chrono::Duration::minutes(10))
         .created_before(now + chrono::Duration::minutes(5))
@@ -353,21 +403,27 @@ async fn list_runs_filter_by_revision_numbers() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().parts().create()
+    client()
+        .parts()
+        .create()
         .number(&part)
         .name(format!("Part {uid_val}"))
         .send()
         .await
         .unwrap();
 
-    client().revisions().create()
+    client()
+        .revisions()
+        .create()
         .part_number(&part)
         .number(&rev)
         .send()
         .await
         .unwrap();
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-REV-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -379,7 +435,9 @@ async fn list_runs_filter_by_revision_numbers() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .revision_numbers(vec![rev])
         .send()
@@ -397,7 +455,9 @@ async fn list_runs_filter_by_procedure_versions() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-PV-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -409,7 +469,9 @@ async fn list_runs_filter_by_procedure_versions() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .procedure_versions(vec![version])
         .send()
@@ -427,7 +489,9 @@ async fn list_runs_filter_by_batch_numbers() {
     let now = chrono::Utc::now();
     let proc_id = procedure_id().await;
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-BN-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(&part)
@@ -439,7 +503,9 @@ async fn list_runs_filter_by_batch_numbers() {
         .await
         .unwrap();
 
-    let result = client().runs().list()
+    let result = client()
+        .runs()
+        .list()
         .part_numbers(vec![part])
         .batch_numbers(vec![batch])
         .send()

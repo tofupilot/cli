@@ -9,4 +9,4 @@
 | `outcome_column` | `Option<String>` | :heavy_minus_sign: | N/A |
 | `started_column` | `Option<String>` | :heavy_minus_sign: | N/A |
 | `ended_column` | `Option<String>` | :heavy_minus_sign: | N/A |
-| `value_map` | `Option<std::collections::HashMap<String, RunGetPhasesOutcome>>` | :heavy_minus_sign: | N/A |
+| `value_map` | `Option<std::collections::HashMap<String, PhaseGetOutcome>>` | :heavy_minus_sign: | N/A |

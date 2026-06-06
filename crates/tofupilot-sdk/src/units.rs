@@ -284,7 +284,7 @@ pub struct ListBuilder<'a> {
     revision_numbers: Option<Vec<String>>,
     batch_numbers: Option<Vec<String>>,
     procedure_ids: Option<Vec<String>>,
-    outcomes: Option<Vec<RunGetOutcome>>,
+    outcomes: Option<Vec<LogGetOutcome>>,
     started_after: Option<chrono::DateTime<chrono::Utc>>,
     started_before: Option<chrono::DateTime<chrono::Utc>>,
     latest_only: Option<bool>,
@@ -383,7 +383,7 @@ impl<'a> ListBuilder<'a> {
     }
 
     /// Set the `outcomes` query parameter.
-    pub fn outcomes(mut self, value: impl Into<Vec<RunGetOutcome>>) -> Self {
+    pub fn outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
         self.outcomes = Some(value.into());
         self
     }

@@ -2,7 +2,9 @@ mod common;
 use common::*;
 
 async fn create_procedure(uid_val: &str) -> String {
-    client().procedures().create()
+    client()
+        .procedures()
+        .create()
         .name(format!("Proc Ver {uid_val}"))
         .send()
         .await
@@ -15,7 +17,9 @@ async fn create_version_returns_id() {
     let uid_val = uid();
     let proc_id = create_procedure(&uid_val).await;
 
-    let version = client().versions().create()
+    let version = client()
+        .versions()
+        .create()
         .procedure_id(&proc_id)
         .tag(format!("v{uid_val}"))
         .send()
@@ -30,14 +34,18 @@ async fn get_version_returns_matching_data() {
     let proc_id = create_procedure(&uid_val).await;
     let tag = format!("v-g-{uid_val}");
 
-    let created = client().versions().create()
+    let created = client()
+        .versions()
+        .create()
         .procedure_id(&proc_id)
         .tag(&tag)
         .send()
         .await
         .unwrap();
 
-    let fetched = client().versions().get()
+    let fetched = client()
+        .versions()
+        .get()
         .procedure_id(&proc_id)
         .tag(&tag)
         .send()
@@ -53,7 +61,9 @@ async fn get_version_nonexistent_returns_not_found() {
     let uid_val = uid();
     let proc_id = create_procedure(&uid_val).await;
 
-    let result = client().versions().get()
+    let result = client()
+        .versions()
+        .get()
         .procedure_id(&proc_id)
         .tag(format!("v-none-{}", uid()))
         .send()
@@ -67,14 +77,18 @@ async fn delete_version_returns_id() {
     let proc_id = create_procedure(&uid_val).await;
     let tag = format!("v-d-{uid_val}");
 
-    let created = client().versions().create()
+    let created = client()
+        .versions()
+        .create()
         .procedure_id(&proc_id)
         .tag(&tag)
         .send()
         .await
         .unwrap();
 
-    let deleted = client().versions().delete()
+    let deleted = client()
+        .versions()
+        .delete()
         .procedure_id(&proc_id)
         .tag(&tag)
         .send()
@@ -88,7 +102,9 @@ async fn delete_version_nonexistent_returns_not_found() {
     let uid_val = uid();
     let proc_id = create_procedure(&uid_val).await;
 
-    let result = client().versions().delete()
+    let result = client()
+        .versions()
+        .delete()
         .procedure_id(&proc_id)
         .tag(format!("v-none-{}", uid()))
         .send()

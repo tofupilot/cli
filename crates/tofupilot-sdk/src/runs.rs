@@ -102,7 +102,7 @@ impl<'a> RunsClient<'a> {
 #[derive(Debug)]
 pub struct CreateBuilder<'a> {
     client: &'a TofuPilot,
-    outcome: Option<RunGetOutcome>,
+    outcome: Option<LogGetOutcome>,
     procedure_id: Option<String>,
     deployment_id: Option<NullableField<String>>,
     procedure_version: Option<NullableField<String>>,
@@ -152,7 +152,7 @@ impl<'a> CreateBuilder<'a> {
     /// Set the `outcome` field.
     ///
     /// Overall test result. Use PASS when test succeeds, FAIL when test fails but script execution completed successfully, ERROR when script execution fails, TIMEOUT when test exceeds time limit, ABORTED for manual script interruption.
-    pub fn outcome(mut self, value: impl Into<RunGetOutcome>) -> Self {
+    pub fn outcome(mut self, value: impl Into<LogGetOutcome>) -> Self {
         self.outcome = Some(value.into());
         self
     }
@@ -441,9 +441,11 @@ pub struct ListBuilder<'a> {
     client: &'a TofuPilot,
     search_query: Option<String>,
     ids: Option<Vec<String>>,
-    outcomes: Option<Vec<RunGetOutcome>>,
+    outcomes: Option<Vec<LogGetOutcome>>,
     procedure_ids: Option<Vec<String>>,
     procedure_versions: Option<Vec<String>>,
+    deployment_ids: Option<Vec<String>>,
+    environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
     part_numbers: Option<Vec<String>>,
@@ -479,6 +481,8 @@ impl<'a> ListBuilder<'a> {
             outcomes: None,
             procedure_ids: None,
             procedure_versions: None,
+            deployment_ids: None,
+            environments: None,
             serial_numbers: None,
             samples: None,
             part_numbers: None,
@@ -519,7 +523,7 @@ impl<'a> ListBuilder<'a> {
     }
 
     /// Set the `outcomes` query parameter.
-    pub fn outcomes(mut self, value: impl Into<Vec<RunGetOutcome>>) -> Self {
+    pub fn outcomes(mut self, value: impl Into<Vec<LogGetOutcome>>) -> Self {
         self.outcomes = Some(value.into());
         self
     }
@@ -533,6 +537,18 @@ impl<'a> ListBuilder<'a> {
     /// Set the `procedure_versions` query parameter.
     pub fn procedure_versions(mut self, value: impl Into<Vec<String>>) -> Self {
         self.procedure_versions = Some(value.into());
+        self
+    }
+
+    /// Set the `deployment_ids` query parameter.
+    pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `environments` query parameter.
+    pub fn environments(mut self, value: impl Into<Vec<Environment>>) -> Self {
+        self.environments = Some(value.into());
         self
     }
 
@@ -729,6 +745,16 @@ impl<'a> ListBuilder<'a> {
         if let Some(ref val) = self.procedure_versions {
             for item in val {
                 request = request.query(&[("procedure_versions", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.deployment_ids {
+            for item in val {
+                request = request.query(&[("deployment_ids", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.environments {
+            for item in val {
+                request = request.query(&[("environments", item.to_string())]);
             }
         }
         if let Some(ref val) = self.serial_numbers {

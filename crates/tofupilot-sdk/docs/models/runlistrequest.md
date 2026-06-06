@@ -7,9 +7,11 @@
 | --- | --- | --- | --- |
 | `search_query` | `Option<String>` | :heavy_minus_sign: | N/A |
 | `ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
-| `outcomes` | `Option<Vec<RunGetOutcome>>` | :heavy_minus_sign: | N/A |
+| `outcomes` | `Option<Vec<LogGetOutcome>>` | :heavy_minus_sign: | N/A |
 | `procedure_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `procedure_versions` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `deployment_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `environments` | `Option<Vec<Environment>>` | :heavy_minus_sign: | N/A |
 | `serial_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `samples` | `Option<Vec<Sample>>` | :heavy_minus_sign: | N/A |
 | `part_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |

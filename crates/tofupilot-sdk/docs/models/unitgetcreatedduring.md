@@ -11,5 +11,5 @@ Run that created this unit.
 | `started_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the run started. |
 | `ended_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the run ended. |
 | `duration` | `String` | :heavy_check_mark: | ISO 8601 duration of the run (computed from started_at and ended_at). |
-| `outcome` | `RunGetOutcome` | :heavy_check_mark: | Final result of the run execution. |
+| `outcome` | `LogGetOutcome` | :heavy_check_mark: | Final result of the run execution. |
 | `procedure` | `UnitGetProcedure` | :heavy_check_mark: | Procedure information. |

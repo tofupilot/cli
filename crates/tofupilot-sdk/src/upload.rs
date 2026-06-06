@@ -1,10 +1,10 @@
 //! Attachment sub-resources for runs and units.
 
-use std::path::Path;
-use reqwest::header::CONTENT_TYPE;
+use crate::error::{Error, Result};
 use crate::runs::RunsClient;
 use crate::units::UnitsClient;
-use crate::error::{Error, Result};
+use reqwest::header::CONTENT_TYPE;
+use std::path::Path;
 
 fn content_type_for(filename: &str) -> &'static str {
     let ext = filename.rsplit('.').next().unwrap_or("");
@@ -23,7 +23,12 @@ fn content_type_for(filename: &str) -> &'static str {
     }
 }
 
-async fn upload_to_presigned_url(http: &reqwest::Client, url: &str, bytes: Vec<u8>, mime: &str) -> Result<()> {
+async fn upload_to_presigned_url(
+    http: &reqwest::Client,
+    url: &str,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> Result<()> {
     let resp = http
         .put(url)
         .header(CONTENT_TYPE, mime)
@@ -33,7 +38,10 @@ async fn upload_to_presigned_url(http: &reqwest::Client, url: &str, bytes: Vec<u
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(Error::UnexpectedStatus { status, body: format!("upload failed: {body}") });
+        return Err(Error::UnexpectedStatus {
+            status,
+            body: format!("upload failed: {body}"),
+        });
     }
     Ok(())
 }
@@ -43,7 +51,10 @@ async fn download_to_file(http: &reqwest::Client, url: &str, dest: impl AsRef<Pa
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
-        return Err(Error::UnexpectedStatus { status, body: format!("download failed: {body}") });
+        return Err(Error::UnexpectedStatus {
+            status,
+            body: format!("download failed: {body}"),
+        });
     }
     let bytes = resp.bytes().await?;
     tokio::fs::write(dest, bytes).await?;
@@ -59,20 +70,36 @@ impl<'a> RunAttachments<'a> {
     /// Upload a file and attach it to a run. Returns the attachment ID.
     pub async fn upload(&self, run_id: &str, path: impl AsRef<Path>) -> Result<String> {
         let path = path.as_ref();
-        let name = path.file_name().and_then(|n| n.to_str())
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
             .ok_or_else(|| Error::Validation("could not extract file name".to_string()))?;
         let bytes = tokio::fs::read(path).await?;
         let mime = content_type_for(name);
 
-        let result = self.client.create_attachment().id(run_id).name(name).send().await?;
-        upload_to_presigned_url(&self.client.client.http_external, &result.upload_url, bytes, mime).await?;
+        let result = self
+            .client
+            .create_attachment()
+            .id(run_id)
+            .name(name)
+            .send()
+            .await?;
+        upload_to_presigned_url(
+            &self.client.client.http_external,
+            &result.upload_url,
+            bytes,
+            mime,
+        )
+        .await?;
         Ok(result.id)
     }
 
     /// Download an attachment to a local file.
     pub async fn download(&self, url: &str, dest: impl AsRef<Path>) -> Result<()> {
         if url.is_empty() {
-            return Err(Error::Validation("download URL cannot be empty".to_string()));
+            return Err(Error::Validation(
+                "download URL cannot be empty".to_string(),
+            ));
         }
         download_to_file(&self.client.client.http_external, url, dest).await
     }
@@ -87,27 +114,52 @@ impl<'a> UnitAttachments<'a> {
     /// Upload a file and attach it to a unit. Returns the attachment ID.
     pub async fn upload(&self, serial_number: &str, path: impl AsRef<Path>) -> Result<String> {
         let path = path.as_ref();
-        let name = path.file_name().and_then(|n| n.to_str())
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
             .ok_or_else(|| Error::Validation("could not extract file name".to_string()))?;
         let bytes = tokio::fs::read(path).await?;
         let mime = content_type_for(name);
 
-        let result = self.client.create_attachment().serial_number(serial_number).name(name).send().await?;
-        upload_to_presigned_url(&self.client.client.http_external, &result.upload_url, bytes, mime).await?;
+        let result = self
+            .client
+            .create_attachment()
+            .serial_number(serial_number)
+            .name(name)
+            .send()
+            .await?;
+        upload_to_presigned_url(
+            &self.client.client.http_external,
+            &result.upload_url,
+            bytes,
+            mime,
+        )
+        .await?;
         Ok(result.id)
     }
 
     /// Download an attachment to a local file.
     pub async fn download(&self, url: &str, dest: impl AsRef<Path>) -> Result<()> {
         if url.is_empty() {
-            return Err(Error::Validation("download URL cannot be empty".to_string()));
+            return Err(Error::Validation(
+                "download URL cannot be empty".to_string(),
+            ));
         }
         download_to_file(&self.client.client.http_external, url, dest).await
     }
 
     /// Delete attachments from a unit by their IDs.
-    pub async fn delete(&self, serial_number: &str, ids: Vec<String>) -> Result<crate::types::UnitDeleteAttachmentResponse> {
-        self.client.delete_attachment().serial_number(serial_number).ids(ids).send().await
+    pub async fn delete(
+        &self,
+        serial_number: &str,
+        ids: Vec<String>,
+    ) -> Result<crate::types::UnitDeleteAttachmentResponse> {
+        self.client
+            .delete_attachment()
+            .serial_number(serial_number)
+            .ids(ids)
+            .send()
+            .await
     }
 }
 

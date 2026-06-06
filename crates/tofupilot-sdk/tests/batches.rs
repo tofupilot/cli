@@ -7,7 +7,9 @@ async fn create_batch_via_run(uid_val: &str) -> String {
     let proc_id = procedure_id().await;
     let batch_number = format!("BATCH-{uid_val}");
 
-    client().runs().create()
+    client()
+        .runs()
+        .create()
         .serial_number(format!("SN-B-{uid_val}"))
         .procedure_id(proc_id)
         .part_number(format!("PART-B-{uid_val}"))
@@ -25,7 +27,9 @@ async fn create_batch_via_run(uid_val: &str) -> String {
 #[tokio::test]
 async fn create_batch_returns_id() {
     let uid_val = uid();
-    let result = client().batches().create()
+    let result = client()
+        .batches()
+        .create()
         .number(format!("BATCH-CRE-{uid_val}"))
         .send()
         .await
@@ -38,7 +42,9 @@ async fn get_batch_returns_matching_data() {
     let uid_val = uid();
     let batch_number = create_batch_via_run(&uid_val).await;
 
-    let fetched = client().batches().get()
+    let fetched = client()
+        .batches()
+        .get()
         .number(&batch_number)
         .send()
         .await
@@ -49,7 +55,9 @@ async fn get_batch_returns_matching_data() {
 
 #[tokio::test]
 async fn get_batch_nonexistent_returns_not_found() {
-    let result = client().batches().get()
+    let result = client()
+        .batches()
+        .get()
         .number(format!("NONEXISTENT-{}", uid()))
         .send()
         .await;
@@ -59,10 +67,7 @@ async fn get_batch_nonexistent_returns_not_found() {
 #[tokio::test]
 async fn list_batches_returns_list() {
     create_batch_via_run(&uid()).await;
-    let result = client().batches().list()
-        .send()
-        .await
-        .unwrap();
+    let result = client().batches().list().send().await.unwrap();
     assert!(!result.data.is_empty());
 }
 
@@ -71,7 +76,9 @@ async fn list_batches_with_search_query() {
     let uid_val = uid();
     let batch_number = create_batch_via_run(&uid_val).await;
 
-    let result = client().batches().list()
+    let result = client()
+        .batches()
+        .list()
         .search_query(&batch_number)
         .send()
         .await
@@ -84,7 +91,9 @@ async fn list_batches_with_number_filter() {
     let uid_val = uid();
     let batch_number = create_batch_via_run(&uid_val).await;
 
-    let result = client().batches().list()
+    let result = client()
+        .batches()
+        .list()
         .numbers(vec![batch_number.clone()])
         .send()
         .await
@@ -99,16 +108,14 @@ async fn list_batches_pagination() {
         create_batch_via_run(&uid()).await;
     }
 
-    let page1 = client().batches().list()
-        .limit(1)
-        .send()
-        .await
-        .unwrap();
+    let page1 = client().batches().list().limit(1).send().await.unwrap();
 
     assert_eq!(1, page1.data.len());
     if page1.meta.has_more {
         let cursor = *page1.meta.next_cursor.as_ref().unwrap();
-        let page2 = client().batches().list()
+        let page2 = client()
+            .batches()
+            .list()
             .limit(1)
             .cursor(cursor)
             .send()
@@ -125,14 +132,18 @@ async fn list_batches_sort_order() {
         create_batch_via_run(&uid()).await;
     }
 
-    let desc = client().batches().list()
+    let desc = client()
+        .batches()
+        .list()
         .sort_order(ListSortOrder::Desc)
         .limit(2)
         .send()
         .await
         .unwrap();
 
-    let asc = client().batches().list()
+    let asc = client()
+        .batches()
+        .list()
         .sort_order(ListSortOrder::Asc)
         .limit(2)
         .send()
@@ -149,13 +160,17 @@ async fn list_batches_sort_order() {
 async fn delete_batch_returns_id() {
     let uid_val = uid();
     let number = format!("BATCH-DEL-{uid_val}");
-    let created = client().batches().create()
+    let created = client()
+        .batches()
+        .create()
         .number(&number)
         .send()
         .await
         .unwrap();
 
-    let deleted = client().batches().delete()
+    let deleted = client()
+        .batches()
+        .delete()
         .number(&number)
         .send()
         .await
@@ -165,7 +180,9 @@ async fn delete_batch_returns_id() {
 
 #[tokio::test]
 async fn delete_batch_nonexistent_returns_not_found() {
-    let result = client().batches().delete()
+    let result = client()
+        .batches()
+        .delete()
         .number(format!("NONEXISTENT-{}", uid()))
         .send()
         .await;
@@ -178,13 +195,17 @@ async fn update_batch_number() {
     let old_number = format!("BATCH-UPOLD-{uid_val}");
     let new_number = format!("BATCH-UPNEW-{uid_val}");
 
-    client().batches().create()
+    client()
+        .batches()
+        .create()
         .number(&old_number)
         .send()
         .await
         .unwrap();
 
-    client().batches().update()
+    client()
+        .batches()
+        .update()
         .number(&old_number)
         .new_number(&new_number)
         .send()
@@ -192,7 +213,9 @@ async fn update_batch_number() {
         .unwrap();
 
     // New number should be fetchable
-    let fetched = client().batches().get()
+    let fetched = client()
+        .batches()
+        .get()
         .number(&new_number)
         .send()
         .await
@@ -200,10 +223,7 @@ async fn update_batch_number() {
     assert_eq!(new_number, fetched.number);
 
     // Old number should 404
-    let result = client().batches().get()
-        .number(&old_number)
-        .send()
-        .await;
+    let result = client().batches().get().number(&old_number).send().await;
     assert!(matches!(result, Err(tofupilot::Error::NotFound(_))));
 }
 
@@ -213,10 +233,24 @@ async fn update_batch_duplicate_number_returns_conflict() {
     let number1 = format!("BATCH-DUP1-{uid_val}");
     let number2 = format!("BATCH-DUP2-{uid_val}");
 
-    client().batches().create().number(&number1).send().await.unwrap();
-    client().batches().create().number(&number2).send().await.unwrap();
+    client()
+        .batches()
+        .create()
+        .number(&number1)
+        .send()
+        .await
+        .unwrap();
+    client()
+        .batches()
+        .create()
+        .number(&number2)
+        .send()
+        .await
+        .unwrap();
 
-    let result = client().batches().update()
+    let result = client()
+        .batches()
+        .update()
         .number(&number2)
         .new_number(&number1)
         .send()
@@ -226,9 +260,6 @@ async fn update_batch_duplicate_number_returns_conflict() {
 
 #[tokio::test]
 async fn create_batch_empty_number_fails() {
-    let result = client().batches().create()
-        .number("")
-        .send()
-        .await;
+    let result = client().batches().create().number("").send().await;
     assert!(result.is_err());
 }

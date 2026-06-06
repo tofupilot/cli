@@ -15,6 +15,12 @@ use execution_engine::ui::{
 };
 use station_protocol::{PhasePlan, RunMeasurement, StationEvent};
 use tofupilot_sdk::types::*;
+// The SDK derives these outcome enum names from the alphabetically-first
+// endpoint that uses the shape; adding logs/phases shifted them off `RunGet*`.
+// Alias back to the names this crate uses so the references stay stable.
+use tofupilot_sdk::types::{
+    LogGetOutcome as RunGetOutcome, PhaseGetOutcome as RunGetPhasesOutcome,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 
