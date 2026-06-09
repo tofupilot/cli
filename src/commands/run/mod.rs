@@ -26,6 +26,7 @@ pub(crate) mod ui_response;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use station_protocol::StationEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -591,15 +592,16 @@ pub async fn start(
     // from the web while the station has a tty open) still get the TUI.
     //
     // Precedence: explicit CLI flag (`--tui`/`--no-tui`,
-    // `--kiosk`/`--no-kiosk`) > station config > default `off`. Flags
-    // can't override the tty / json_mode gates — those are correctness,
-    // not preference. Both surfaces opt-in: a station with no config
-    // (e.g. running `tofupilot run` standalone before any dashboard
-    // sync) gets a quiet, plain-stdout run, and the operator picks
-    // their UI explicitly.
+    // `--kiosk`/`--no-kiosk`) > station config > default. The TUI
+    // defaults ON for an interactive run so a bare `tofupilot run` in a
+    // terminal shows live phases, measurements, and logs instead of a
+    // silent screen. The two gates ahead of the default keep it off
+    // where a takeover would be wrong: `--json` / agent mode owns stdout
+    // with NDJSON, and a non-tty (pipes, CI, the station daemon under
+    // launchd/systemd) has no terminal to draw into. Kiosk stays opt-in.
     let tui_enabled = !json_mode
         && std::io::stdin().is_terminal()
-        && resolve_ui_pref("terminal_ui", tui_override, false);
+        && resolve_ui_pref("terminal_ui", tui_override, true);
     // Kiosk is a separate browser process, not a terminal UI — the
     // station-mode daemon (launchd / systemd) runs without a tty but
     // still needs the local-ws server up so the kiosk browser can
@@ -978,6 +980,37 @@ pub async fn start(
         (None, None)
     };
 
+    // Console log stream. Surfaces phases, measurements, logs, and the
+    // final outcome (including phase error tracebacks) as plain console
+    // lines so a run is never silent — for both a bare `tofupilot run`
+    // and a `--no-tui` / piped / CI run. When the TUI owns the alternate
+    // screen, writing live would corrupt its frames, so we buffer and
+    // flush once after the TUI tears down (the alt-screen restore wipes
+    // the TUI, leaving the buffered log in the operator's scrollback).
+    // Agent/JSON mode already streams structured NDJSON, so skip it.
+    let console_buffer: Option<ConsoleBuffer> = if json_mode {
+        None
+    } else if tui_enabled {
+        Some(Arc::new(std::sync::Mutex::new(Vec::new())))
+    } else {
+        None // print live (no buffer)
+    };
+    let console_handle = if json_mode {
+        None
+    } else {
+        let mut rx = event_tx.subscribe();
+        let buf = console_buffer.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => console_log_event(ev, buf.as_ref()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }))
+    };
+
     // UiResponse pump: drain the run-scoped ui_response_rx and
     // dispatch each response to the matching prompt. The pump exits
     // when the sender is dropped (run task tears down).
@@ -1127,9 +1160,29 @@ pub async fn start(
         // even when the run was cancelled — same budget either way.
         // Inner 500ms per-publish bound in the Managed publisher loop
         // caps how long a single stuck HTTP call can hold teardown
-        // hostage.
+        // hostage. Upload-result events (`RunUploaded` / `RunUploadFailed`)
+        // are emitted during this drain, so the console stream must still
+        // be alive here to pick them up.
         let drain = crate::config::timeouts::PUBLISH_DRAIN;
         active_publisher.flush(drain).await;
+
+        // The console stream has now seen every event including the
+        // terminal RunComplete and the upload result. Give it a final
+        // beat to drain the broadcast, then stop it and flush any
+        // buffered lines (TUI mode) to the restored main screen so the
+        // operator keeps the phase/log/measurement/error output in their
+        // scrollback after the alternate screen is torn down.
+        if let Some(h) = console_handle {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            h.abort();
+        }
+        if let Some(buf) = console_buffer {
+            // Recover a poisoned lock — never silently drop the whole log.
+            let lines = buf.lock().unwrap_or_else(|e| e.into_inner());
+            for (level, msg) in lines.iter() {
+                level.print(msg);
+            }
+        }
         ui_response_handle.abort();
         if let Some(h) = agent_stdin_handle {
             h.abort();
@@ -1243,6 +1296,199 @@ fn resolve_ui_pref(config_key: &str, cli_override: Option<bool>, default_on: boo
         .and_then(|db| db.get_config(config_key).ok().flatten())
         .map(|v| v == "on")
         .unwrap_or(default_on)
+}
+
+/// Shared sink for the console log stream. When the TUI owns the
+/// alternate screen, lines accumulate here and flush after teardown;
+/// otherwise the formatter prints them live and this is `None`.
+type ConsoleBuffer = Arc<std::sync::Mutex<Vec<(ConsoleLevel, String)>>>;
+
+/// Render a single run event as a console line. Drives the human-
+/// readable stream for a `tofupilot run` that isn't in `--json`/agent
+/// mode, so the run is never silent: it surfaces phase boundaries,
+/// live phase/plug logs, per-measurement results, the crash reason for
+/// a run that dies before any phase, the upload result, and the final
+/// outcome. The structured NDJSON stream (`agent_proto`) is the machine
+/// counterpart — this is the same data, formatted for a person.
+fn console_log_event(ev: StationEvent, buffer: Option<&ConsoleBuffer>) {
+    use station_protocol::StationEvent as E;
+
+    // A line tagged with the level it renders at. With the TUI active we
+    // buffer `(level, text)` and flush through the colored writers after
+    // teardown; otherwise we print live the same way.
+    let emit = |level: ConsoleLevel, text: String| {
+        if let Some(buf) = buffer {
+            // Recover a poisoned lock (a panic in a prior format call
+            // must not silently swallow the rest of the run's output).
+            let mut v = buf.lock().unwrap_or_else(|e| e.into_inner());
+            v.push((level, text));
+        } else {
+            level.print(&text);
+        }
+    };
+
+    match ev {
+        E::PhaseStarted { name, slot_id, .. } => {
+            emit(
+                ConsoleLevel::Info,
+                format!("Phase: {name}{}", slot(&slot_id)),
+            );
+        }
+        E::PhaseLog {
+            level,
+            message,
+            slot_id,
+            ..
+        } => emit(
+            ConsoleLevel::from_log_level(&level),
+            format!("{}{message}", slot_prefix(&slot_id)),
+        ),
+        // Plug logs: only surface warnings and errors. INFO/DEBUG from a
+        // plug subprocess is framework transport chatter (e.g. the
+        // service's "listening on port" line) — noise for an operator,
+        // still available in the NDJSON stream and the TUI.
+        E::PlugLog {
+            plug_name,
+            level,
+            message,
+            slot_id,
+            ..
+        } => {
+            let level = ConsoleLevel::from_log_level(&level);
+            if matches!(level, ConsoleLevel::Warn | ConsoleLevel::Error) {
+                emit(
+                    level,
+                    format!("{}[{plug_name}] {message}", slot_prefix(&slot_id)),
+                );
+            }
+        }
+        // Measurements are rendered from `PhaseComplete`, not the live
+        // `MeasurementUpdate`: the live event hard-codes `UNSET` (it
+        // fires before validation) and frameworks like OpenHTF/pytest
+        // only attach measurements at phase completion. `PhaseComplete`
+        // carries the validated outcome and the already-raw value.
+        E::PhaseComplete {
+            name,
+            outcome,
+            measurements,
+            error,
+            slot_id,
+            ..
+        } => {
+            let level = ConsoleLevel::from_outcome(&outcome);
+            emit(level, format!("Phase {name}: {outcome}{}", slot(&slot_id)));
+            for m in &measurements {
+                emit(ConsoleLevel::Info, format!("  {}", measurement_line(m)));
+            }
+            if let Some(err) = error {
+                let err = err.trim_end();
+                if !err.is_empty() {
+                    emit(ConsoleLevel::Error, err.to_string());
+                }
+            }
+        }
+        // A run that fails to start (bad procedure, Python bootstrap
+        // crash, load error) emits `RunCrashed` before the synthetic
+        // `RunComplete(ERROR)`. Without this arm the operator would see
+        // only "Run complete: ERROR" with no reason.
+        E::RunCrashed { error, .. } => {
+            let error = error.trim_end();
+            if !error.is_empty() {
+                emit(ConsoleLevel::Error, error.to_string());
+            }
+        }
+        E::RunUploaded { dashboard_url, .. } => {
+            let url = dashboard_url.map(|u| format!(" — {u}")).unwrap_or_default();
+            emit(ConsoleLevel::Success, format!("Uploaded to dashboard{url}"));
+        }
+        E::RunUploadFailed { error, .. } => {
+            emit(ConsoleLevel::Error, format!("Upload failed: {error}"));
+        }
+        E::RunComplete { outcome, .. } => {
+            emit(
+                ConsoleLevel::from_outcome(&outcome),
+                format!("Run complete: {outcome}"),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Format one measurement row: `name = value unit [OUTCOME]`. The value
+/// is already raw JSON (`to_raw_json` ran in the engine), so strings
+/// render unquoted and everything else uses its compact JSON form.
+fn measurement_line(m: &station_protocol::RunMeasurement) -> String {
+    let value = match &m.measured_value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None => "—".to_string(),
+        Some(other) => other.to_string(),
+    };
+    let unit = m
+        .units
+        .as_deref()
+        .map(|u| format!(" {u}"))
+        .unwrap_or_default();
+    format!("{} = {value}{unit} [{}]", m.name, m.outcome)
+}
+
+/// `" (slot X)"` suffix for a phase/run line, empty for single-slot.
+fn slot(slot_id: &Option<String>) -> String {
+    slot_id
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "default")
+        .map(|s| format!(" (slot {s})"))
+        .unwrap_or_default()
+}
+
+/// `"[slot X] "` prefix for an indented log line in a multi-slot run.
+fn slot_prefix(slot_id: &Option<String>) -> String {
+    slot_id
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "default")
+        .map(|s| format!("[slot {s}] "))
+        .unwrap_or_default()
+}
+
+/// Console severity for a streamed run line — picks the matching
+/// `crate::log` writer (live) or buffers it (deferred flush).
+#[derive(Clone, Copy)]
+enum ConsoleLevel {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
+
+impl ConsoleLevel {
+    /// Map a phase/plug log level string to a console severity.
+    fn from_log_level(level: &str) -> Self {
+        match level.to_ascii_uppercase().as_str() {
+            "ERROR" | "CRITICAL" => Self::Error,
+            "WARNING" | "WARN" => Self::Warn,
+            _ => Self::Info,
+        }
+    }
+
+    /// Map a phase/run outcome to a console severity. Single source of
+    /// truth shared by the phase, run, and crash lines so they never
+    /// disagree on what counts as success vs failure.
+    fn from_outcome(outcome: &str) -> Self {
+        match outcome {
+            outcomes::PASS | outcomes::XPASS => Self::Success,
+            outcomes::SKIP => Self::Info,
+            outcomes::RETRY => Self::Warn,
+            _ => Self::Error,
+        }
+    }
+
+    fn print(self, msg: &str) {
+        match self {
+            Self::Info => crate::log::info(msg),
+            Self::Success => crate::log::success(msg),
+            Self::Warn => crate::log::warn(msg),
+            Self::Error => crate::log::error(msg),
+        }
+    }
 }
 
 fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, i32> {

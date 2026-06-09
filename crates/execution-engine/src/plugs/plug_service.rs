@@ -207,14 +207,19 @@ impl PlugServiceManager {
                                 line: log_entry.line,
                             }));
                         } else {
-                            log::warn!("[{}] {}", instance_key_clone, line);
+                            // Unstructured stderr from the plug subprocess —
+                            // typically framework chatter (e.g. the service's
+                            // "listening on port" line), not an actual warning.
+                            // Treat it as info so consumers can filter it out
+                            // of an operator-facing view.
+                            log::info!("[{}] {}", instance_key_clone, line);
 
                             event_sink_clone.emit(&ExecutionEvent::PlugLog(PlugLogEvent {
                                 plug_key: plug_key_clone.clone(),
                                 plug_name: display_name_clone.clone(),
                                 slot_id: slot_id_clone.clone(),
                                 stage: None,
-                                level: "warning".to_string(),
+                                level: "info".to_string(),
                                 message: line.clone(),
                                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
                                 line: None,
