@@ -91,8 +91,8 @@ pub async fn run_cmd(keep_data: bool, yes: bool, json_mode: bool) -> i32 {
         ));
     }
     // launch_on_boot is no longer a config key driven from the
-    // server; it's owned by the explicit `tofupilot install`
-    // subcommand. Call the same low-level remover here.
+    // server; it's installed by `tofupilot login --token` and removed
+    // by a plain `tofupilot login`. Call the same low-level remover here.
     match config::apply_launch_on_boot(false) {
         Ok(()) if lob => {
             if !json_mode {

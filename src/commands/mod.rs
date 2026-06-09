@@ -5,7 +5,6 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod http;
-pub mod install;
 pub mod link;
 pub mod pull;
 pub mod run;

@@ -39,10 +39,11 @@ pub async fn sync_config(creds: &Credentials, installation_id: &str) -> Vec<Stat
         let unchanged = current.as_deref() == Some(value.as_str());
         // `launch_on_boot` and `desktop_icon` are reapplied every sync
         // even when the DB value hasn't changed: the on-disk supervisor
-        // unit / shortcut could have been removed by a prior
-        // `tofupilot install --disable`, by a manual `systemctl --user
-        // disable`, or by uninstall. The DB still says "on" because the
-        // dashboard toggle was never flipped, and a strict "skip on no
+        // unit / shortcut could have been removed by a plain
+        // `tofupilot login` (return-to-development), by a manual
+        // `systemctl --user disable`, or by uninstall. The DB still says
+        // "on" because the dashboard toggle was never flipped, and a
+        // strict "skip on no
         // change" path would silently leave the station unable to
         // auto-restart at next reboot. Reapplying also rewrites
         // shortcut Arguments / unit ExecStart whenever the CLI upgrades
@@ -216,10 +217,11 @@ fn systemctl(args: &[&str]) -> crate::error::CliResult<()> {
     Ok(())
 }
 
-/// Install (or remove) the OS-level station service. Called by the
-/// `tofupilot install` subcommand. Writes the systemd unit / launchd
-/// plist / Windows Run key with the current binary path, then enables
-/// the supervisor so the daemon starts at next login / reboot.
+/// Install (or remove) the OS-level station service. Called on a token
+/// login (enable) and on a plain browser login (remove), and on every
+/// config sync. Writes the systemd unit / launchd plist / Windows Run key
+/// with the current binary path, then enables the supervisor so the
+/// daemon starts at next login / reboot.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) fn apply_launch_on_boot(enable: bool) -> crate::error::CliResult<()> {
     let exe = std::env::current_exe().map_err(|e| format!("Current exe: {e}"))?;
@@ -258,6 +260,14 @@ fn apply_launch_on_boot_macos(enable: bool, exe: &std::path::Path) -> crate::err
     }
 
     if !enable {
+        // Plain `tofupilot login` calls this on every dev login, including
+        // machines that were never a station. The plist is our marker for
+        // "this was a station": if it's absent there's nothing registered,
+        // so skip `disable`/`bootout` to avoid spawning launchctl and
+        // emitting stderr noise about an unknown label on the hot path.
+        if !plist_path.exists() {
+            return Ok(());
+        }
         // Order matters when called from within the managed process: the
         // bootout SIGTERMs us, so do everything that must complete first.
         //   1. `disable` records the persistent flag -> launchd won't respawn.
@@ -265,9 +275,7 @@ fn apply_launch_on_boot_macos(enable: bool, exe: &std::path::Path) -> crate::err
         //   3. bootout unloads the in-memory definition (and kills us if
         //      self-managed, which is now safe).
         let _ = launchctl::disable(LABEL);
-        if plist_path.exists() {
-            std::fs::remove_file(&plist_path).map_err(|e| format!("Remove plist: {e}"))?;
-        }
+        std::fs::remove_file(&plist_path).map_err(|e| format!("Remove plist: {e}"))?;
         launchctl::bootout(LABEL);
         return Ok(());
     }
@@ -644,9 +652,20 @@ fn apply_launch_on_boot_windows(
     const VALUE: &str = "TofuPilot";
 
     if !enable {
-        let _ = std::process::Command::new("reg")
-            .args(["delete", KEY, "/v", VALUE, "/f"])
-            .output();
+        // Plain `tofupilot login` calls this on every dev login. Probe the
+        // Run value first; if it's absent (machine was never a station)
+        // skip the `reg delete` so we don't shell out and log a failure
+        // for a value that was never there.
+        let exists = std::process::Command::new("reg")
+            .args(["query", KEY, "/v", VALUE])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if exists {
+            let _ = std::process::Command::new("reg")
+                .args(["delete", KEY, "/v", VALUE, "/f"])
+                .output();
+        }
         return Ok(());
     }
 

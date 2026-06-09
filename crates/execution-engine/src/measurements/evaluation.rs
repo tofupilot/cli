@@ -926,4 +926,72 @@ mod tests {
         let evaluated = auto_evaluate_measurements(vec![measurement], &phase_config);
         assert_eq!(evaluated[0].outcome, ValidatorOutcome::Pass);
     }
+
+    // Verifies the `Mode Check` JSON docs example: a JSON-object measurement
+    // with an `==` object validator deep-equals its expected value and
+    // resolves to PASS, independent of key insertion order.
+    fn obj_value(pairs: &[(&str, &str)]) -> MeasurementValue {
+        let mut map = serde_json::Map::new();
+        for (k, v) in pairs {
+            map.insert((*k).into(), Value::String((*v).into()));
+        }
+        MeasurementValue::Object(map)
+    }
+
+    fn eq_object_validator(pairs: &[(&str, &str)]) -> ValidatorSpec {
+        let mut map = serde_json::Map::new();
+        for (k, v) in pairs {
+            map.insert((*k).into(), Value::String((*v).into()));
+        }
+        ValidatorSpec {
+            outcome: None,
+            operator: Some("==".into()),
+            expected_value: Some(ValidatorExpectedValue::Object(map)),
+            expression: None,
+        }
+    }
+
+    #[test]
+    fn json_object_eq_validator_matches_is_pass() {
+        let m = make(
+            obj_value(&[("mode", "active"), ("power", "high")]),
+            Some(vec![eq_object_validator(&[
+                ("mode", "active"),
+                ("power", "high"),
+            ])]),
+        );
+        let mut m = m;
+        evaluate_measurement_validators(&mut m);
+        assert_eq!(compute_measurement_outcome(&m), ValidatorOutcome::Pass);
+    }
+
+    #[test]
+    fn json_object_eq_validator_key_order_independent() {
+        // Expected value lists keys in the opposite order; deep equality
+        // must still hold because serde_json::Map is sorted.
+        let m = make(
+            obj_value(&[("mode", "active"), ("power", "high")]),
+            Some(vec![eq_object_validator(&[
+                ("power", "high"),
+                ("mode", "active"),
+            ])]),
+        );
+        let mut m = m;
+        evaluate_measurement_validators(&mut m);
+        assert_eq!(compute_measurement_outcome(&m), ValidatorOutcome::Pass);
+    }
+
+    #[test]
+    fn json_object_eq_validator_mismatch_is_fail() {
+        let m = make(
+            obj_value(&[("mode", "idle"), ("power", "high")]),
+            Some(vec![eq_object_validator(&[
+                ("mode", "active"),
+                ("power", "high"),
+            ])]),
+        );
+        let mut m = m;
+        evaluate_measurement_validators(&mut m);
+        assert_eq!(compute_measurement_outcome(&m), ValidatorOutcome::Fail);
+    }
 }

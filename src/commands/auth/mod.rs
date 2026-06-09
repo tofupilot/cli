@@ -213,12 +213,36 @@ pub async fn login_cmd(
     unpark_and_drain(&creds).await;
 
     // Step 8: Station login finalization (sync config, pull, hand off to
-    // station mode / service). Skipped for plain user logins.
-    if let Some(ref installation_id) = creds.installation_id {
-        finalize_station_login(&creds, installation_id).await;
+    // station mode / service) for token logins; for a plain browser login
+    // the machine is going back to development use, so tear down any boot
+    // service a previous station login installed. This makes browser login
+    // the symmetric "return to development" command — no separate disable
+    // step. Best-effort: a failure just leaves a stale unit that the next
+    // `tofupilot uninstall` removes.
+    match creds.installation_id {
+        Some(ref installation_id) => finalize_station_login(&creds, installation_id).await,
+        None => teardown_boot_service().await,
     }
 
     Ok(())
+}
+
+/// Remove any station boot service left by a previous station login,
+/// turning a plain login into the symmetric "return to development"
+/// command. On a never-a-station machine the per-OS guards make this a
+/// pure filesystem stat; on an actual station it shells out to
+/// launchctl/systemctl/reg, so offload off the tokio executor like the
+/// rest of this module's blocking work. Best-effort: a failure just
+/// leaves a stale unit that the next `tofupilot uninstall` removes.
+async fn teardown_boot_service() {
+    let result = tokio::task::spawn_blocking(|| super::config::apply_launch_on_boot(false)).await;
+    match result {
+        Ok(Err(e)) => crate::log::warn(&format!(
+            "couldn't remove the station boot service ({e}); run `tofupilot uninstall` if this machine was a station"
+        )),
+        Err(e) => crate::log::warn(&format!("boot-service teardown task panicked: {e}")),
+        Ok(Ok(())) => {}
+    }
 }
 
 /// Show current identity. Cache-first: when a cached identity exists we
@@ -414,9 +438,18 @@ async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), Cl
     // there for rationale.
     unpark_and_drain(&creds).await;
 
-    // Station logins: sync config + auto-pull + hand off to station mode.
-    if let Some(ref installation_id) = creds.installation_id {
-        finalize_station_login(&creds, installation_id).await;
+    // Unlike the device flow, a token redemption is always a station
+    // login: the server only issues these for `station:<id>`-scoped setup
+    // tokens, so `installation_id` is expected to be present. A missing id
+    // means a server-side anomaly during station setup, NOT a return-to-
+    // development login — so warn and leave any existing boot service
+    // alone rather than tearing down the service the operator is trying
+    // to install.
+    match creds.installation_id {
+        Some(ref installation_id) => finalize_station_login(&creds, installation_id).await,
+        None => crate::log::warn(
+            "station login returned no installation id; the boot service was not set up. Retry `tofupilot login --token <token>`.",
+        ),
     }
 
     Ok(())
@@ -429,6 +462,16 @@ async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), Cl
 async fn finalize_station_login(creds: &Credentials, installation_id: &str) {
     let _ = super::config::sync_config(creds, installation_id).await;
     super::pull::run_cmd(false).await;
+    // A station should survive a reboot without a second command, so a
+    // successful token login is the point where we install the boot
+    // service. (This used to be the separate `tofupilot install` step.)
+    // Best-effort: a failure here still leaves a working foreground
+    // daemon below; it just won't auto-start after a reboot.
+    if let Err(e) = super::config::apply_launch_on_boot(true) {
+        crate::log::warn(&format!(
+            "couldn't enable the station service on boot ({e}); the station runs now but won't restart after a reboot"
+        ));
+    }
     let code = crate::commands::station::run_cmd(creds, false).await;
     std::process::exit(code);
 }

@@ -227,12 +227,6 @@ enum Commands {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Install the station service (writes systemd unit / launchd plist)
-    Install {
-        /// Remove the service definition instead of installing it
-        #[arg(long)]
-        disable: bool,
-    },
     /// Uninstall TofuPilot and remove all data
     Uninstall {
         /// Keep run data and deployments
@@ -540,9 +534,6 @@ async fn main() {
                 }
             }
         }
-        Some(Commands::Install { disable }) => {
-            std::process::exit(commands::install::run_cmd(!disable, json_mode));
-        }
         Some(Commands::Uninstall { keep_data, yes }) => {
             std::process::exit(commands::uninstall::run_cmd(keep_data, yes, json_mode).await);
         }
@@ -570,11 +561,10 @@ async fn main() {
                         return;
                     }
                     // Just run the daemon foreground. The supervisor
-                    // unit was already installed by `tofupilot login`
-                    // (or by an explicit `tofupilot install`); calling
-                    // `apply_launch_on_boot` again from here would
-                    // fire `systemctl enable --now` and spawn a second
-                    // daemon that fights this one for port 7321.
+                    // unit was already installed by `tofupilot login
+                    // --token`; calling `apply_launch_on_boot` again from
+                    // here would fire `systemctl enable --now` and spawn a
+                    // second daemon that fights this one for port 7321.
                     std::process::exit(commands::station::run_cmd(&creds, json_mode).await);
                 }
                 _ => {
