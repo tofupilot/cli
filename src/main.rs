@@ -62,11 +62,8 @@ enum Commands {
         /// Organization slug (skip interactive selection)
         #[arg(long)]
         org: Option<String>,
-        /// Station ID (login as station via device flow)
-        #[arg(long, conflicts_with = "token")]
-        station: Option<String>,
         /// Setup token from dashboard (headless station login, no browser)
-        #[arg(long, conflicts_with_all = ["org", "station"])]
+        #[arg(long, conflicts_with = "org")]
         token: Option<String>,
     },
     /// Show the currently logged-in user
@@ -320,16 +317,10 @@ async fn main() {
         Some(Commands::Login {
             ref url,
             ref org,
-            ref station,
             ref token,
         }) => {
-            if let Err(e) = commands::auth::login_cmd(
-                url.as_deref(),
-                org.as_deref(),
-                station.as_deref(),
-                token.as_deref(),
-            )
-            .await
+            if let Err(e) =
+                commands::auth::login_cmd(url.as_deref(), org.as_deref(), token.as_deref()).await
             {
                 log::error(&format!("Login failed: {e}"));
                 std::process::exit(1);
@@ -536,7 +527,7 @@ async fn main() {
                             std::process::exit(commands::station::run_cmd(&creds, json_mode).await);
                         }
                         _ => {
-                            log::error("Not logged in as a station. Run `tofupilot login --station <id>` first.");
+                            log::error("Not logged in as a station. Generate a setup token from the station's page in the dashboard, then run `tofupilot login --token <setup-token>`.");
                             std::process::exit(1);
                         }
                     }

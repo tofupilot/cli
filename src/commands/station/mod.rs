@@ -184,7 +184,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     let installation_id = match creds.installation_id.as_deref() {
         Some(id) if !id.is_empty() => id,
         _ => {
-            log::error("No installation ID. Re-login with `tofupilot login --station <id>`.");
+            log::error("No installation ID. Generate a setup token from the station's page in the dashboard, then run `tofupilot login --token <setup-token>`.");
             return 1;
         }
     };

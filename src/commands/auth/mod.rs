@@ -104,7 +104,6 @@ fn display_whoami(cache: &db::WhoamiCache) {
 pub async fn login_cmd(
     base_url: Option<&str>,
     org_slug: Option<&str>,
-    station: Option<&str>,
     token: Option<&str>,
 ) -> Result<(), CliError> {
     let base = base_url.unwrap_or(DEFAULT_BASE_URL);
@@ -168,20 +167,8 @@ pub async fn login_cmd(
     let org = select_org(&client, base, &token, org_slug).await?;
     crate::log::success(&format!("Organization: {}", org.name));
 
-    // Step 5: Create API key (optionally station-scoped)
-    let mut body = serde_json::json!({ "organization_id": org.id });
-    if let Some(station_id) = station {
-        // Station installation rows require hardware fields NOT NULL on
-        // insert. Capture them now so the row lands complete before any
-        // Hardware event lands over Centrifugo.
-        let hw = crate::commands::station::collect_hardware();
-        body["station_id"] = serde_json::json!(station_id);
-        body["hostname"] = serde_json::json!(hw.hostname);
-        body["os"] = serde_json::json!(hw.os);
-        body["platform"] = serde_json::json!(hw.platform);
-        body["mac_address"] = serde_json::json!(hw.mac_address);
-        body["cli_version"] = serde_json::json!(hw.cli_version);
-    }
+    // Step 5: Create a user-scoped API key for the selected organization.
+    let body = serde_json::json!({ "organization_id": org.id });
 
     let resp = client
         .post(format!("{base}/api/cli/login"))

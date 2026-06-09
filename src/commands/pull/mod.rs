@@ -134,7 +134,7 @@ pub async fn run_with(
             crate::log::error(&format!("Failed to get deployments: {}", e.body()));
             if matches!(&e, crate::error::CliError::Status { status, .. } if *status == 403) {
                 crate::log::info(
-                    "Make sure you logged in as a station: `tofupilot login --station <id>`",
+                    "Make sure you logged in as a station: generate a setup token from the station's page in the dashboard, then run `tofupilot login --token <setup-token>`.",
                 );
             }
             return 1;

@@ -13,6 +13,11 @@ ignore = [
     # fix available until those upstreams migrate; it is a proc-macro with no
     # runtime attack surface. Revisit when specta/image drop it.
     "RUSTSEC-2024-0436",
+    # `proc-macro-error2` is unmaintained (RUSTSEC-2026-0173). Pulled
+    # transitively by `validator_derive` (-> validator -> execution-engine).
+    # Compile-time-only proc-macro with no runtime attack surface; no upstream
+    # fix yet. Revisit when validator drops it.
+    "RUSTSEC-2026-0173",
 ]
 
 [licenses]
