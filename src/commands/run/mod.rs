@@ -1881,8 +1881,8 @@ fn resolve_procedure_id(procedure_id_arg: Option<&str>, json_mode: bool) -> Resu
         })
         .collect();
 
-    let selection = dialoguer::Select::new()
-        .with_prompt("Select a procedure to run")
+    let selection = dialoguer::FuzzySelect::new()
+        .with_prompt("Select a procedure to run (type to filter)")
         .items(&labels)
         .default(0)
         .interact()

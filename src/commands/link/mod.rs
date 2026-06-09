@@ -58,6 +58,13 @@ pub fn read_link(dir: &Path) -> Option<ProcedureLink> {
 
 /// Resolve the directory a link command targets: an explicit path (file →
 /// parent dir, dir → itself) or the current working directory.
+/// Short, human-scannable form of a procedure id for picker labels —
+/// enough to disambiguate same-named procedures without printing the
+/// full UUID.
+fn short_id(id: &str) -> &str {
+    &id[..8.min(id.len())]
+}
+
 fn resolve_dir(path: Option<&Path>) -> Result<PathBuf, i32> {
     let raw = match path {
         Some(p) => p.to_path_buf(),
@@ -223,7 +230,7 @@ async fn resolve_target(
         return Err(1);
     }
 
-    // Explicit selector: match id, then name (case-insensitive).
+    // Explicit selector: match id first (always unambiguous), then name.
     if let Some(sel) = procedure {
         if let Some(p) = procedures.iter().find(|p| p.id == sel) {
             return Ok(Target {
@@ -231,14 +238,33 @@ async fn resolve_target(
                 name: Some(p.name.clone()),
             });
         }
-        if let Some(p) = procedures.iter().find(|p| p.name.eq_ignore_ascii_case(sel)) {
-            return Ok(Target {
-                id: p.id.clone(),
-                name: Some(p.name.clone()),
-            });
+        let by_name: Vec<_> = procedures
+            .iter()
+            .filter(|p| p.name.eq_ignore_ascii_case(sel))
+            .collect();
+        match by_name.as_slice() {
+            [p] => {
+                return Ok(Target {
+                    id: p.id.clone(),
+                    name: Some(p.name.clone()),
+                });
+            }
+            // Several procedures share this name — refuse to guess. List
+            // the candidates so the caller can re-run with an unambiguous id.
+            [_, ..] => {
+                crate::log::error(&format!(
+                    "Multiple procedures named '{sel}'. Re-run with one of these ids:"
+                ));
+                for p in by_name {
+                    crate::log::info(&format!("  {} ({})", p.name, p.id));
+                }
+                return Err(1);
+            }
+            [] => {
+                crate::log::error(&format!("No procedure matching '{sel}' (by id or name)."));
+                return Err(1);
+            }
         }
-        crate::log::error(&format!("No procedure matching '{sel}' (by id or name)."));
-        return Err(1);
     }
 
     // Single procedure: nothing to pick.
@@ -262,12 +288,17 @@ async fn resolve_target(
         return Err(1);
     }
 
+    // Include a short id suffix so duplicate procedure names stay
+    // distinguishable AND every label is unique. `dialoguer::FuzzySelect`
+    // resolves the chosen label back to an index with `position(|i| i.eq(label))`
+    // (first match), so identical labels would otherwise return the wrong
+    // procedure.
     let labels: Vec<String> = procedures
         .iter()
-        .map(|p| format!("{} ({})", p.name, p.id))
+        .map(|p| format!("{} ({})", p.name, short_id(&p.id)))
         .collect();
-    let selection = dialoguer::Select::new()
-        .with_prompt("Select a procedure to link")
+    let selection = dialoguer::FuzzySelect::new()
+        .with_prompt("Select a procedure to link (type to filter)")
         .items(&labels)
         .default(0)
         .interact()
