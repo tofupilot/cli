@@ -7,7 +7,7 @@
 //! 1. PATH lookup — honour any system-installed uv (homebrew, apt,
 //!    user-managed cargo install).
 //! 2. Local cache at `~/.tofupilot/bin/uv` — populated on first call.
-//! 3. Fresh download from astral-sh GitHub releases into the cache.
+//! 3. Fresh download from the TofuPilot R2 mirror into the cache.
 //!
 //! Silent: no operator prompt. The download surfaces progress and
 //! errors via stderr; on failure the caller sees a clear "couldn't
@@ -32,7 +32,20 @@ enum ArchiveKind {
 /// must agree on the uv version so a `pull` on one host produces an
 /// identical venv to a `pull` on another. Following `latest` would
 /// silently drift between machines and break that invariant.
+///
+/// A bump must ship in a CLI release: the "Mirror uv to R2" step in
+/// release-cli.yml parses this constant (and the sha256 pins below)
+/// and uploads the new archives to the mirror. Until that release
+/// runs, the new version does not exist at `UV_BASE_URL`.
 const UV_VERSION: &str = "0.11.8";
+
+/// Default base URL for uv archives. The pinned release is mirrored
+/// from astral-sh GitHub releases into the same R2 bucket that serves
+/// CLI binaries (dl.tofupilot.sh) — github.com is unreachable from
+/// China, so like the CLI itself, uv must not depend on it at install
+/// time. Override with `TOFUPILOT_UV_BASE` for self-hosted or
+/// air-gapped mirrors; the layout is `{base}/{UV_VERSION}/uv-{target}.{ext}`.
+const UV_BASE_URL: &str = "https://dl.tofupilot.sh/uv";
 
 /// Resolve a usable `uv` executable. Returns the path to invoke;
 /// callers should pass it to `Command::new` instead of a bare "uv".
@@ -98,7 +111,10 @@ fn cached_path() -> crate::error::CliResult<PathBuf> {
 /// the hashes below from astral-sh's `.sha256` sidecars. Pinning in
 /// source defends against a coordinated supply-chain swap (mirror +
 /// sidecar tampered together) that wire-side sha verification can't
-/// catch. Regenerate with:
+/// catch — including a compromise of our own R2 mirror. The
+/// "Mirror uv to R2" step in release-cli.yml greps these pins (the
+/// quoted triple followed by a 64-hex literal) to verify archives
+/// before upload; keep that literal layout. Regenerate with:
 /// ```sh
 /// for t in aarch64-apple-darwin x86_64-apple-darwin \
 ///          aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
@@ -157,8 +173,14 @@ async fn download_uv(dest: &Path) -> crate::error::CliResult<()> {
         ArchiveKind::TarGz => "tar.gz",
         ArchiveKind::Zip => "zip",
     };
-    let url =
-        format!("https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-{target}.{ext}");
+    let base = std::env::var("TOFUPILOT_UV_BASE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| UV_BASE_URL.to_string());
+    let url = format!(
+        "{}/{UV_VERSION}/uv-{target}.{ext}",
+        base.trim_end_matches('/')
+    );
 
     let bytes = crate::http::client()
         .get(&url)
