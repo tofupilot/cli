@@ -168,16 +168,29 @@ struct ResolvedSource {
     link_hint: Option<String>,
 }
 
+/// True when `rel` ends in a YAML extension (`.yaml`/`.yml`,
+/// case-insensitive). Used to classify a manifest-declared entry point
+/// as a YAML procedure regardless of its filename. The execution-engine
+/// loader applies the same extension rule when it opens the file.
+fn has_yaml_extension(rel: &str) -> bool {
+    Path::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+}
+
 /// Which framework drives this procedure. Resolved once per run by
 /// scanning the package dir; replaces the prior implicit
 /// "yaml_lookup → has_openhtf → fallthrough" chain that was duplicated
 /// across `start()` and `run_test()`.
 ///
 /// Detection order:
-///   1. `procedure.yaml` (or `.yml`) in the package dir → `Yaml`.
-///   2. otherwise, `openhtf` named in pyproject / uv.lock / pylock.toml /
+///   1. manifest `entry_point` naming a `.yaml`/`.yml` file → `Yaml`
+///      (lets a procedure file use any name, not just `procedure.yaml`).
+///   2. `procedure.yaml` (or `.yml`) in the package dir → `Yaml`.
+///   3. otherwise, `openhtf` named in pyproject / uv.lock / pylock.toml /
 ///      requirements.txt → `Openhtf`.
-///   3. otherwise → `Plain` python.
+///   4. otherwise → `Plain` python.
 ///
 /// Adding a new framework (pytest, robot, …) is one new arm here plus
 /// one new arm in `run_test`. No other call site needs touching.
@@ -207,15 +220,29 @@ impl Framework {
     /// one or two file existence checks plus a small text scan when
     /// neither yaml nor openhtf is obvious.
     ///
-    /// Order: yaml > openhtf > pytest > robot > plain. yaml wins
-    /// because it's the canonical TofuPilot procedure format. openhtf
-    /// wins over pytest because a project that has both (e.g. an
-    /// OpenHTF test suite that also runs unit tests via pytest) is
-    /// driven by openhtf — pytest is incidental tooling, not the run
-    /// target. Robot sits below pytest for the same reason: a repo
-    /// shipping both `test_*.py` and `*.robot` is almost always
-    /// pytest-driven with Robot used as auxiliary suites.
-    fn detect(package_dir: &Path) -> Self {
+    /// `manifest_entry` is the user-declared entry point from the
+    /// deployment manifest (`null` for local-path runs and pre-entry
+    /// bundles). When it names a `.yaml`/`.yml` file the procedure is
+    /// unambiguously YAML-driven regardless of filename — this is the
+    /// only way to run a procedure file not named `procedure.yaml`. The
+    /// path is server-validated and re-checked by `Manifest::parse`, so
+    /// it's safe to join onto `package_dir`.
+    ///
+    /// Order: explicit-yaml-entry > yaml > openhtf > pytest > robot >
+    /// plain. yaml wins (after the explicit entry) because it's the
+    /// canonical TofuPilot procedure format. openhtf wins over pytest
+    /// because a project that has both (e.g. an OpenHTF test suite that
+    /// also runs unit tests via pytest) is driven by openhtf — pytest is
+    /// incidental tooling, not the run target. Robot sits below pytest
+    /// for the same reason: a repo shipping both `test_*.py` and
+    /// `*.robot` is almost always pytest-driven with Robot used as
+    /// auxiliary suites.
+    fn detect(package_dir: &Path, manifest_entry: Option<&str>) -> Self {
+        if let Some(rel) = manifest_entry {
+            if has_yaml_extension(rel) {
+                return Framework::Yaml(package_dir.join(rel));
+            }
+        }
         if let Some(yaml) = engine::find_procedure_yaml(package_dir) {
             return Framework::Yaml(yaml);
         }
@@ -334,7 +361,7 @@ async fn prepare_run(
         manifest_present,
     } = layout;
 
-    let framework = Framework::detect(&package_dir);
+    let framework = Framework::detect(&package_dir, entry_point.as_deref());
 
     let entry_file = resolve_entry_file(entry_point.as_deref(), &framework, &package_dir)?;
 
@@ -1983,6 +2010,54 @@ mod prepare_run_tests {
 
     fn touch_procedure_yaml(package_dir: &Path) {
         fs::write(package_dir.join("procedure.yaml"), b"name: test\n").unwrap();
+    }
+
+    /// A manifest `entry_point` ending in `.yaml`/`.yml` forces YAML
+    /// detection even when the file isn't named `procedure.yaml` and
+    /// even when nothing else on disk hints at a framework. This is the
+    /// only way to run a procedure file under a custom name.
+    #[test]
+    fn detect_honors_yaml_entry_point_with_custom_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        // No procedure.yaml on disk — detection must come purely from
+        // the manifest entry. (The file need not exist for detection;
+        // the loader opens it later.)
+        let fw = Framework::detect(pkg, Some("my-test.yaml"));
+        match fw {
+            Framework::Yaml(p) => assert_eq!(p, pkg.join("my-test.yaml")),
+            other => panic!("expected Yaml, got {other:?}"),
+        }
+    }
+
+    /// A non-YAML entry point (e.g. a pytest sentinel `main.py`) must
+    /// NOT be misclassified as YAML — the extension check is exact.
+    #[test]
+    fn detect_ignores_non_yaml_entry_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        // main.py present → without a yaml entry this is Openhtf/Plain,
+        // never Yaml.
+        fs::write(pkg.join("main.py"), b"print('hi')\n").unwrap();
+        let fw = Framework::detect(pkg, Some("main.py"));
+        assert!(
+            !matches!(fw, Framework::Yaml(_)),
+            "main.py entry must not be YAML, got {fw:?}",
+        );
+    }
+
+    /// `procedure.yaml` on disk still wins when no entry point is set —
+    /// the legacy auto-discovery path is unchanged.
+    #[test]
+    fn detect_falls_back_to_procedure_yaml_when_no_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        touch_procedure_yaml(pkg);
+        let fw = Framework::detect(pkg, None);
+        match fw {
+            Framework::Yaml(p) => assert_eq!(p, pkg.join("procedure.yaml")),
+            other => panic!("expected Yaml, got {other:?}"),
+        }
     }
 
     /// Monorepo: manifest carries `root_directory`, venv lives at
