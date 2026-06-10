@@ -149,7 +149,10 @@ fn holder_pid(pid_file: &std::path::Path) -> Option<u32> {
 fn remove_own_pidfile() {
     let Ok(p) = pid_path() else { return };
     let ours = std::process::id().to_string();
-    if std::fs::read_to_string(&p).map(|s| s.trim() == ours).unwrap_or(false) {
+    if std::fs::read_to_string(&p)
+        .map(|s| s.trim() == ours)
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -328,7 +331,10 @@ pub struct PendingUpdate {
 
 impl StateDb {
     fn get(&self, table: TableDefinition<&str, &[u8]>, key: &str) -> CliResult<Option<Vec<u8>>> {
-        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(table) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -381,7 +387,10 @@ impl StateDb {
     /// the station can actually run right now (deployment present
     /// on disk, deserves to appear as a pickable row).
     pub fn list_pull_state(&self) -> CliResult<Vec<(String, PullState)>> {
-        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(PULL_SYNC) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -553,7 +562,10 @@ impl StateDb {
     }
 
     pub fn list_queued_runs<T: serde::de::DeserializeOwned>(&self) -> CliResult<Vec<(String, T)>> {
-        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(RUN_QUEUE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -630,7 +642,10 @@ impl StateDb {
     }
 
     pub fn list_config(&self) -> CliResult<Vec<(String, String)>> {
-        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(STATION_CONFIG) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),

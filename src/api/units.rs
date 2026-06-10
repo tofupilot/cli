@@ -303,11 +303,25 @@ async fn execute_create(client: &TofuPilot, args: CreateArgs, json_mode: bool) -
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                let value = serde_json::to_value(&res).unwrap_or_default();
+                let id = value["id"]
+                    .as_str()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default();
+                crate::log::success(&format!("Created unit{id}"));
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -530,7 +544,14 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -545,11 +566,25 @@ async fn execute_delete(client: &TofuPilot, args: RmArgs, json_mode: bool) -> i3
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                let value = serde_json::to_value(&res).unwrap_or_default();
+                let id = value["id"]
+                    .as_str()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default();
+                crate::log::success(&format!("Deleted unit{id}"));
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -562,11 +597,22 @@ async fn execute_get(client: &TofuPilot, args: GetArgs, json_mode: bool) -> i32 
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -616,11 +662,25 @@ async fn execute_update(client: &TofuPilot, args: UpdateArgs, json_mode: bool) -
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                let value = serde_json::to_value(&res).unwrap_or_default();
+                let id = value["id"]
+                    .as_str()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default();
+                crate::log::success(&format!("Updated unit{id}"));
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -634,11 +694,22 @@ async fn execute_add_child(client: &TofuPilot, args: AddChildArgs, json_mode: bo
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -654,11 +725,22 @@ async fn execute_remove_child(client: &TofuPilot, args: RemoveChildArgs, json_mo
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -676,11 +758,22 @@ async fn execute_create_attachment(
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -700,11 +793,22 @@ async fn execute_delete_attachment(
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }

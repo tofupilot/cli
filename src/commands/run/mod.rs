@@ -603,7 +603,8 @@ pub async fn start(
     // entry file, and Python subprocess cwd all live there. For
     // single-package bundles `root_directory` is null and the
     // package dir collapses to the deployment root.
-    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, yaml_hint.as_deref()).await {
+    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, yaml_hint.as_deref()).await
+    {
         Ok(p) => p,
         Err(fail) => {
             crate::log::error(&fail.message);

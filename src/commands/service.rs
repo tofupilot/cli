@@ -296,14 +296,42 @@ pub fn stop_cmd(json_mode: bool) -> i32 {
 /// `TOFUPILOT_LOCAL_UI_PORT` override + log paths so a remote operator
 /// can diagnose without a second round-trip.
 ///
-/// Exit-code contract: returns 0 iff the loopback probe is Listening.
-/// On a non-Listening probe, returns the supervisor's exit code
-/// (Linux/macOS) or 1 (Windows). Scripts can rely on `exit==0` meaning
-/// "the operator UI socket is accepting on the resolved port."
+/// Exit-code contract: returns 0 iff the loopback probe is Listening —
+/// scripts can rely on `exit==0` meaning "the operator UI socket is
+/// accepting on the resolved port." In `--json` mode a non-Listening
+/// probe always exits 1; in human mode it returns the supervisor's
+/// non-zero exit code when available (systemd 3=inactive,
+/// 4=not-installed) so operators get the richer diagnostic, clamped
+/// to 1 when the supervisor claims success despite the dead socket.
 pub fn status_cmd(json_mode: bool) -> i32 {
-    let _ = json_mode;
     let port = local_port();
     let env_override = std::env::var("TOFUPILOT_LOCAL_UI_PORT").ok();
+
+    if json_mode {
+        // Single status object; exit 0 iff listening, else 1.
+        let probe = probe_loopback(port);
+        let listening = matches!(probe, ProbeResult::Listening);
+        let holder = if listening { None } else { port_holder(port) };
+        let status = match &probe {
+            ProbeResult::Listening => "listening",
+            ProbeResult::Refused => "refused",
+            ProbeResult::Timeout => "timeout",
+            ProbeResult::Other(_) => "error",
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "service_status",
+                "status": status,
+                "listening": listening,
+                "port": port,
+                "port_override": env_override,
+                "kiosk_url": format!("http://127.0.0.1:{port}/"),
+                "port_holder": holder,
+            })
+        );
+        return if listening { 0 } else { 1 };
+    }
 
     if let Some(v) = env_override.as_deref() {
         log::info(&format!(
@@ -360,9 +388,13 @@ pub fn status_cmd(json_mode: bool) -> i32 {
         // loopback we exit 0 regardless of what `systemctl status`
         // says. Otherwise propagate the supervisor's exit code so
         // callers can distinguish "inactive" (3) from "service not
-        // installed" (4) etc.
+        // installed" (4) etc. — clamped to 1 when the supervisor
+        // claims success despite the dead socket, keeping the
+        // "exit==0 iff listening" contract.
         if matches!(probe, ProbeResult::Listening) {
             0
+        } else if code == 0 {
+            1
         } else {
             code
         }
@@ -377,8 +409,12 @@ pub fn status_cmd(json_mode: bool) -> i32 {
             .status()
             .map(|s| s.code().unwrap_or(1))
             .unwrap_or(1);
+        // launchctl print exits 0 for a loaded-but-not-accepting
+        // service — clamp to 1 to keep "exit==0 iff listening".
         if matches!(probe, ProbeResult::Listening) {
             0
+        } else if code == 0 {
+            1
         } else {
             code
         }

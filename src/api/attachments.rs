@@ -52,11 +52,22 @@ async fn execute_initialize(client: &TofuPilot, args: InitializeArgs, json_mode:
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }
@@ -69,11 +80,22 @@ async fn execute_finalize(client: &TofuPilot, args: FinalizeArgs, json_mode: boo
         Ok(res) => {
             if json_mode {
                 println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+            } else {
+                // No display config for this operation: fall back to the
+                // JSON payload so the command never succeeds silently.
+                println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
             }
             0
         }
         Err(e) => {
-            eprintln!("{e}");
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "type": "error", "message": e.to_string() })
+                );
+            } else {
+                eprintln!("{e}");
+            }
             1
         }
     }

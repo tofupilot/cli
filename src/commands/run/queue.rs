@@ -659,15 +659,7 @@ pub async fn retry_one(creds: &Credentials, bus: Option<&EventBus>, queue_id: &s
     queued.next_retry_at = None;
     let _ = db.enqueue_run(queue_id, &queued);
     drop(db);
-    upload_queued_run(
-        crate::http::client(),
-        creds,
-        queue_id,
-        &queued,
-        bus,
-        true,
-    )
-    .await;
+    upload_queued_run(crate::http::client(), creds, queue_id, &queued, bus, true).await;
 }
 
 /// Operator clicked "Drop". Hard-delete the entry + attachments.
@@ -1053,15 +1045,8 @@ pub async fn retry_cmd(creds: &Credentials, queue_id: Option<&str>, json_mode: b
     queued.next_retry_at = None;
     let _ = db.enqueue_run(id, &queued);
     drop(db);
-    let run_id = upload_queued_run(
-        crate::http::client(),
-        creds,
-        id,
-        &queued,
-        None,
-        json_mode,
-    )
-    .await;
+    let run_id =
+        upload_queued_run(crate::http::client(), creds, id, &queued, None, json_mode).await;
 
     match run_id {
         Some(run_id) => {

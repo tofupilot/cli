@@ -80,7 +80,24 @@ fn save_whoami_cache(cache: &db::WhoamiCache) {
     }
 }
 
-fn display_whoami(cache: &db::WhoamiCache) {
+fn display_whoami(cache: &db::WhoamiCache, json_mode: bool) {
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "whoami",
+                "auth_type": cache.auth_type,
+                "user_id": cache.user_id,
+                "user_name": cache.user_name,
+                "user_email": cache.user_email,
+                "station_id": cache.station_id,
+                "station_name": cache.station_name,
+                "organization_name": cache.organization_name,
+                "organization_slug": cache.organization_slug,
+            })
+        );
+        return;
+    }
     match cache.auth_type.as_str() {
         "station" => {
             crate::log::success(&format!(
@@ -251,11 +268,11 @@ async fn teardown_boot_service() {
 /// or on a flaky link where the probe would otherwise stall up to
 /// `AUTH_PROBE`. The blocking server fetch only happens on a cold cache,
 /// where there's nothing local to show.
-pub async fn whoami_cmd() -> Result<(), CliError> {
+pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
     let creds = credentials::load().ok_or("not logged in, run `tofupilot login`")?;
 
     if let Some(cache) = load_whoami_cache() {
-        display_whoami(&cache);
+        display_whoami(&cache, json_mode);
         // Refresh only when the cache is stale, so the common case is
         // instant and offline never stalls. A stale-cache refresh is still
         // bounded by AUTH_PROBE and falls back silently — we already showed
@@ -277,13 +294,28 @@ pub async fn whoami_cmd() -> Result<(), CliError> {
     match fetch_whoami(&client, &creds).await {
         Ok(cache) => {
             save_whoami_cache(&cache);
-            display_whoami(&cache);
+            display_whoami(&cache, json_mode);
         }
         Err(_) => {
-            crate::log::success(&format!(
-                "Logged in to {} ({})",
-                creds.organization_slug, creds.base_url
-            ));
+            if json_mode {
+                // Offline fallback: credentials exist but identity could
+                // not be fetched. `partial` lets consumers distinguish
+                // this from a full identity object.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "whoami",
+                        "partial": true,
+                        "organization_slug": creds.organization_slug,
+                        "base_url": creds.base_url,
+                    })
+                );
+            } else {
+                crate::log::success(&format!(
+                    "Logged in to {} ({})",
+                    creds.organization_slug, creds.base_url
+                ));
+            }
         }
     }
     Ok(())
@@ -429,7 +461,7 @@ async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), Cl
     let whoami_client = Client::builder().timeout(timeouts::AUTH_PROBE).build()?;
     if let Ok(cache) = fetch_whoami(&whoami_client, &creds).await {
         save_whoami_cache(&cache);
-        display_whoami(&cache);
+        display_whoami(&cache, false);
     } else {
         crate::log::success(&format!("Logged in to {}", creds.organization_slug));
     }

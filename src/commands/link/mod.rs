@@ -137,6 +137,18 @@ pub async fn link_cmd(path: Option<&Path>, procedure: Option<&str>, json_mode: b
         return 1;
     }
 
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "linked",
+                "path": dir.display().to_string(),
+                "procedure_id": chosen.id,
+                "procedure_name": chosen.name,
+            })
+        );
+        return 0;
+    }
     let label = chosen
         .name
         .as_deref()
@@ -149,20 +161,41 @@ pub async fn link_cmd(path: Option<&Path>, procedure: Option<&str>, json_mode: b
 
 /// `tofupilot unlink [path]` — remove `procedure.json`. Idempotent: a dir
 /// that isn't linked is reported, not an error.
-pub fn unlink_cmd(path: Option<&Path>) -> i32 {
+pub fn unlink_cmd(path: Option<&Path>, json_mode: bool) -> i32 {
     let dir = match resolve_dir(path) {
         Ok(d) => d,
         Err(code) => return code,
     };
     let file = dir.join(LINK_FILE);
     if !file.exists() {
-        crate::log::info(&format!("{} is not linked.", dir.display()));
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "not_linked",
+                    "path": dir.display().to_string(),
+                })
+            );
+        } else {
+            crate::log::info(&format!("{} is not linked.", dir.display()));
+        }
         return 0;
     }
     let name = read_link(&dir).and_then(|l| l.procedure_name);
     if let Err(e) = std::fs::remove_file(&file) {
         crate::log::error(&format!("Remove {}: {e}", file.display()));
         return 1;
+    }
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "unlinked",
+                "path": dir.display().to_string(),
+                "procedure_name": name,
+            })
+        );
+        return 0;
     }
     match name {
         Some(n) => crate::log::success(&format!("Unlinked {} (was {n})", dir.display())),
@@ -276,13 +309,25 @@ async fn resolve_target(
         });
     }
 
-    // Non-interactive (CI / --json): can't show a picker; require --procedure.
+    // Non-interactive (CI / --json): can't show a picker; require
+    // --procedure. One typed error object on stderr, candidates as
+    // typed events on stdout so scripts can offer the choice.
     if json_mode {
-        crate::log::error("Multiple procedures available. Use --procedure to select one.");
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "type": "error",
+                "message": "Multiple procedures available. Use --procedure to select one.",
+            })
+        );
         for p in &procedures {
             println!(
                 "{}",
-                serde_json::json!({ "procedure_id": p.id, "name": p.name })
+                serde_json::json!({
+                    "type": "procedure_candidate",
+                    "procedure_id": p.id,
+                    "name": p.name,
+                })
             );
         }
         return Err(1);

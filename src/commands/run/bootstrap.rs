@@ -222,9 +222,11 @@ fn confirm_bootstrap(project_dir: &Path, runtime_version: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Spawn a blocking uv invocation on the tokio threadpool. `args` is
-/// joined onto `uv` and inherits stdio so operators see uv's normal
-/// progress output. `env` lets callers inject things like
+/// Spawn a blocking uv invocation on the tokio threadpool. uv's
+/// stdout is redirected to our stderr so operators still see its
+/// progress output while the parent's stdout stays reserved for the
+/// `--json` event stream (uv writing "Using CPython..." to stdout
+/// would corrupt it). `env` lets callers inject things like
 /// `UV_PROJECT_ENVIRONMENT` without leaking them into the parent
 /// process. `label` flows into the error message; matches the shape
 /// `sync::run_cmd` expects so call sites stay symmetrical.
@@ -245,9 +247,19 @@ async fn run_uv(
         for (k, v) in &env {
             command.env(k, v);
         }
-        let status = command
-            .status()
-            .map_err(|e| format!("Spawn {label}: {e}"))?;
+        command.stdout(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|e| format!("Spawn {label}: {e}"))?;
+        let drain = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut out, &mut std::io::stderr());
+            })
+        });
+        let status = child.wait().map_err(|e| format!("Wait {label}: {e}"))?;
+        // Join the drain so the tool's final output (the part that
+        // explains a failure) lands before our error message.
+        if let Some(handle) = drain {
+            let _ = handle.join();
+        }
         if !status.success() {
             return Err(
                 format!("{label} exited with status {}", status.code().unwrap_or(-1),).into(),

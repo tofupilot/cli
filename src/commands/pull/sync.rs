@@ -635,20 +635,36 @@ pub(crate) fn venv_python(venv: &Path) -> PathBuf {
     }
 }
 
-/// Spawn a subprocess, inheriting stdio, and surface a descriptive error when
-/// it fails. `label` is the human-readable step name used in error messages
-/// (e.g. `"pip install"`).
+/// Spawn a subprocess and surface a descriptive error when it fails.
+/// The child's stdout is redirected to our stderr so tool progress
+/// output (uv, pip) never lands on the parent's stdout, which is
+/// reserved for `--json` event streams. `label` is the human-readable
+/// step name used in error messages (e.g. `"pip install"`).
 pub(crate) fn run_subprocess(
     program: &Path,
     args: &[&std::ffi::OsStr],
     cwd: &Path,
     label: &str,
 ) -> crate::error::CliResult<()> {
-    let status = std::process::Command::new(program)
+    let mut child = std::process::Command::new(program)
         .args(args)
         .current_dir(cwd)
-        .status()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Spawn {label}: {e}"))?;
+    let drain = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut out, &mut std::io::stderr());
+        })
+    });
+    let status = child
+        .wait()
+        .map_err(|e| format!("Wait {label}: {e}"))?;
+    // Join the drain so the tool's final output (the part that
+    // explains a failure) lands before our error message.
+    if let Some(handle) = drain {
+        let _ = handle.join();
+    }
     if !status.success() {
         return Err(format!("{label} exited with status {}", status.code().unwrap_or(-1),).into());
     }

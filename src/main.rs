@@ -339,7 +339,7 @@ async fn main() {
             }
         }
         Some(Commands::Whoami) => {
-            if let Err(e) = commands::auth::whoami_cmd().await {
+            if let Err(e) = commands::auth::whoami_cmd(json_mode).await {
                 log::error(&e.to_string());
                 std::process::exit(1);
             }
@@ -450,7 +450,7 @@ async fn main() {
         }
         Some(Commands::Unlink { ref path }) => {
             startup();
-            std::process::exit(commands::link::unlink_cmd(path.as_deref()));
+            std::process::exit(commands::link::unlink_cmd(path.as_deref(), json_mode));
         }
         Some(Commands::Queue { command }) => {
             startup();
