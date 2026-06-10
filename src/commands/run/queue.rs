@@ -3,7 +3,7 @@
 //! When an upload fails, the run and its attachments are persisted to the
 //! local redb store and retried on a backoff (or parked for deterministic
 //! 4xx-style rejections that won't fix themselves). The `queue` subcommand
-//! lists, retries, and drops entries.
+//! lists, inspects, retries, removes, and exports entries.
 
 use chrono::Utc;
 use std::collections::HashSet;
@@ -115,7 +115,7 @@ pub struct QueuedRun {
 
 /// Backoff schedule for transient failures. Capped at 1h; further
 /// retries reuse the cap. The CLI doesn't drop entries on its own —
-/// only the operator clicking Drop or `tofupilot queue drop` removes
+/// only the operator clicking Drop or `tofupilot queue rm` removes
 /// them.
 ///
 /// First-attempt backoff is deliberately > drain tick (5s) so a
@@ -300,6 +300,10 @@ pub type EventBus = broadcast::Sender<StationEvent>;
 /// `Failed` / `RunUploaded` to `bus` so operator UIs can render
 /// progress. `silent` suppresses stderr — used by the background
 /// drain loop where stderr would interleave with the live run.
+///
+/// Returns the server-issued run id on full success (run created and
+/// every attachment uploaded; the entry is dequeued). Returns `None`
+/// on any failure or when another task holds the upload claim.
 pub async fn upload_queued_run(
     http: &reqwest::Client,
     creds: &Credentials,
@@ -308,7 +312,7 @@ pub async fn upload_queued_run(
     db: &db::StateDb,
     bus: Option<&EventBus>,
     silent: bool,
-) {
+) -> Option<String> {
     // Claim the entry so concurrent callers (drain loop tick + an
     // operator-triggered retry) can't both upload the same run. The
     // guard is dropped at function exit (or panic), releasing the
@@ -316,7 +320,7 @@ pub async fn upload_queued_run(
     // updated state event the loser can pick up.
     let _claim = match UploadClaim::try_acquire(queue_id) {
         Some(c) => c,
-        None => return,
+        None => return None,
     };
     let attempt = queued.attempt_count.saturating_add(1);
     if let Some(bus) = bus {
@@ -363,7 +367,7 @@ pub async fn upload_queued_run(
                 }
                 let cls = classify_sdk_error(&e);
                 record_failure(db, queue_id, &latest_state, attempt, &cls, bus);
-                return;
+                return None;
             }
         }
     };
@@ -411,10 +415,11 @@ pub async fn upload_queued_run(
             // consumers keep working.
             let _ = bus.send(StationEvent::RunUploaded {
                 procedure_id: queued.request.procedure_id.clone(),
-                run_id,
+                run_id: run_id.clone(),
                 dashboard_url,
             });
         }
+        Some(run_id)
     } else {
         if !silent {
             eprintln!("  Some attachments failed (queued for retry)");
@@ -425,6 +430,7 @@ pub async fn upload_queued_run(
             // would skip the run-create check and re-POST.
             record_failure(db, queue_id, &latest_state, attempt, &cls, bus);
         }
+        None
     }
 }
 
@@ -716,8 +722,44 @@ pub fn snapshot_events() -> Vec<StationEvent> {
 }
 
 // ---------------------------------------------------------------------------
-// CLI: tofupilot queue [list|retry|drop]
+// CLI: tofupilot queue [ls|get|retry|rm|export]
 // ---------------------------------------------------------------------------
+
+/// Human status for a queue entry. Lifecycle first: a parked or
+/// backoff entry is not done even when `run_id` is already set (run
+/// created server-side, attachments still failing) — reporting those
+/// as uploaded would read as terminal success in the `ls` table.
+fn entry_status(q: &QueuedRun) -> &'static str {
+    if q.parked {
+        "parked"
+    } else if q.next_retry_at.is_some() {
+        "backoff"
+    } else if q.run_id.is_some() {
+        "attachments pending"
+    } else {
+        "pending"
+    }
+}
+
+/// One queue entry as a flat JSON object. Shared by the `ls` table
+/// and its `--json` output so both stay in sync.
+fn entry_summary(id: &str, q: &QueuedRun) -> serde_json::Value {
+    serde_json::json!({
+        "queue_id": id,
+        "procedure_id": q.request.procedure_id,
+        "outcome": q.request.outcome.to_string(),
+        "serial_number": q.request.serial_number,
+        "run_id": q.run_id,
+        "status": entry_status(q),
+        "attempts": q.attempt_count,
+        "attachments": q.attachments.len(),
+        "parked": q.parked,
+        "queued_at": q.queued_at,
+        "last_attempt_at": q.last_attempt_at,
+        "next_retry_at": q.next_retry_at,
+        "last_error": q.last_error.as_ref().map(|e| e.kind.clone()),
+    })
+}
 
 pub async fn list_cmd(json_mode: bool) -> i32 {
     let db = match db::open() {
@@ -738,17 +780,7 @@ pub async fn list_cmd(json_mode: bool) -> i32 {
 
     if json_mode {
         for (id, queued) in &pending {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "queue_id": id,
-                    "procedure_id": queued.request.procedure_id,
-                    "outcome": queued.request.outcome.to_string(),
-                    "serial_number": queued.request.serial_number,
-                    "run_id": queued.run_id,
-                    "attachments": queued.attachments.len(),
-                })
-            );
+            println!("{}", entry_summary(id, queued));
         }
         return 0;
     }
@@ -791,7 +823,14 @@ pub async fn list_cmd(json_mode: bool) -> i32 {
             header: "STATUS",
             path: "status",
             format: "",
-            width: 12,
+            width: 20,
+            truncate: false,
+        },
+        Column {
+            header: "ATTEMPTS",
+            path: "attempts",
+            format: "",
+            width: 8,
             truncate: false,
         },
         Column {
@@ -803,45 +842,257 @@ pub async fn list_cmd(json_mode: bool) -> i32 {
         },
     ];
 
-    let items: Vec<serde_json::Value> = pending
-        .iter()
-        .map(|(id, q)| {
-            let status = if q.run_id.is_some() {
-                "run uploaded"
-            } else {
-                "pending"
-            };
-            serde_json::json!({
-                "queue_id": id,
-                "procedure_id": q.request.procedure_id,
-                "outcome": q.request.outcome.to_string(),
-                "serial_number": q.request.serial_number,
-                "status": status,
-                "attachments": q.attachments.len(),
-            })
-        })
-        .collect();
+    let items: Vec<serde_json::Value> =
+        pending.iter().map(|(id, q)| entry_summary(id, q)).collect();
 
     display::print_table(&items, &columns);
     0
 }
 
-pub async fn retry_cmd(creds: &Credentials) -> i32 {
-    // Manual `tofupilot queue retry` un-parks every entry so 4xx
-    // failures get another shot — that's the whole point of the
-    // command. Update flags on disk before draining.
-    if let Ok(db) = db::open() {
-        let pending: Vec<(String, QueuedRun)> = db.list_queued_runs().unwrap_or_default();
-        for (id, mut q) in pending {
-            if q.parked || q.next_retry_at.is_some() {
-                q.parked = false;
-                q.next_retry_at = None;
-                let _ = db.enqueue_run(&id, &q);
-            }
+pub async fn get_cmd(queue_id: &str, json_mode: bool) -> i32 {
+    let db = match db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Failed to open database: {e}");
+            return 1;
+        }
+    };
+    let pending: Vec<(String, QueuedRun)> = match db.list_queued_runs() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to read queue: {e}");
+            return 1;
+        }
+    };
+    let Some((id, q)) = pending.into_iter().find(|(qid, _)| qid == queue_id) else {
+        eprintln!("Queue entry '{queue_id}' not found.");
+        return 1;
+    };
+
+    if json_mode {
+        let mut v = serde_json::to_value(&q).unwrap_or_default();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("queue_id".to_string(), id.clone().into());
+            obj.insert("status".to_string(), entry_status(&q).into());
+        }
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return 0;
+    }
+
+    println!("Queue ID:     {id}");
+    println!("Status:       {}", entry_status(&q));
+    println!("Procedure:    {}", q.request.procedure_id);
+    println!("Serial:       {}", q.request.serial_number);
+    println!("Outcome:      {}", q.request.outcome);
+    if let Some(run_id) = &q.run_id {
+        println!("Run ID:       {run_id} (run created server-side)");
+    }
+    println!("Attempts:     {}", q.attempt_count);
+    if let Some(t) = &q.queued_at {
+        println!("Queued at:    {t}");
+    }
+    if let Some(t) = &q.last_attempt_at {
+        println!("Last attempt: {t}");
+    }
+    if let Some(t) = &q.next_retry_at {
+        println!("Next retry:   {t}");
+    }
+    if let Some(err) = &q.last_error {
+        let status = err
+            .status
+            .map(|s| format!(" (HTTP {s})"))
+            .unwrap_or_default();
+        println!("Last error:   {}{status}: {}", err.kind, err.error);
+    }
+    if q.attachments.is_empty() {
+        println!("Attachments:  none");
+    } else {
+        println!("Attachments:");
+        for att in &q.attachments {
+            let missing = if std::path::Path::new(&att.path).exists() {
+                ""
+            } else {
+                " (missing)"
+            };
+            println!("  {} ({}) {}{missing}", att.name, att.mimetype, att.path);
         }
     }
-    drain(creds, None, false).await;
     0
+}
+
+pub async fn export_cmd(queue_id: &str, out: Option<&std::path::Path>, json_mode: bool) -> i32 {
+    let db = match db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Failed to open database: {e}");
+            return 1;
+        }
+    };
+    let pending: Vec<(String, QueuedRun)> = match db.list_queued_runs() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to read queue: {e}");
+            return 1;
+        }
+    };
+    let Some((_, q)) = pending.into_iter().find(|(qid, _)| qid == queue_id) else {
+        eprintln!("Queue entry '{queue_id}' not found.");
+        return 1;
+    };
+    let payload = match serde_json::to_string_pretty(&q.request) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to serialize payload: {e}");
+            return 1;
+        }
+    };
+    match out {
+        Some(path) => {
+            if let Err(e) = std::fs::write(path, payload + "\n") {
+                eprintln!("Failed to write {}: {e}", path.display());
+                return 1;
+            }
+            if json_mode {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "exported",
+                        "queue_id": queue_id,
+                        "path": path.display().to_string(),
+                    })
+                );
+            } else {
+                eprintln!("Exported {queue_id} to {}", path.display());
+            }
+        }
+        // Without --out the payload itself goes to stdout and is
+        // already JSON, so json_mode changes nothing.
+        None => println!("{payload}"),
+    }
+    0
+}
+
+pub async fn retry_cmd(creds: &Credentials, queue_id: Option<&str>, json_mode: bool) -> i32 {
+    let Some(id) = queue_id else {
+        // Manual `tofupilot queue retry` un-parks every entry so 4xx
+        // failures get another shot — that's the whole point of the
+        // command. Update flags on disk before draining; a swallowed
+        // open error here would leave parked entries skipped by the
+        // drain with no hint why nothing was attempted.
+        match db::open() {
+            Ok(db) => {
+                let pending: Vec<(String, QueuedRun)> = db.list_queued_runs().unwrap_or_default();
+                for (id, mut q) in pending {
+                    if q.parked || q.next_retry_at.is_some() {
+                        q.parked = false;
+                        q.next_retry_at = None;
+                        let _ = db.enqueue_run(&id, &q);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to open database: {e}");
+                return 1;
+            }
+        }
+        drain(creds, None, json_mode).await;
+        // Everything was un-parked above, so whatever is still queued
+        // failed again on this pass.
+        let remaining = match db::open().and_then(|db| db.list_queued_runs::<QueuedRun>()) {
+            Ok(p) => p.len(),
+            Err(e) => {
+                eprintln!("Failed to read queue after retry: {e}");
+                return 1;
+            }
+        };
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::json!({"type": "retried", "remaining": remaining})
+            );
+        } else if remaining > 0 {
+            eprintln!(
+                "{remaining} entr{} still queued.",
+                if remaining == 1 { "y" } else { "ies" }
+            );
+        }
+        return if remaining > 0 { 1 } else { 0 };
+    };
+
+    let db = match db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Failed to open database: {e}");
+            return 1;
+        }
+    };
+    let pending: Vec<(String, QueuedRun)> = match db.list_queued_runs() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to read queue: {e}");
+            return 1;
+        }
+    };
+    let Some((_, mut queued)) = pending.into_iter().find(|(qid, _)| qid == id) else {
+        eprintln!("Queue entry '{id}' not found.");
+        return 1;
+    };
+    queued.parked = false;
+    queued.next_retry_at = None;
+    let _ = db.enqueue_run(id, &queued);
+    let run_id = upload_queued_run(
+        crate::http::client(),
+        creds,
+        id,
+        &queued,
+        &db,
+        None,
+        json_mode,
+    )
+    .await;
+
+    match run_id {
+        Some(run_id) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    serde_json::json!({"type": "uploaded", "queue_id": id, "run_id": run_id})
+                );
+            }
+            0
+        }
+        None => {
+            // In human mode the failure detail already went to stderr
+            // (upload runs non-silent). In json mode surface the
+            // persisted failure record — including a partial-success
+            // run_id, so a script doesn't replay a payload whose run
+            // already exists server-side.
+            if json_mode {
+                let entry = db
+                    .list_queued_runs::<QueuedRun>()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|(qid, _)| qid == id)
+                    .map(|(_, q)| q);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "failed",
+                        "queue_id": id,
+                        "run_id": entry.as_ref().and_then(|q| q.run_id.clone()),
+                        "error": entry.as_ref().and_then(|q| q.last_error.as_ref()).map(|e| {
+                            serde_json::json!({
+                                "kind": e.kind,
+                                "status": e.status,
+                                "error": e.error,
+                            })
+                        }),
+                    })
+                );
+            }
+            1
+        }
+    }
 }
 
 pub async fn drop_cmd(queue_id: Option<&str>, all: bool, json_mode: bool) -> i32 {
@@ -865,9 +1116,9 @@ pub async fn drop_cmd(queue_id: Option<&str>, all: bool, json_mode: bool) -> i32
             Some((_, queued)) => {
                 drop_entry(&db, id, queued);
                 if json_mode {
-                    println!("{}", serde_json::json!({"type": "dropped", "queue_id": id}));
+                    println!("{}", serde_json::json!({"type": "removed", "queue_id": id}));
                 } else {
-                    eprintln!("Dropped: {id}");
+                    eprintln!("Removed: {id}");
                 }
             }
             None => {
@@ -892,14 +1143,14 @@ pub async fn drop_cmd(queue_id: Option<&str>, all: bool, json_mode: bool) -> i32
         for (id, queued) in &pending {
             drop_entry(&db, id, queued);
             if json_mode {
-                println!("{}", serde_json::json!({"type": "dropped", "queue_id": id}));
+                println!("{}", serde_json::json!({"type": "removed", "queue_id": id}));
             }
         }
         if !json_mode {
-            eprintln!("Dropped {} entries.", pending.len());
+            eprintln!("Removed {} entries.", pending.len());
         }
     } else {
-        eprintln!("Specify a queue ID or use --all to drop everything.");
+        eprintln!("Specify a queue ID or use --all to remove everything.");
         return 1;
     }
     0
@@ -917,6 +1168,50 @@ fn drop_entry(db: &db::StateDb, id: &str, queued: &QueuedRun) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_entry(run_id: Option<&str>, parked: bool, next_retry_at: Option<&str>) -> QueuedRun {
+        serde_json::from_value(serde_json::json!({
+            "request": {
+                "outcome": "PASS",
+                "procedure_id": "proc_1",
+                "started_at": "2026-01-01T00:00:00Z",
+                "ended_at": "2026-01-01T00:01:00Z",
+                "serial_number": "SN1",
+            },
+            "attachments": [],
+            "run_id": run_id,
+            "parked": parked,
+            "next_retry_at": next_retry_at,
+        }))
+        .expect("valid queued run")
+    }
+
+    #[test]
+    fn entry_status_lifecycle_precedence() {
+        // Fresh entry, nothing attempted yet.
+        assert_eq!(entry_status(&test_entry(None, false, None)), "pending");
+        // Run created server-side, attachments still to upload.
+        assert_eq!(
+            entry_status(&test_entry(Some("run_1"), false, None)),
+            "attachments pending"
+        );
+        // Backoff wins over run_id: a created run with failing
+        // attachments is not terminal success.
+        assert_eq!(
+            entry_status(&test_entry(
+                Some("run_1"),
+                false,
+                Some("2026-01-01T00:00:00Z")
+            )),
+            "backoff"
+        );
+        // Parked wins over everything.
+        assert_eq!(
+            entry_status(&test_entry(Some("run_1"), true, None)),
+            "parked"
+        );
+        assert_eq!(entry_status(&test_entry(None, true, None)), "parked");
+    }
 
     #[test]
     fn new_queue_id_prefixes_procedure_then_underscore_millis() {

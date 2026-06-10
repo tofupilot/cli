@@ -250,15 +250,33 @@ enum ServiceCommand {
 
 #[derive(Subcommand)]
 enum QueueCommand {
-    /// Force retry all pending uploads
-    Retry,
-    /// Drop queued entries
-    Drop {
-        /// Queue ID to drop
+    /// List queued runs
+    Ls,
+    /// Show full detail for a queued run
+    Get {
+        /// Queue ID
+        id: String,
+    },
+    /// Retry pending uploads (all entries, or a single one)
+    Retry {
+        /// Queue ID to retry (omit to retry everything)
         id: Option<String>,
-        /// Drop all entries
-        #[arg(long)]
+    },
+    /// Remove queued entries
+    Rm {
+        /// Queue ID to remove
+        id: Option<String>,
+        /// Remove all entries
+        #[arg(long, conflicts_with = "id")]
         all: bool,
+    },
+    /// Export a queued run's create-run payload as JSON
+    Export {
+        /// Queue ID
+        id: String,
+        /// Write to a file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -437,8 +455,11 @@ async fn main() {
         Some(Commands::Queue { command }) => {
             startup();
             std::process::exit(match command {
-                None => commands::run::queue::list_cmd(json_mode).await,
-                Some(QueueCommand::Retry) => {
+                None | Some(QueueCommand::Ls) => commands::run::queue::list_cmd(json_mode).await,
+                Some(QueueCommand::Get { ref id }) => {
+                    commands::run::queue::get_cmd(id, json_mode).await
+                }
+                Some(QueueCommand::Retry { ref id }) => {
                     let creds = match commands::auth::credentials::require() {
                         Ok(c) => c,
                         Err(e) => {
@@ -446,10 +467,13 @@ async fn main() {
                             std::process::exit(1);
                         }
                     };
-                    commands::run::queue::retry_cmd(&creds).await
+                    commands::run::queue::retry_cmd(&creds, id.as_deref(), json_mode).await
                 }
-                Some(QueueCommand::Drop { ref id, all }) => {
+                Some(QueueCommand::Rm { ref id, all }) => {
                     commands::run::queue::drop_cmd(id.as_deref(), all, json_mode).await
+                }
+                Some(QueueCommand::Export { ref id, ref out }) => {
+                    commands::run::queue::export_cmd(id, out.as_deref(), json_mode).await
                 }
             });
         }
