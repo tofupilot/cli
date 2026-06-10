@@ -1719,6 +1719,40 @@ def handle_connection(conn: socket.socket, procedure_dir: Path):
         conn.close()
 
 
+def _start_parent_watchdog():
+    """Exit when the spawning CLI process dies.
+
+    The worker is a TCP server with no stdin pipe to the parent, so a
+    SIGKILLed parent (crash, force-quit, watchdog) otherwise leaves the
+    worker running forever. Unix: poll getppid() — the kernel reparents
+    orphans to pid 1 (or a subreaper), so a change means the parent is
+    gone. Windows: hold a SYNCHRONIZE handle to the parent and wait on
+    it; the wait returns when the process exits.
+    """
+    parent_pid = os.getppid()
+
+    if os.name == "nt":
+        def wait_windows():
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+            if not handle:
+                return
+            ctypes.windll.kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            os._exit(0)
+
+        threading.Thread(target=wait_windows, daemon=True).start()
+        return
+
+    def poll_unix():
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(0)
+            time.sleep(2)
+
+    threading.Thread(target=poll_unix, daemon=True).start()
+
+
 def serve(procedure_dir: Path):
     """Start NDJSON TCP server and print port to stdout"""
     original_stdout = sys.stdout
@@ -1767,6 +1801,7 @@ def main():
     if procedure_dir_str not in sys.path:
         sys.path.insert(0, procedure_dir_str)
 
+    _start_parent_watchdog()
     serve(procedure_dir)
 
 

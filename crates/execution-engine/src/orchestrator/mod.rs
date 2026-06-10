@@ -14,8 +14,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::constants::limits;
-use crate::job::{JobResult, JobStatus, Outcome, PhaseResult};
+use crate::job::{JobResult, JobStatus, Outcome};
 use crate::reports::ReportManager;
 use crate::state::OrchestratorState;
 use crate::worker::Worker;
@@ -124,48 +123,6 @@ pub struct Orchestrator {
     pub(super) start_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) end_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) initial_unit_infos: HashMap<String, crate::unit::UnitInfo>,
-}
-
-pub struct JobStatusResolver;
-
-impl JobStatusResolver {
-    pub fn resolve(
-        job_result: &JobResult,
-        is_retry_limit_exceeded: bool,
-    ) -> (String, String, Option<String>) {
-        if is_retry_limit_exceeded {
-            return (
-                "failed".to_string(),
-                "error".to_string(),
-                Some(format!(
-                    "Phase exceeded retry limit ({} retries)",
-                    limits::DEFAULT_RETRY_LIMIT
-                )),
-            );
-        }
-
-        // Check execution errors first
-        if let Some(ref e) = job_result.error {
-            return ("failed".to_string(), "error".to_string(), Some(e.clone()));
-        }
-
-        if let Some(secs) = job_result.timeout_secs {
-            return (
-                "failed".to_string(),
-                "timeout".to_string(),
-                Some(format!("Phase timed out after {} seconds", secs)),
-            );
-        }
-
-        // Then check phase action
-        match &job_result.phase_result {
-            PhaseResult::Continue => ("completed".to_string(), "pass".to_string(), None),
-            PhaseResult::Retry => ("completed".to_string(), "retry".to_string(), None),
-            PhaseResult::Skip => ("completed".to_string(), "skip".to_string(), None),
-            PhaseResult::Stop => ("completed".to_string(), "stop".to_string(), None),
-            PhaseResult::Fail => ("completed".to_string(), "fail".to_string(), None),
-        }
-    }
 }
 
 impl Orchestrator {

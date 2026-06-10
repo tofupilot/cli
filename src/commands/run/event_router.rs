@@ -63,13 +63,20 @@ impl EventRouter {
     /// accurately later. Both frameworks delegate here so the history
     /// write happens exactly once per phase-attempt pair regardless of
     /// which path surfaced the event.
+    /// `started_at` is the engine's authoritative start timestamp when
+    /// available (yaml/engine path); connector frameworks pass None and
+    /// the router stamps emission time instead. Using the engine's clock
+    /// keeps phase_started.started_at consistent with the started_at the
+    /// completion path later reports on phase_finished.
     pub fn phase_started(
         &self,
         phase_key: &str,
         phase_name: &str,
         attempt: u32,
         slot_id: Option<String>,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
     ) {
+        let started_at = started_at.unwrap_or_else(chrono::Utc::now).to_rfc3339();
         let _ = self.station_tx.send(StationEvent::PhaseStarted {
             phase_key: phase_key.to_string(),
             name: phase_name.to_string(),
@@ -80,7 +87,7 @@ impl EventRouter {
             // so we leave it unset here. UI reducers fall back to
             // the plan when this field is None.
             stage: None,
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            timestamp: Some(started_at.clone()),
             execution_id: self.eid(),
         });
         if let Some(ref agent) = self.agent {
@@ -91,6 +98,7 @@ impl EventRouter {
                 phase_key: phase_key.to_string(),
                 attempt,
                 slot_id,
+                started_at,
             });
         }
     }

@@ -268,14 +268,20 @@ impl EventSink for CliEventSink {
                 outcome,
                 error,
                 slot_id,
+                started_at,
                 ..
             } => {
                 use execution_engine::job::JobStatus;
                 match status {
                     JobStatus::Running => {
                         let attempt = (*retry_count as u32).saturating_add(1);
-                        self.router
-                            .phase_started(phase_key, phase_name, attempt, slot_id.clone());
+                        self.router.phase_started(
+                            phase_key,
+                            phase_name,
+                            attempt,
+                            slot_id.clone(),
+                            *started_at,
+                        );
                     }
                     JobStatus::Skipped => {
                         let outcome_str = outcome

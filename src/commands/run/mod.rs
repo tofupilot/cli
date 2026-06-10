@@ -166,6 +166,11 @@ struct ResolvedSource {
     /// linked procedure's display label so the post-run hint can nudge the
     /// user toward `--upload`.
     link_hint: Option<String>,
+    /// Explicit file passed on the command line (`tofupilot run ./my-test.yml`).
+    /// When it has a YAML extension, framework detection treats it as the
+    /// procedure file regardless of its name — the local-path equivalent of
+    /// a manifest `entry_point`.
+    yaml_hint: Option<PathBuf>,
 }
 
 /// True when `rel` ends in a YAML extension (`.yaml`/`.yml`,
@@ -350,6 +355,9 @@ fn resolve_entry_file(
 async fn prepare_run(
     deployment_dir: &Path,
     bootstrap_enabled: bool,
+    // Explicit YAML file from the command line (`tofupilot run ./my-test.yml`).
+    // Wins over on-disk detection the same way a manifest `entry_point` does.
+    yaml_hint: Option<&Path>,
 ) -> Result<Prepared, PrepareFail> {
     let layout = engine::deployment_layout(deployment_dir).map_err(|e| PrepareFail {
         kind: "load_error",
@@ -361,7 +369,12 @@ async fn prepare_run(
         manifest_present,
     } = layout;
 
-    let framework = Framework::detect(&package_dir, entry_point.as_deref());
+    let framework = match yaml_hint {
+        Some(hint) if hint.to_str().is_some_and(has_yaml_extension) => {
+            Framework::Yaml(hint.to_path_buf())
+        }
+        _ => Framework::detect(&package_dir, entry_point.as_deref()),
+    };
 
     let entry_file = resolve_entry_file(entry_point.as_deref(), &framework, &package_dir)?;
 
@@ -555,6 +568,9 @@ pub async fn start(
     // deployments) ignore this flag; their venvs are owned by the
     // deployer's installer. False corresponds to `--no-bootstrap`.
     bootstrap_enabled: bool,
+    // Explicit YAML procedure file from the command line; None for
+    // directory runs and deployments (the manifest covers those).
+    yaml_hint: Option<PathBuf>,
 ) -> RunHandle {
     // Per-run identity, minted up-front so even synthetic-fail handles
     // (no entry point, no venv) carry a stable id consumers can correlate
@@ -587,7 +603,7 @@ pub async fn start(
     // entry file, and Python subprocess cwd all live there. For
     // single-package bundles `root_directory` is null and the
     // package dir collapses to the deployment root.
-    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled).await {
+    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, yaml_hint.as_deref()).await {
         Ok(p) => p,
         Err(fail) => {
             crate::log::error(&fail.message);
@@ -1294,6 +1310,7 @@ pub async fn run_cmd(
         // UI runs forward an `operated_by` email.
         None,
         bootstrap_enabled,
+        resolved.yaml_hint,
     )
     .await;
     let code = handle.join().await;
@@ -1522,7 +1539,6 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
     match source {
         RunSource::LocalPath { path, upload } => {
             let (dir, yaml_hint) = classify_local_path(&path)?;
-            let _ = yaml_hint; // classification happens in run_test when needed
 
             // A linked local dir carries a `procedure.json` binding it to a
             // remote procedure. `--upload` activates that link, uploading
@@ -1555,6 +1571,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                     dir,
                     upload: true,
                     link_hint: None,
+                    yaml_hint,
                 });
             }
 
@@ -1575,6 +1592,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                 dir,
                 upload: false,
                 link_hint,
+                yaml_hint,
             })
         }
         RunSource::Deployment(id_arg) => {
@@ -1585,6 +1603,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                 dir,
                 upload: true,
                 link_hint: None,
+                yaml_hint: None,
             })
         }
     }
@@ -1907,6 +1926,10 @@ fn resolve_procedure_id(procedure_id_arg: Option<&str>, json_mode: bool) -> Resu
             format!("{id}{suffix}")
         })
         .collect();
+    // Release the redb lock before blocking on operator input — the
+    // picker can sit open indefinitely and other tofupilot processes
+    // would hit the busy error.
+    drop(db);
 
     let selection = dialoguer::FuzzySelect::new()
         .with_prompt("Select a procedure to run (type to filter)")
@@ -1973,7 +1996,6 @@ fn spawn_upload(
             &upload_creds,
             &queue_id,
             &queued,
-            &db,
             bus_for_task.as_ref(),
             true,
         )
@@ -2074,7 +2096,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(&package);
         let expected_python = touch_venv(&package);
 
-        let prepared = prepare_run(deployment, false)
+        let prepared = prepare_run(deployment, false, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.package_dir, package);
@@ -2091,7 +2113,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(deployment);
         let expected_python = touch_venv(deployment);
 
-        let prepared = prepare_run(deployment, false)
+        let prepared = prepare_run(deployment, false, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.package_dir, deployment);
@@ -2111,7 +2133,7 @@ mod prepare_run_tests {
         // Pytest depending on imports). All three need a venv.
         fs::write(deployment.join("main.py"), b"print('hi')\n").unwrap();
 
-        let err = prepare_run(deployment, false)
+        let err = prepare_run(deployment, false, None)
             .await
             .expect_err("should fail without venv");
         assert_eq!(err.kind, "env_error");
@@ -2127,7 +2149,7 @@ mod prepare_run_tests {
         // main.py forces Framework::Plain, which requires a Python env.
         fs::write(tmp.path().join("main.py"), b"print('hi')\n").unwrap();
 
-        let err = prepare_run(tmp.path(), false)
+        let err = prepare_run(tmp.path(), false, None)
             .await
             .expect_err("should fail without venv when bootstrap disabled");
         assert_eq!(err.kind, "env_error");
@@ -2149,7 +2171,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(project);
         let python = touch_venv(project);
 
-        let prepared = prepare_run(project, true)
+        let prepared = prepare_run(project, true, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.python_path, python);

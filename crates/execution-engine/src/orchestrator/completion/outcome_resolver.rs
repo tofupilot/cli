@@ -63,12 +63,13 @@ fn log_measurement_validation(job: &Job, job_result: &JobResult) {
 
 pub fn format_error_message(
     is_retry_limit_exceeded: bool,
+    retry_limit: usize,
     job_result: &JobResult,
 ) -> Option<String> {
     if is_retry_limit_exceeded {
         Some(format!(
             "Phase exceeded retry limit ({} retries)",
-            crate::constants::limits::DEFAULT_RETRY_LIMIT
+            retry_limit
         ))
     } else if let Some(ref e) = job_result.error {
         Some(e.clone())

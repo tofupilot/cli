@@ -16,6 +16,9 @@ fn validate_file_path(path: &Path) -> Result<(), CommandError> {
             "File has no extension"
         ))?;
 
+    // Case-insensitive: the CLI's yaml-hint check accepts `.YML`/`.YAML`
+    // and routes the file here, so the loader must agree.
+    let extension = extension.to_ascii_lowercase();
     if extension != "yaml" && extension != "yml" {
         return Err(CommandError::new(
             super::error::ErrorCode::InvalidFileExtension,

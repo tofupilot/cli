@@ -18,7 +18,15 @@ const UPDATE_PENDING: TableDefinition<&str, &[u8]> = TableDefinition::new("updat
 const RUN_QUEUE: TableDefinition<&str, &[u8]> = TableDefinition::new("run.queue");
 const STATION_CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("station.config");
 
-static DB: std::sync::RwLock<Option<Arc<Database>>> = std::sync::RwLock::new(None);
+// Weak so the redb file lock is held only while at least one StateDb
+// is alive. Every caller opens per-operation (`let db = open()?`), so
+// the lock is released between operations and concurrent tofupilot
+// processes (station daemon + CLI commands, parallel runs) interleave
+// instead of starving each other for the whole process lifetime.
+// In-process callers still share one Database: the Mutex serializes
+// open(), and an upgrade hit reuses the live instance.
+static DB: std::sync::Mutex<std::sync::Weak<DbInner>> =
+    std::sync::Mutex::new(std::sync::Weak::new());
 
 /// User home directory. Centralized so the "No home directory" error
 /// message stays uniform and a future change (e.g. respecting
@@ -107,181 +115,133 @@ fn pid_alive(_pid: u32) -> bool {
     true
 }
 
-#[cfg(unix)]
-fn kill_pid(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 }
-}
+/// How long `open()` waits for a live concurrent CLI to release the
+/// redb lock before giving up. Most holders are short-lived (a queue
+/// tick, an update check); long holders (a full `tofupilot run`)
+/// surface as a clean "state db busy" error instead of a kill.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-#[cfg(windows)]
-fn kill_pid(pid: u32) -> bool {
-    std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn kill_pid(_pid: u32) -> bool {
-    false
-}
-
-/// Sanity-check that `pid` is a tofupilot binary before we SIGKILL it.
-/// The pidfile under `~/.tofupilot/` can theoretically be tampered
-/// with, and on long-running Linux hosts PID reuse means a stale
-/// pidfile can name an unrelated process owned by the same user.
-///
-/// Uses `starts_with("tofupilot")` so future renames like
-/// `tofupilot-station` / `tofupilot-agent` still pass. Linux's
-/// `/proc/<pid>/comm` truncates at 15 chars (TASK_COMM_LEN), which
-/// fits `tofupilot` plus a few-char suffix.
-///
-/// On any platform where probing the process name fails or is
-/// unsupported, fall back to permissive (the original behavior) to
-/// keep stale-lock recovery functional.
-fn pid_is_tofupilot(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/{pid}/comm");
-        match std::fs::read_to_string(&path) {
-            Ok(s) => s.trim().starts_with("tofupilot"),
-            Err(_) => false,
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // `ps -p <pid> -o comm=` prints just the binary path. macOS
-        // doesn't expose /proc; this is the standard probe.
-        let out = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                let name = String::from_utf8_lossy(&o.stdout);
-                name.lines()
-                    .next()
-                    .map(|l| {
-                        std::path::Path::new(l.trim())
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.starts_with("tofupilot"))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
-        }
-    }
-    #[cfg(windows)]
-    {
-        // tasklist subprocess cost (~100-300ms) only paid on the
-        // stale-lock recovery path, not on the hot pid_alive() probe.
-        // CSV row format is `"image","pid",...` — match on the image
-        // column's prefix rather than substring-scanning the whole
-        // row (which would also fire on `tofupilot.exe` appearing as
-        // some other column's value).
-        let out = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                let s = String::from_utf8_lossy(&o.stdout).to_ascii_lowercase();
-                s.lines().any(|line| {
-                    line.trim_start_matches('"')
-                        .split('"')
-                        .next()
-                        .map(|name| name.starts_with("tofupilot"))
-                        .unwrap_or(false)
-                })
-            }
-            _ => false,
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        let _ = pid;
-        true
-    }
-}
-
-/// Drop the cached singleton, releasing the redb lock + pidfile so a
-/// child process (re-exec on Windows) can open it. Safe to call when no
-/// DB was opened.
+/// Release any in-process reference and drop the pidfile so a child
+/// process (re-exec on Windows) can open the store. Live `StateDb`
+/// handles elsewhere keep the lock until they drop; callers on the
+/// re-exec path hold none. Safe to call when no DB was opened.
 pub fn close() {
-    if let Ok(mut guard) = DB.write() {
-        *guard = None;
+    if let Ok(mut guard) = DB.lock() {
+        *guard = std::sync::Weak::new();
     }
-    if let Ok(p) = pid_path() {
+    remove_own_pidfile();
+}
+
+/// Read the lock holder recorded in the sidecar pidfile, ignoring our
+/// own pid (we never contend with ourselves — the in-process path is
+/// served from the cached instance).
+fn holder_pid(pid_file: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&p| p != std::process::id())
+}
+
+/// Remove the pidfile only if it still names this process. A plain
+/// remove could race a concurrent CLI that already acquired the lock
+/// and wrote its own pid.
+fn remove_own_pidfile() {
+    let Ok(p) = pid_path() else { return };
+    let ours = std::process::id().to_string();
+    if std::fs::read_to_string(&p).map(|s| s.trim() == ours).unwrap_or(false) {
         let _ = std::fs::remove_file(p);
     }
 }
 
 pub fn open() -> CliResult<StateDb> {
-    if let Some(db) = DB.read().ok().and_then(|g| g.clone()) {
-        return Ok(StateDb { db });
-    }
     let path = state_path()?;
     let pid_file = pid_path()?;
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
 
-    let db = match Database::create(&path) {
-        Ok(db) => db,
-        Err(DatabaseError::DatabaseAlreadyOpen) => {
-            // Reclaim the lock: kill the holder if it's still alive (own pid
-            // skipped — singleton would have returned above), then drop the
-            // pidfile and retry. Self-service: no prompt, no command for the
-            // user to type. Common case is a previous process that died
-            // without releasing redb's file lock or a stale child after
-            // self-update reexec.
-            let prev_pid = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .filter(|&p| p != std::process::id());
-            if let Some(pid) = prev_pid {
-                if pid_alive(pid) {
-                    // Only SIGKILL when we've verified the pid still
-                    // points to a tofupilot binary. On Linux, PID reuse
-                    // by long-running services means a stale pidfile
-                    // can name a totally unrelated process owned by the
-                    // same user — killing it would be a bad day.
-                    if pid_is_tofupilot(pid) {
-                        let _ = kill_pid(pid);
-                        // Give the OS a beat to release the file lock after
-                        // process teardown — taskkill returns before handles
-                        // are fully closed on Windows.
-                        for _ in 0..20 {
-                            if !pid_alive(pid) {
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                    } else {
-                        crate::log::warn(&format!(
-                            "Stale pidfile names PID {pid} but it isn't a tofupilot process — skipping kill"
-                        ));
-                    }
-                }
+    // Another process can hold the redb lock. Never kill it — a
+    // healthy concurrent `tofupilot run` (or the station daemon) is
+    // the common holder, and SIGKILLing it mid-run loses the run and
+    // orphans its Python workers. Holders are short-lived (the lock
+    // is released when the last StateDb drops, i.e. between
+    // operations), so poll for release up to LOCK_WAIT, then fail
+    // with a message naming the holder.
+    //
+    // The DB mutex is held only inside each iteration, never across
+    // the sleep: open() runs on async runtime threads (station event
+    // loop, drain loop), and holding it through the wait would
+    // serialize N in-process waiters to N×LOCK_WAIT while pinning
+    // their worker threads.
+    loop {
+        {
+            let mut guard = DB.lock().unwrap_or_else(|e| e.into_inner());
+            // An in-process holder shares its instance — contention
+            // below can only come from another process.
+            if let Some(inner) = guard.upgrade() {
+                return Ok(StateDb { inner });
             }
-            let _ = std::fs::remove_file(&pid_file);
-            Database::create(&path)
-                .map_err(|e| format!("Open database (after stale-lock cleanup): {e}"))?
+            match Database::create(&path) {
+                Ok(db) => {
+                    // Best-effort: a concurrent CLI hitting the lock
+                    // reads this to name the holder in its busy
+                    // error. Write failure is non-fatal.
+                    let _ = std::fs::write(&pid_file, std::process::id().to_string());
+                    let inner = Arc::new(DbInner { db });
+                    *guard = Arc::downgrade(&inner);
+                    return Ok(StateDb { inner });
+                }
+                Err(DatabaseError::DatabaseAlreadyOpen) => {}
+                Err(e) => return Err(format!("Open database: {e}").into()),
+            }
         }
-        Err(e) => return Err(format!("Open database: {e}").into()),
-    };
 
-    // Best-effort: a future CLI hitting a lock checks this to decide
-    // whether to wait or reclaim. Write failure is non-fatal.
-    let _ = std::fs::write(&pid_file, std::process::id().to_string());
+        // Re-read the pidfile every iteration: the holder can change
+        // while we wait (old holder exits, another waiter wins the
+        // lock and writes its own pid). Only clear a pidfile whose
+        // recorded pid is dead — and re-check the content right
+        // before removing so we don't delete a fresh holder's file.
+        let holder = holder_pid(&pid_file);
+        if let Some(pid) = holder {
+            if !pid_alive(pid) && holder_pid(&pid_file) == Some(pid) {
+                let _ = std::fs::remove_file(&pid_file);
+            }
+        }
 
-    let arc = Arc::new(db);
-    if let Ok(mut guard) = DB.write() {
-        *guard = Some(arc.clone());
+        if std::time::Instant::now() >= deadline {
+            let holder = holder_pid(&pid_file)
+                .map(|p| format!(" (held by PID {p})"))
+                .unwrap_or_default();
+            return Err(format!(
+                "State database is busy{holder}: another tofupilot process is using it. Retry once it finishes."
+            )
+            .into());
+        }
+        std::thread::sleep(LOCK_POLL);
     }
-    Ok(StateDb { db: arc })
+}
+
+/// Owns the Database so the last dropped handle releases the redb
+/// lock and clears our pidfile, letting waiting processes proceed.
+struct DbInner {
+    db: Database,
+}
+
+impl Drop for DbInner {
+    fn drop(&mut self) {
+        remove_own_pidfile();
+    }
+}
+
+impl std::ops::Deref for DbInner {
+    type Target = Database;
+    fn deref(&self) -> &Database {
+        &self.db
+    }
 }
 
 #[derive(Clone)]
 pub struct StateDb {
-    db: Arc<Database>,
+    inner: Arc<DbInner>,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +328,7 @@ pub struct PendingUpdate {
 
 impl StateDb {
     fn get(&self, table: TableDefinition<&str, &[u8]>, key: &str) -> CliResult<Option<Vec<u8>>> {
-        let txn = self.db.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(table) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
@@ -383,7 +343,7 @@ impl StateDb {
 
     fn set(&self, table: TableDefinition<&str, &[u8]>, key: &str, value: &[u8]) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -421,7 +381,7 @@ impl StateDb {
     /// the station can actually run right now (deployment present
     /// on disk, deserves to appear as a pickable row).
     pub fn list_pull_state(&self) -> CliResult<Vec<(String, PullState)>> {
-        let txn = self.db.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(PULL_SYNC) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -462,7 +422,7 @@ impl StateDb {
 
     pub fn remove_pull_state(&self, procedure_id: &str) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -476,7 +436,7 @@ impl StateDb {
 
     pub fn clear_all_pull_state(&self) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -517,7 +477,7 @@ impl StateDb {
 
     pub fn clear_whoami(&self) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -559,7 +519,7 @@ impl StateDb {
 
     pub fn clear_pending_update(&self) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -580,7 +540,7 @@ impl StateDb {
 
     pub fn dequeue_run(&self, queue_id: &str) -> CliResult<()> {
         let txn = self
-            .db
+            .inner
             .begin_write()
             .map_err(|e| format!("Write txn: {e}"))?;
         {
@@ -593,7 +553,7 @@ impl StateDb {
     }
 
     pub fn list_queued_runs<T: serde::de::DeserializeOwned>(&self) -> CliResult<Vec<(String, T)>> {
-        let txn = self.db.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(RUN_QUEUE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -639,7 +599,7 @@ impl StateDb {
         let mut guard = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
         let logged = guard.get_or_insert_with(HashSet::new);
 
-        if let Ok(txn) = self.db.begin_write() {
+        if let Ok(txn) = self.inner.begin_write() {
             {
                 if let Ok(mut tbl) = txn.open_table(RUN_QUEUE) {
                     for (id, err) in dead {
@@ -670,7 +630,7 @@ impl StateDb {
     }
 
     pub fn list_config(&self) -> CliResult<Vec<(String, String)>> {
-        let txn = self.db.begin_read().map_err(|e| format!("Read txn: {e}"))?;
+        let txn = self.inner.begin_read().map_err(|e| format!("Read txn: {e}"))?;
         let tbl = match txn.open_table(STATION_CONFIG) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),

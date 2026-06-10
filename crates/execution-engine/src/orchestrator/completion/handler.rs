@@ -47,8 +47,11 @@ impl Orchestrator {
 
         let phase_def = self.get_phase_definition(&event);
 
-        let error_message =
-            outcome_resolver::format_error_message(is_retry_limit_exceeded, &job_result);
+        let error_message = outcome_resolver::format_error_message(
+            is_retry_limit_exceeded,
+            event.original_job.retry_limit,
+            &job_result,
+        );
 
         log::debug!(
             "DEBUG Phase '{}': phase_result={:?}, phase_outcome={:?}, retry_count={}, retry_limit={}, can_retry={}",

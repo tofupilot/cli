@@ -263,6 +263,7 @@ pub enum StageScope {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct ProcedureYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -427,6 +428,7 @@ impl<'de> Deserialize<'de> for SlotConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct UnitFieldConfig {
     /// Default value pre-filled in the input field
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -469,6 +471,7 @@ impl Default for UnitFieldConfig {
 /// Configuration for a specific sub-unit with custom label and constraints
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct SubUnitItemConfig {
     /// Display label for this sub-unit (e.g., "Battery", "Motor")
     #[serde(deserialize_with = "serde_trim::string_trim")]
@@ -528,6 +531,7 @@ impl validator::Validate for SubUnitsConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, Validate)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct UnitConfig {
     /// When true, automatically submit unit identification using default_value fields.
     /// Requires serial_number.default_value and part_number.default_value to be set.
@@ -613,6 +617,7 @@ impl UnitConfig {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
     #[serde(default = "default_strategy")]
     pub strategy: ExecutionStrategy,
@@ -690,6 +695,7 @@ pub struct RetryConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct RetryConfigYaml {
     pub limit: usize,
 
@@ -730,6 +736,7 @@ pub enum PhaseNextAction {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct ThenConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass: Option<PhaseNextAction>,
@@ -748,6 +755,7 @@ pub struct ThenConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct PlugDefinitionYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -993,6 +1001,7 @@ impl PythonSpec {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct ExecutableConfig {
     #[validate(length(min = 1, max = 10000))]
     pub command: String,
@@ -1011,6 +1020,7 @@ pub struct ExecutableConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct PhaseDefinitionYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -1344,6 +1354,7 @@ pub enum ValidatorExpectedValue {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct ValidatorSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ValidatorOutcome>,
@@ -1368,6 +1379,7 @@ pub enum AggregationValue {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct AggregationSpec {
     #[serde(rename = "type")]
     pub aggregation_type: String,
@@ -1395,6 +1407,7 @@ pub enum AxisData {
 
 #[derive(Debug, Deserialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct AxisSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<AxisData>,
@@ -1535,6 +1548,7 @@ impl AxisSpec {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct MultiDimensionalSpec {
     pub x_axis: AxisSpec,
     pub y_axis: Vec<AxisSpec>,
@@ -1550,6 +1564,7 @@ pub struct MultiDimensionalSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct MeasurementSpecYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -1682,6 +1697,7 @@ impl<'de> Deserialize<'de> for MeasurementSpec {
 #[derive(Debug, Serialize, Deserialize, Validate, Default, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[cfg_attr(feature = "specta", specta(rename = "ProcedureUiConfig"))]
+#[serde(deny_unknown_fields)]
 pub struct UIConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
@@ -1695,6 +1711,7 @@ pub struct UIConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct UIComponentYaml {
     // Core Identity
     #[serde(rename = "type")]
@@ -2062,6 +2079,7 @@ impl<'de> Deserialize<'de> for UIComponent {
 
 #[derive(Debug, Deserialize, Serialize, Validate, Clone)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(deny_unknown_fields)]
 pub struct SelectOption {
     #[validate(length(max = 200))]
     #[serde(deserialize_with = "serde_trim::string_trim")]

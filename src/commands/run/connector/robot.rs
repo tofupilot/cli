@@ -775,7 +775,6 @@ pub async fn run_robot(
         if let Some(c) = creds {
             let upload_creds = c.clone();
             let upload_queue_id = queue_id.clone();
-            let upload_db = db.clone();
             let upload_bus_for_task = upload_bus.clone();
             let handle = tokio::spawn(async move {
                 upload_queued_run(
@@ -783,7 +782,6 @@ pub async fn run_robot(
                     &upload_creds,
                     &upload_queue_id,
                     &queued,
-                    &upload_db,
                     Some(&upload_bus_for_task),
                     true,
                 )
@@ -1110,7 +1108,7 @@ fn emit_phase_started(
     if !started.insert((phase_key.to_string(), attempt)) {
         return;
     }
-    router.phase_started(phase_key, phase_name, attempt, None);
+    router.phase_started(phase_key, phase_name, attempt, None, None);
 }
 
 struct ConnectorScriptGuard {

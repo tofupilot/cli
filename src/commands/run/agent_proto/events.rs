@@ -34,6 +34,9 @@ pub enum CliEvent {
         /// need this to disambiguate events for the same phase_key.
         #[serde(skip_serializing_if = "Option::is_none")]
         slot_id: Option<String>,
+        /// RFC 3339 start time. `phase_finished` carries `started_at`/
+        /// `ended_at`; agents timing in-flight phases need the start here.
+        started_at: String,
     },
     UiRequest {
         request_id: String,

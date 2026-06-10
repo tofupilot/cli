@@ -304,12 +304,14 @@ pub type EventBus = broadcast::Sender<StationEvent>;
 /// Returns the server-issued run id on full success (run created and
 /// every attachment uploaded; the entry is dequeued). Returns `None`
 /// on any failure or when another task holds the upload claim.
+/// Opens the state DB only for the brief entry-state mutations, never
+/// across the awaited network upload — holding the redb lock through a
+/// slow upload would starve every other tofupilot process on the host.
 pub async fn upload_queued_run(
     http: &reqwest::Client,
     creds: &Credentials,
     queue_id: &str,
     queued: &QueuedRun,
-    db: &db::StateDb,
     bus: Option<&EventBus>,
     silent: bool,
 ) -> Option<String> {
@@ -358,7 +360,9 @@ pub async fn upload_queued_run(
                 latest_state.last_error = None;
                 latest_state.next_retry_at = None;
                 latest_state.parked = false;
-                let _ = db.enqueue_run(queue_id, &latest_state);
+                if let Ok(db) = db::open() {
+                    let _ = db.enqueue_run(queue_id, &latest_state);
+                }
                 res.id
             }
             Err(e) => {
@@ -366,7 +370,7 @@ pub async fn upload_queued_run(
                     eprintln!("  Upload failed (queued for retry): {e}");
                 }
                 let cls = classify_sdk_error(&e);
-                record_failure(db, queue_id, &latest_state, attempt, &cls, bus);
+                record_failure(queue_id, &latest_state, attempt, &cls, bus);
                 return None;
             }
         }
@@ -397,7 +401,9 @@ pub async fn upload_queued_run(
         if !silent {
             eprintln!("  Uploaded: {run_id}");
         }
-        let _ = db.dequeue_run(queue_id);
+        if let Ok(db) = db::open() {
+            let _ = db.dequeue_run(queue_id);
+        }
         cleanup_attachments(&queued.attachments);
         if let Some(bus) = bus {
             let dashboard_url = Some(dashboard_url_for(
@@ -428,7 +434,7 @@ pub async fn upload_queued_run(
             // Pass `latest_state` so the persisted failure carries
             // the server-issued run_id; otherwise the next retry
             // would skip the run-create check and re-POST.
-            record_failure(db, queue_id, &latest_state, attempt, &cls, bus);
+            record_failure(queue_id, &latest_state, attempt, &cls, bus);
         }
         None
     }
@@ -436,7 +442,6 @@ pub async fn upload_queued_run(
 
 /// Persist a failure on the queue entry and emit the wire event.
 fn record_failure(
-    db: &db::StateDb,
     queue_id: &str,
     queued: &QueuedRun,
     attempt: u32,
@@ -460,7 +465,9 @@ fn record_failure(
         error: cls.error.clone(),
         failed_at: Some(now.to_rfc3339()),
     });
-    let _ = db.enqueue_run(queue_id, &updated);
+    if let Ok(db) = db::open() {
+        let _ = db.enqueue_run(queue_id, &updated);
+    }
 
     if let Some(bus) = bus {
         let _ = bus.send(StationEvent::RunUploadFailed {
@@ -608,9 +615,12 @@ pub async fn drain(creds: &Credentials, bus: Option<&EventBus>, silent: bool) {
     if !silent {
         eprintln!("Uploading {} queued run(s)...\n", due.len());
     }
+    // Release the redb lock before the (slow) uploads; entry-state
+    // mutations inside upload_queued_run reopen it briefly.
+    drop(db);
     let http = crate::http::client();
     for (id, queued) in &due {
-        upload_queued_run(http, creds, id, queued, &db, bus, silent).await;
+        upload_queued_run(http, creds, id, queued, bus, silent).await;
     }
 }
 
@@ -648,12 +658,12 @@ pub async fn retry_one(creds: &Credentials, bus: Option<&EventBus>, queue_id: &s
     queued.parked = false;
     queued.next_retry_at = None;
     let _ = db.enqueue_run(queue_id, &queued);
+    drop(db);
     upload_queued_run(
         crate::http::client(),
         creds,
         queue_id,
         &queued,
-        &db,
         bus,
         true,
     )
@@ -672,7 +682,9 @@ pub fn drop_one(bus: Option<&EventBus>, queue_id: &str) {
             let _ = std::fs::remove_file(&att.path);
         }
         cleanup_attachments(&queued.attachments);
-        let _ = db.dequeue_run(queue_id);
+        if let Ok(db) = db::open() {
+            let _ = db.dequeue_run(queue_id);
+        }
         if let Some(bus) = bus {
             let _ = bus.send(StationEvent::RunUploadDropped {
                 queue_id: queue_id.to_string(),
@@ -1040,12 +1052,12 @@ pub async fn retry_cmd(creds: &Credentials, queue_id: Option<&str>, json_mode: b
     queued.parked = false;
     queued.next_retry_at = None;
     let _ = db.enqueue_run(id, &queued);
+    drop(db);
     let run_id = upload_queued_run(
         crate::http::client(),
         creds,
         id,
         &queued,
-        &db,
         None,
         json_mode,
     )
@@ -1068,8 +1080,10 @@ pub async fn retry_cmd(creds: &Credentials, queue_id: Option<&str>, json_mode: b
             // run_id, so a script doesn't replay a payload whose run
             // already exists server-side.
             if json_mode {
-                let entry = db
-                    .list_queued_runs::<QueuedRun>()
+                // Reopen: the pre-upload handle was dropped so the
+                // redb lock wasn't held across the network call.
+                let entry = db::open()
+                    .and_then(|db| db.list_queued_runs::<QueuedRun>())
                     .unwrap_or_default()
                     .into_iter()
                     .find(|(qid, _)| qid == id)

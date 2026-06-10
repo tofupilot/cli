@@ -1453,6 +1453,8 @@ async fn try_start_run(
             // `manifest_present == false`). Pass `true` to keep the
             // signature uniform with standalone runs.
             true,
+            // Deployments carry their entry point in the manifest.
+            None,
         )
         .await,
     )

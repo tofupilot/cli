@@ -233,6 +233,9 @@ impl JobResult {
 
     pub fn new_timeout(secs: u64) -> Self {
         let now = chrono::Utc::now();
+        // The phase ran for the full timeout budget before being killed;
+        // back-date started_at so duration_ms reflects that instead of 0.
+        let started = now - chrono::Duration::seconds(secs as i64);
         Self {
             phase_result: PhaseResult::Continue,
             phase_outcome: Outcome::Timeout,
@@ -242,7 +245,7 @@ impl JobResult {
             exit_code: None,
             measurements: vec![],
             logs: vec![],
-            started_at: now,
+            started_at: started,
             completed_at: now,
             resource_metrics: None,
             unit: None,
