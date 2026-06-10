@@ -29,9 +29,9 @@ def answer(component):
     opts = component.get("options") or []
     if t == "switch":
         return True
-    if t in ("radio", "select", "image_choice") and opts:
+    if t in ("radio", "select") and opts:
         return opts[0]["value"]
-    if t in ("multiselect", "checklist", "image_checklist") and opts:
+    if t in ("multiselect", "checklist") and opts:
         return [opts[0]["value"]]
     if t in ("number_input", "slider"):
         return 42

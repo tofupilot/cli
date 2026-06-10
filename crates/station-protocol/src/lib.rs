@@ -918,7 +918,7 @@ pub struct UiComponent {
     pub max: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<f64>,
-    // Image / image_choice / image_checklist sizing.
+    // Image and image-grid (radio/checklist with image options) sizing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -998,7 +998,7 @@ impl UiComponent {
 }
 
 /// Type of UI component. Wire format is snake_case (`text_input`,
-/// `image_choice`, …). Adding a variant here forces a recompile of
+/// `number_input`, …). Adding a variant here forces a recompile of
 /// every consumer that matches on it.
 #[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1013,8 +1013,6 @@ pub enum ComponentType {
     Multiselect,
     Checklist,
     Slider,
-    ImageChoice,
-    ImageChecklist,
 
     // Display components (output only)
     Text,
@@ -1038,8 +1036,6 @@ impl ComponentType {
                 | ComponentType::Checklist
                 | ComponentType::Switch
                 | ComponentType::Slider
-                | ComponentType::ImageChoice
-                | ComponentType::ImageChecklist
         )
     }
 
@@ -1054,8 +1050,6 @@ impl ComponentType {
             ComponentType::Checklist => "checklist",
             ComponentType::Switch => "switch",
             ComponentType::Slider => "slider",
-            ComponentType::ImageChoice => "image_choice",
-            ComponentType::ImageChecklist => "image_checklist",
             ComponentType::Text => "text",
             ComponentType::Image => "image",
             ComponentType::Progress => "progress",

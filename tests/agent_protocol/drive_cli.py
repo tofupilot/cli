@@ -36,10 +36,10 @@ try:
             opts = c.get("options") or []
             if t == "switch":
                 values[key] = True
-            elif t in ("radio", "select", "image_choice"):
+            elif t in ("radio", "select"):
                 if opts:
                     values[key] = opts[0]["value"]
-            elif t in ("multiselect", "checklist", "image_checklist"):
+            elif t in ("multiselect", "checklist"):
                 if opts:
                     values[key] = [opts[0]["value"]]
             elif t in ("number_input", "slider"):

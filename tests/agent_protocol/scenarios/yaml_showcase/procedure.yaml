@@ -132,7 +132,7 @@ main:
     python: phases.noop
     ui:
       components:
-        - type: image_choice
+        - type: radio
           key: revision
           label: Pick the board revision you see
           required: true
@@ -143,7 +143,7 @@ main:
             - value: rev_b
               label: Rev B
               image: rev_b.jpg
-        - type: image_checklist
+        - type: checklist
           key: defects
           label: Defects found
           options:

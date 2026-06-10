@@ -163,7 +163,7 @@ fn coerce_value(
                 _ => parsed.to_string(),
             }
         }
-        ComponentType::Multiselect | ComponentType::Checklist | ComponentType::ImageChecklist => {
+        ComponentType::Multiselect | ComponentType::Checklist => {
             match value {
                 serde_json::Value::Array(arr) => {
                     let parts: Result<Vec<String>, _> = arr
@@ -247,7 +247,7 @@ fn coerce_value(
     if let Some(options) = component.options.as_ref() {
         let allowed: Vec<&str> = options.iter().map(|o| o.value.as_str()).collect();
         match &component.component_type {
-            ComponentType::Radio | ComponentType::Select | ComponentType::ImageChoice => {
+            ComponentType::Radio | ComponentType::Select => {
                 if !allowed.contains(&as_string.as_str()) {
                     return Err(ValidationError {
                         reason: UiErrorReason::InvalidValue,
@@ -257,9 +257,7 @@ fn coerce_value(
                     });
                 }
             }
-            ComponentType::Multiselect
-            | ComponentType::Checklist
-            | ComponentType::ImageChecklist => {
+            ComponentType::Multiselect | ComponentType::Checklist => {
                 for part in as_string.split(',').filter(|p| !p.is_empty()) {
                     if !allowed.contains(&part) {
                         return Err(ValidationError {

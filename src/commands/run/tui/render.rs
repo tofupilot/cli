@@ -627,9 +627,7 @@ fn focused_arrow_hint(ui: &ActiveUiRequest) -> Option<ArrowHint> {
         ComponentType::Radio
         | ComponentType::Select
         | ComponentType::Checklist
-        | ComponentType::Multiselect
-        | ComponentType::ImageChoice
-        | ComponentType::ImageChecklist => Some(ArrowHint {
+        | ComponentType::Multiselect => Some(ArrowHint {
             keys: "↑↓",
             desc: "move",
         }),
@@ -642,12 +640,18 @@ fn focused_arrow_hint(ui: &ActiveUiRequest) -> Option<ArrowHint> {
 fn space_action_label(comp: &UiComponent) -> Option<&'static str> {
     match comp.component_type {
         ComponentType::Switch => Some("toggle"),
-        ComponentType::Radio | ComponentType::Select | ComponentType::ImageChoice => Some("select"),
-        ComponentType::Checklist | ComponentType::Multiselect | ComponentType::ImageChecklist => {
-            Some("toggle")
-        }
+        ComponentType::Radio | ComponentType::Select => Some("select"),
+        ComponentType::Checklist | ComponentType::Multiselect => Some("toggle"),
         _ => None,
     }
+}
+
+/// Option lists render image markers when any option carries an image
+/// (the web operator UI shows these as an image-card grid).
+fn options_have_images(comp: &UiComponent) -> bool {
+    comp.options
+        .as_ref()
+        .is_some_and(|opts| opts.iter().any(|o| o.image.is_some()))
 }
 
 fn component_height(comp: &UiComponent) -> u16 {
@@ -666,10 +670,8 @@ fn component_height(comp: &UiComponent) -> u16 {
         ComponentType::Slider => 2,
         ComponentType::Radio
         | ComponentType::Select
-        | ComponentType::ImageChoice
         | ComponentType::Checklist
-        | ComponentType::Multiselect
-        | ComponentType::ImageChecklist => {
+        | ComponentType::Multiselect => {
             let opt_count = comp.options.as_ref().map(|o| o.len()).unwrap_or(0);
             (opt_count as u16 + 2).min(12)
         }
@@ -862,10 +864,10 @@ fn draw_component(
         }
 
         (
-            ComponentType::Radio | ComponentType::Select | ComponentType::ImageChoice,
+            ComponentType::Radio | ComponentType::Select,
             ComponentState::SingleChoice { value, cursor },
         ) => {
-            let show_image = matches!(comp.component_type, ComponentType::ImageChoice);
+            let show_image = options_have_images(comp);
             let lines = option_list_lines(
                 comp,
                 label,
@@ -882,10 +884,10 @@ fn draw_component(
         }
 
         (
-            ComponentType::Checklist | ComponentType::Multiselect | ComponentType::ImageChecklist,
+            ComponentType::Checklist | ComponentType::Multiselect,
             ComponentState::MultiChoice { selected, cursor },
         ) => {
-            let show_image = matches!(comp.component_type, ComponentType::ImageChecklist);
+            let show_image = options_have_images(comp);
             let lines = option_list_lines(
                 comp,
                 label,

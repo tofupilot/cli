@@ -1748,7 +1748,7 @@ pub struct UIComponentYaml {
     #[serde(default)]
     options: Option<Vec<SelectOption>>,
 
-    // Grid columns (for image_choice / image_checklist)
+    // Grid columns (for radio/checklist rendered as image grids)
     #[serde(default)]
     columns: Option<u32>,
 
@@ -1904,7 +1904,7 @@ pub struct UIComponent {
     #[validate(nested)]
     pub options: Option<Vec<SelectOption>>,
 
-    // Grid columns (for image_choice / image_checklist)
+    // Grid columns (for radio/checklist rendered as image grids)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<u32>,
 
@@ -2034,18 +2034,16 @@ impl UIComponent {
     }
 
     pub fn validate_options_count(&self) -> Result<(), String> {
-        if matches!(
-            self.component_type,
-            UIComponentType::ImageChoice | UIComponentType::ImageChecklist
-        ) {
-            if let Some(opts) = &self.options {
-                if opts.len() > 12 {
-                    return Err(format!(
-                        "Component '{}' has {} options (max 12 for image_choice/image_checklist)",
-                        self.key,
-                        opts.len()
-                    ));
-                }
+        // Options with images render as a card grid; cap it so the grid
+        // stays usable on operator screens. Plain text lists are unlimited.
+        if let Some(opts) = &self.options {
+            let has_images = opts.iter().any(|o| o.image.is_some());
+            if has_images && opts.len() > 12 {
+                return Err(format!(
+                    "Component '{}' has {} options (max 12 when options have images)",
+                    self.key,
+                    opts.len()
+                ));
             }
         }
         Ok(())

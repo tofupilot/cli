@@ -7,7 +7,7 @@ main:
     python: phases.pick
     ui:
       components:
-        - type: image_choice
+        - type: radio
           key: variant
           label: Select variant
           required: true
@@ -18,7 +18,7 @@ main:
             - value: rev_b
               label: Rev B
               image: https://example.com/b.png
-        - type: image_checklist
+        - type: checklist
           key: defects
           label: Defects found
           options:

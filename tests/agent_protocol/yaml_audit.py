@@ -14,9 +14,9 @@ def answer(component):
     opts = component.get("options") or []
     if t == "switch":
         return True
-    if t in ("radio", "select", "image_choice") and opts:
+    if t in ("radio", "select") and opts:
         return opts[0]["value"]
-    if t in ("multiselect", "checklist", "image_checklist") and opts:
+    if t in ("multiselect", "checklist") and opts:
         return [opts[0]["value"]]
     if t == "number_input":
         return 1
@@ -230,7 +230,7 @@ if prompt_keys != {"visual_a", "visual_b"}:
     print(f"  - prompt keys mismatch: {prompt_keys}")
 
 events, rc = drive("/tmp/yaml_test16")
-check("Y16 image_choice + image_checklist", events, rc, expect_pass=True)
+check("Y16 radio + checklist image options", events, rc, expect_pass=True)
 
 events, rc = drive("/tmp/yaml_test17")
 check("Y17 phase with attach.data", events, rc, expect_pass=True)

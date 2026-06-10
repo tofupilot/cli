@@ -61,7 +61,7 @@ impl ComponentState {
                 let min = comp.min.unwrap_or(0.0);
                 Self::Slider(default_number(&comp.default_value).unwrap_or(min))
             }
-            ComponentType::Radio | ComponentType::Select | ComponentType::ImageChoice => {
+            ComponentType::Radio | ComponentType::Select => {
                 let value = default_single(&comp.default_value);
                 let cursor = value
                     .as_ref()
@@ -69,9 +69,7 @@ impl ComponentState {
                     .unwrap_or(0);
                 Self::SingleChoice { value, cursor }
             }
-            ComponentType::Multiselect
-            | ComponentType::Checklist
-            | ComponentType::ImageChecklist => Self::MultiChoice {
+            ComponentType::Multiselect | ComponentType::Checklist => Self::MultiChoice {
                 selected: default_array(&comp.default_value),
                 cursor: 0,
             },

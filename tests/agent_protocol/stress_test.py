@@ -94,9 +94,9 @@ def good_response(evt):
         opts = c.get("options") or []
         if t == "switch":
             values[c["key"]] = True
-        elif t in ("radio", "select", "image_choice") and opts:
+        elif t in ("radio", "select") and opts:
             values[c["key"]] = opts[0]["value"]
-        elif t in ("multiselect", "checklist", "image_checklist") and opts:
+        elif t in ("multiselect", "checklist") and opts:
             values[c["key"]] = [opts[0]["value"]]
         elif t in ("number_input", "slider"):
             values[c["key"]] = 42
@@ -133,9 +133,9 @@ def bad_type_response(evt):
             vals[c["key"]] = "abc"  # not numeric
         elif t == "slider":
             vals[c["key"]] = [1, 2]  # array for scalar
-        elif t in ("radio", "select", "image_choice"):
+        elif t in ("radio", "select"):
             vals[c["key"]] = "NOT-A-VALID-OPTION"
-        elif t in ("multiselect", "checklist", "image_checklist"):
+        elif t in ("multiselect", "checklist"):
             vals[c["key"]] = ["bad-option"]
         else:
             vals[c["key"]] = {"oops": "object"}
@@ -318,7 +318,7 @@ record("empty-string-optional", ok, f"exit={rc} errors={errs}")
 def multi_values(evt):
     vals = good_response(evt)["values"]
     for c in evt.get("components", []):
-        if c.get("type") in ("multiselect", "checklist", "image_checklist") and c.get("is_input"):
+        if c.get("type") in ("multiselect", "checklist") and c.get("is_input"):
             opts = c.get("options") or []
             if len(opts) >= 2:
                 vals[c["key"]] = [o["value"] for o in opts[:2]]
@@ -335,7 +335,7 @@ record("multiselect-multiple", ok, f"exit={rc} errors={errs}")
 def empty_array(evt):
     vals = good_response(evt)["values"]
     for c in evt.get("components", []):
-        if c.get("type") in ("multiselect", "checklist", "image_checklist") \
+        if c.get("type") in ("multiselect", "checklist") \
                 and c.get("is_input") and not c.get("required"):
             vals[c["key"]] = []
     return {"type": "ui_response", "request_id": evt["request_id"], "values": vals}

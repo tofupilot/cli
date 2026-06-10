@@ -98,9 +98,9 @@ for line in p.stdout:
             if not c.get("is_input"):
                 continue
             t = c.get("type")
-            if t in ("radio", "select", "image_choice"):
+            if t in ("radio", "select"):
                 values[c["key"]] = "ZZZ-NOT-VALID"
-            elif t in ("multiselect", "checklist", "image_checklist"):
+            elif t in ("multiselect", "checklist"):
                 values[c["key"]] = ["nope"]
             elif t in ("number_input", "slider"):
                 values[c["key"]] = "not-a-number"

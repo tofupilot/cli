@@ -64,12 +64,7 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
                     use crate::procedure::schema::UIComponentType as T;
                     let needs_options = matches!(
                         comp.component_type,
-                        T::Radio
-                            | T::Select
-                            | T::Multiselect
-                            | T::Checklist
-                            | T::ImageChoice
-                            | T::ImageChecklist
+                        T::Radio | T::Select | T::Multiselect | T::Checklist
                     );
                     if needs_options {
                         let empty = comp

@@ -63,7 +63,7 @@ the copied scenarios under `/tmp`).
   dependency order, parallel workers, missing phase module, YAML syntax error,
   empty `main`, python syntax/import error inside phase, unknown `depends_on`,
   all 11 UI component types in one phase, display-only auto-continue,
-  parallel UI prompts, image_choice/image_checklist, attachments, UI bound to
+  parallel UI prompts, image-option radios/checklists, attachments, UI bound to
   measurement, text_input with pattern/length, slider + number boundaries,
   full journey, required UI answered, required UI timeout, unit metadata,
   pre-bake UI, simple plug, plug `__init__` raises, plug state persists,
