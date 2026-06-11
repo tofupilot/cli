@@ -152,7 +152,7 @@ pub enum RunSource {
     Deployment(Option<String>),
     /// A local path (file or directory). Runs the local source directly.
     /// `upload` requests syncing the run to the dashboard via the dir's
-    /// `procedure.json` link (see `tofupilot link`); without it the run
+    /// `tofupilot.json` link (see `tofupilot link`); without it the run
     /// stays local.
     LocalPath { path: PathBuf, upload: bool },
 }
@@ -161,7 +161,7 @@ struct ResolvedSource {
     id: String,
     dir: PathBuf,
     upload: bool,
-    /// Set when a local dir is linked (`procedure.json` present) but the
+    /// Set when a local dir is linked (`tofupilot.json` present) but the
     /// run is staying local because `--upload` wasn't passed. Carries the
     /// linked procedure's display label so the post-run hint can nudge the
     /// user toward `--upload`.
@@ -344,7 +344,8 @@ fn resolve_entry_file(
         EntrySurface::MainPy => python::find_entry_point(package_dir).ok_or_else(|| PrepareFail {
             kind: "load_error",
             message: format!(
-                "No Python entry point found in {}. Expected: main.py.",
+                "No procedure found in {}. Expected a procedure.yaml or a Python entry point \
+                 (main.py).",
                 package_dir.display(),
             ),
         }),
@@ -1541,7 +1542,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
         RunSource::LocalPath { path, upload } => {
             let (dir, yaml_hint) = classify_local_path(&path)?;
 
-            // A linked local dir carries a `procedure.json` binding it to a
+            // A linked local dir carries a `tofupilot.json` binding it to a
             // remote procedure. `--upload` activates that link, uploading
             // the run under the linked procedure id. The env override lets
             // CI point a run at a procedure without a checked-in link file.
@@ -1550,7 +1551,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                 .filter(|s| !s.is_empty());
 
             if upload {
-                // Env wins over the file; only touch `procedure.json` when the
+                // Env wins over the file; only touch `tofupilot.json` when the
                 // env override is absent so a pure-env CI run never trips the
                 // corrupt-file warning over a file it doesn't use.
                 let procedure_id = env_id

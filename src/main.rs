@@ -119,7 +119,7 @@ enum Commands {
         #[arg(long)]
         no_bootstrap: bool,
         /// Upload the run to the dashboard for a linked local procedure.
-        /// Requires a `procedure.json` in the procedure dir (see
+        /// Requires a `tofupilot.json` in the procedure dir (see
         /// `tofupilot link`) or the `TOFUPILOT_PROCEDURE_ID` env var.
         /// Ignored for `--deployment` runs, which always upload.
         #[arg(long)]

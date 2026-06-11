@@ -147,8 +147,8 @@ pub async fn identify(
     if !host.can_prompt() {
         return Err(IdentifyError::NoUi(
             "this procedure requires operator unit identification, but the run is headless \
-             with no UI to enter it. Set `auto_identify` with default values in procedure.yaml, \
-             pass `--ui-values`, or run with `--tui` / `--kiosk`."
+             with no UI to enter it. Set `auto_identify` with default values in the procedure \
+             `.yaml` file, pass `--ui-values`, or run with `--tui` / `--kiosk`."
                 .to_string(),
         ));
     }

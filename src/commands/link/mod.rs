@@ -2,7 +2,7 @@
 //! to a remote dashboard procedure so `tofupilot run <path> --upload` syncs
 //! the resulting run to that procedure.
 //!
-//! The link is a single `procedure.json` file at the procedure dir root,
+//! The link is a single `tofupilot.json` file at the procedure dir root,
 //! framework-agnostic (yaml / openhtf / pytest / robot / plain). Modeled on
 //! `vercel link` (`.vercel/project.json`), trimmed to what the upload path
 //! needs: the procedure id. We keep the human name too so `unlink` and the
@@ -15,7 +15,7 @@ use tofupilot_sdk::TofuPilot;
 
 use crate::commands::auth::credentials;
 
-/// On-disk link record. Lives at `<procedure_dir>/procedure.json`.
+/// On-disk link record. Lives at `<procedure_dir>/tofupilot.json`.
 ///
 /// Only `procedure_id` is load-bearing for upload — the api key already
 /// scopes the org server-side, so (unlike vercel's orgId) we don't persist
@@ -34,7 +34,7 @@ pub struct ProcedureLink {
 }
 
 /// Filename of the link record, written at the procedure dir root.
-pub const LINK_FILE: &str = "procedure.json";
+pub const LINK_FILE: &str = "tofupilot.json";
 
 /// Read the link for a procedure dir, if any. Returns `None` when the file
 /// is absent. A present-but-unparseable file logs a warning naming the
@@ -101,7 +101,7 @@ fn sdk() -> Result<TofuPilot, i32> {
 
 /// `tofupilot link [path] [--procedure <id|name>]`
 ///
-/// Writes `<dir>/procedure.json` binding the local procedure to a remote
+/// Writes `<dir>/tofupilot.json` binding the local procedure to a remote
 /// one. With `--procedure`, resolves that id/name non-interactively (CI).
 /// Without it, fetches the org's procedures and shows a `dialoguer::Select`
 /// picker — same pattern as `resolve_procedure_id` in the run path.
@@ -159,7 +159,7 @@ pub async fn link_cmd(path: Option<&Path>, procedure: Option<&str>, json_mode: b
     0
 }
 
-/// `tofupilot unlink [path]` — remove `procedure.json`. Idempotent: a dir
+/// `tofupilot unlink [path]` — remove `tofupilot.json`. Idempotent: a dir
 /// that isn't linked is reported, not an error.
 pub fn unlink_cmd(path: Option<&Path>, json_mode: bool) -> i32 {
     let dir = match resolve_dir(path) {
