@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod deploy;
 pub mod http;
 pub mod link;
 pub mod pull;

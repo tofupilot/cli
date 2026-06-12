@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -37,6 +37,8 @@ comfy-table = "7"
 semver = "1"
 redb = "4"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+ignore = "0.4"
+tempfile = "3"
 command-group = { version = "5.0", features = ["with-tokio"] }
 station-protocol = { path = "crates/station-protocol" }
 execution-engine = { path = "crates/execution-engine" }

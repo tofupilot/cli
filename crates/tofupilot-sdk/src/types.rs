@@ -554,6 +554,8 @@ pub enum Trigger {
     Auto,
     #[serde(rename = "manual")]
     Manual,
+    #[serde(rename = "cli")]
+    Cli,
 }
 
 impl std::fmt::Display for Trigger {
@@ -561,6 +563,7 @@ impl std::fmt::Display for Trigger {
         match self {
             Self::Auto => write!(f, "auto"),
             Self::Manual => write!(f, "manual"),
+            Self::Cli => write!(f, "cli"),
         }
     }
 }

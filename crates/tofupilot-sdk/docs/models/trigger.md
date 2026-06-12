@@ -8,3 +8,4 @@ How the deployment was triggered.
 | --- | --- |
 | `Trigger::Auto` | `auto` |
 | `Trigger::Manual` | `manual` |
+| `Trigger::Cli` | `cli` |

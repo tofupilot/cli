@@ -76,6 +76,21 @@ enum Commands {
     Rollback,
     /// Pull latest deployments to local workspaces
     Pull,
+    /// Deploy the linked procedure's local source (preview by default)
+    Deploy {
+        /// Path to the procedure directory (defaults to the current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+        /// Target production: push to every linked station once built
+        #[arg(long, conflicts_with = "target")]
+        prod: bool,
+        /// Explicit target environment ("production" or "preview")
+        #[arg(long)]
+        target: Option<String>,
+        /// Skip the production confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a procedure (from a local path or a pulled deployment)
     Run {
         /// Path to a procedure.yaml, a directory containing one, or a Python entry point.
@@ -367,6 +382,21 @@ async fn main() {
         Some(Commands::Pull) => {
             startup();
             std::process::exit(commands::pull::run_cmd(json_mode).await);
+        }
+        Some(Commands::Deploy { ref path, prod, ref target, yes }) => {
+            startup();
+            std::process::exit(
+                commands::deploy::run_cmd(
+                    commands::deploy::DeployArgs {
+                        path: path.clone(),
+                        prod,
+                        target: target.clone(),
+                        yes,
+                    },
+                    json_mode,
+                )
+                .await,
+            );
         }
         Some(Commands::Run {
             ref path,
