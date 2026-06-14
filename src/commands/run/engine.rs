@@ -145,6 +145,11 @@ struct CliEventSink {
     /// `UiResponse` cycle to capture it from). Single-slot today;
     /// the last write wins (same as `RunData.unit_serial`).
     resolved_unit: Arc<std::sync::Mutex<Option<station_protocol::UnitInfo>>>,
+    /// Deployment this run came from (local `PullState` lookup), None
+    /// for ad-hoc local-path runs. Stamped on `RunStarted` so remote
+    /// UIs can resolve relative component image paths against the
+    /// deployment's stored files.
+    deployment_id: Option<String>,
 }
 
 impl CliEventSink {
@@ -155,6 +160,7 @@ impl CliEventSink {
         procedure_name: String,
         procedure_id: String,
         execution_id: String,
+        deployment_id: Option<String>,
     ) -> Self {
         let router = EventRouter::new(tx.clone(), agent.clone(), execution_id.clone());
         Self {
@@ -165,6 +171,7 @@ impl CliEventSink {
             procedure_name,
             procedure_id,
             execution_id,
+            deployment_id,
             data: Arc::new(Mutex::new(RunData {
                 phases: Vec::new(),
                 run_outcome: None,
@@ -244,6 +251,7 @@ impl EventSink for CliEventSink {
                     plugs: plug_defs,
                     timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     run_id: None,
+                    deployment_id: self.deployment_id.clone(),
                     unit,
                 });
                 if let Some(ref agent) = self.agent {
@@ -1424,6 +1432,7 @@ pub async fn run_yaml_procedure(
         procedure_name.to_string(),
         procedure_id.to_string(),
         execution_id.to_string(),
+        super::deployment_id::lookup_deployment_id(procedure_id),
     );
     let run_data = sink.data.clone();
     let event_sink: Arc<dyn EventSink> = Arc::new(sink);

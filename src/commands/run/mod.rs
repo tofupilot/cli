@@ -490,6 +490,9 @@ async fn synthetic_fail_handle(
                     ui_response_tx.clone(),
                     cancel_token.clone(),
                     procedures,
+                    // Synthetic-fail: the run never started, so there is
+                    // no procedure dir to serve images from.
+                    None,
                     "station",
                 )
                 .await,
@@ -805,6 +808,7 @@ pub async fn start(
                     ui_response_tx.clone(),
                     cancel_token.clone(),
                     procedures,
+                    Some(package_dir.clone()),
                     if local_ws_server.is_some() {
                         "station"
                     } else {

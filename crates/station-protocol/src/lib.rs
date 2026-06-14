@@ -117,6 +117,13 @@ pub enum StationEvent {
         /// run_id only arrived on `RunComplete`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+        /// Deployment this run executes, when the procedure came from
+        /// a pulled deployment (None for local-path runs). Lets remote
+        /// UIs resolve relative image paths in UI components against
+        /// the deployment's stored files — the dashboard serves them
+        /// from the artifact bucket keyed by this id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deployment_id: Option<String>,
         /// Unit metadata captured before the engine started. None
         /// for runs that prompt the operator at runtime — those
         /// arrive via `IdentifyRequest` / `IdentifyResolved`
@@ -1460,6 +1467,7 @@ mod tests {
             plugs: vec![],
             timestamp: None,
             run_id: None,
+            deployment_id: None,
             unit: None,
         };
         assert_eq!(ev.execution_id(), Some("e"));

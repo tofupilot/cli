@@ -693,6 +693,7 @@ mod tests {
             plugs: Vec::new(),
             timestamp: None,
             run_id: None,
+            deployment_id: None,
             unit: None,
         }
     }

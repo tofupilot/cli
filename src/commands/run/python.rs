@@ -240,6 +240,9 @@ pub async fn execute(
             plugs: Vec::new(),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
             run_id: None,
+            deployment_id: crate::commands::run::deployment_id::lookup_deployment_id(
+                &c.procedure_id,
+            ),
             unit: None,
         });
     }

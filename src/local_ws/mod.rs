@@ -389,6 +389,13 @@ struct AppState {
     /// `TOFUPILOT_LOCAL_UI_DEV_DIR` so SPA iteration doesn't require
     /// a `cargo build` per change.
     dev_dir: Option<PathBuf>,
+    /// Root the `/files/*` route serves from: the attached run's
+    /// procedure directory. UI components reference images relative
+    /// to it (radio/checklist option `image`, image component
+    /// `value`) — same base the TUI's `ImageCache` resolves against.
+    /// Swapped per-run via `attach_run`; `None` between runs, so
+    /// `/files/*` 404s when no run is attached.
+    procedure_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// Long-lived local WS server. One per CLI process. Bind once at
@@ -590,10 +597,12 @@ impl Server {
             allowed_origins,
             hello,
             dev_dir,
+            procedure_dir: Arc::new(Mutex::new(None)),
         };
 
         let app = Router::new()
             .route("/ws", get(ws_handler))
+            .route("/files/*path", get(files_handler))
             .fallback(static_handler)
             .with_state(state.clone());
 
@@ -890,12 +899,17 @@ impl Server {
         ui_response_tx: mpsc::Sender<StationCommand>,
         cancel_token: crate::commands::run::cancel::CancelToken,
         procedures: Vec<ProcedureRef>,
+        // Directory `/files/*` serves from for this run. `None` when
+        // the caller has no on-disk procedure (synthetic-fail handles)
+        // — the route then 404s and the SPA shows its image fallback.
+        procedure_dir: Option<PathBuf>,
         mode: &'static str,
     ) -> RunAttachment {
         // Swap the inbound sinks so frames arriving on existing WS
         // connections route to this run.
         *self.state.ui_response_tx.lock().await = ui_response_tx;
         *self.state.cancel_token.lock().await = cancel_token;
+        *self.state.procedure_dir.lock().await = procedure_dir;
 
         // Refresh the hello payload so a tab that connects mid-run
         // (or reconnects after a restart) sees the right procedure
@@ -935,10 +949,7 @@ impl Server {
                 match rx.recv().await {
                     Ok(event) => {
                         let seq = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        let stamped = StampedEvent {
-                            seq,
-                            event: event.clone(),
-                        };
+                        let stamped = StampedEvent { seq, event };
                         update_ring(&hydration, &stamped).await;
                         let _ = stamped_tx.send(stamped);
                     }
@@ -1416,4 +1427,107 @@ fn file_response(path: &str, bytes: &'static [u8]) -> Response {
     resp
 }
 
+/// Extension whitelist for `/files/*`. The route exists solely to
+/// resolve UI component image references; clamping to image types
+/// keeps the rest of the procedure dir (source, venv, dotfiles) off
+/// the HTTP surface. SVG is deliberately excluded: it is served
+/// same-origin as the SPA and can carry inline script, so opening a
+/// bundle-authored `.svg` directly would run it in the SPA origin.
+/// Operator reference images are raster in practice.
+fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif" | "ico")
+    )
+}
+
+/// Serve an image from the attached run's procedure directory. The
+/// kiosk SPA resolves relative component image paths (radio/checklist
+/// option `image`, image component value) to `/files/<rel>` URLs — the
+/// same strings the TUI's `ImageCache` resolves against the same root.
+/// 404 on everything else: no run attached, non-image extension, or a
+/// path that escapes the root.
+async fn files_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response {
+    let Some(root) = state.procedure_dir.lock().await.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Same clamp as `read_dev_file`: keep only Normal components so a
+    // `..%2F` escape collapses back inside the root.
+    let safe: PathBuf = std::path::Path::new(&path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    if !is_image_path(&safe) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let full = root.join(safe);
+    // The component clamp stops lexical traversal, but `tokio::fs::read`
+    // follows symlinks — a `foo.png` symlink inside the procedure dir
+    // pointing at an out-of-tree file would otherwise be served.
+    // Canonicalize both sides and require the resolved target to stay
+    // under the resolved root. (canonicalize also fails for a missing
+    // file, collapsing the not-found case into the same 404.)
+    let (Ok(canon_root), Ok(canon_full)) = (
+        tokio::fs::canonicalize(&root).await,
+        tokio::fs::canonicalize(&full).await,
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !canon_full.starts_with(&canon_root) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(&canon_full).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mime = mime_guess::from_path(&full).first_or_octet_stream();
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
+        resp.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    resp
+}
+
 const PLACEHOLDER_HTML: &str = include_str!("placeholder.html");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_extension_whitelist() {
+        assert!(is_image_path(std::path::Path::new("a/b.PNG")));
+        assert!(is_image_path(std::path::Path::new("b.webp")));
+        // SVG excluded: same-origin + scriptable.
+        assert!(!is_image_path(std::path::Path::new("b.svg")));
+        assert!(!is_image_path(std::path::Path::new(".env")));
+        assert!(!is_image_path(std::path::Path::new("main.py")));
+        assert!(!is_image_path(std::path::Path::new("noext")));
+    }
+
+    #[test]
+    fn traversal_components_collapse_inside_root() {
+        // Mirrors the clamp in `files_handler`: only Normal components
+        // survive, so `..`-escapes resolve inside the root.
+        let clamp = |p: &str| -> PathBuf {
+            std::path::Path::new(p)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(clamp("../../etc/passwd"), PathBuf::from("etc/passwd"));
+        assert_eq!(clamp("images/../a.png"), PathBuf::from("images/a.png"));
+        assert_eq!(clamp("/abs/a.png"), PathBuf::from("abs/a.png"));
+    }
+}
