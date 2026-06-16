@@ -102,7 +102,10 @@ async fn run(args: DeployArgs, json_mode: bool) -> CliResult<i32> {
         .canonicalize()
         .map_err(|e| CliError::msg(format!("cannot resolve {}: {e}", dir.display())))?;
     if !dir.is_dir() {
-        return Err(CliError::msg(format!("{} is not a directory", dir.display())));
+        return Err(CliError::msg(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
     }
 
     let Some(link) = link::read_link(&dir) else {
@@ -155,8 +158,8 @@ async fn run(args: DeployArgs, json_mode: bool) -> CliResult<i32> {
     // with an actionable message instead.
     if let Ok(contents) = std::fs::read_to_string(&pyproject) {
         let is_workspace_root = contents.contains("[tool.uv.workspace]");
-        let is_workspace_member = contents.contains("[tool.uv.sources]")
-            && contents.contains("workspace = true");
+        let is_workspace_member =
+            contents.contains("[tool.uv.sources]") && contents.contains("workspace = true");
         if is_workspace_member && !is_workspace_root && !json_mode {
             log::warn(
                 "This looks like a uv workspace member. Only this directory is uploaded, so workspace dependencies in a parent pyproject.toml won't be available to the build. Deploy from the workspace root, or vendor the dependency.",
@@ -276,7 +279,9 @@ async fn run(args: DeployArgs, json_mode: bool) -> CliResult<i32> {
     );
 
     if created.cleared_rollback && !json_mode {
-        log::warn("Production was rolled back — this deploy overrides the pin and resumes auto-push.");
+        log::warn(
+            "Production was rolled back — this deploy overrides the pin and resumes auto-push.",
+        );
     }
     if !json_mode {
         log::info(&format!("Building… ({url})"));
@@ -307,7 +312,11 @@ async fn run(args: DeployArgs, json_mode: bool) -> CliResult<i32> {
                 log::success(&format!(
                     "Deployed to {} station{} — {url}",
                     created.pushed_station_ids.len(),
-                    if created.pushed_station_ids.len() == 1 { "" } else { "s" },
+                    if created.pushed_station_ids.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                 ));
             }
         }
@@ -330,9 +339,7 @@ async fn stream_build(
 ) -> CliResult<String> {
     let mut after_seq: i64 = 0;
     loop {
-        let url = format!(
-            "{base}/api/cli/deployments/{deployment_id}/logs?after_seq={after_seq}"
-        );
+        let url = format!("{base}/api/cli/deployments/{deployment_id}/logs?after_seq={after_seq}");
         let resp = client()
             .get(&url)
             .bearer(&creds.api_key)
@@ -383,8 +390,8 @@ fn pack(dir: &Path) -> CliResult<Packed> {
         .tempfile()
         .map_err(CliError::from)?;
 
-    let encoder = zstd::Encoder::new(tmp.reopen().map_err(CliError::from)?, 9)
-        .map_err(CliError::from)?;
+    let encoder =
+        zstd::Encoder::new(tmp.reopen().map_err(CliError::from)?, 9).map_err(CliError::from)?;
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(false);
 
@@ -417,7 +424,9 @@ fn pack(dir: &Path) -> CliResult<Packed> {
         file_count += 1;
     }
     if file_count == 0 {
-        return Err(CliError::msg("nothing to pack — directory is empty after excludes"));
+        return Err(CliError::msg(
+            "nothing to pack — directory is empty after excludes",
+        ));
     }
 
     let encoder = builder.into_inner().map_err(CliError::from)?;

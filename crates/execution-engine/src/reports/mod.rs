@@ -188,12 +188,17 @@ impl ReportManager {
         Ok(())
     }
 
+    /// Writes the attachment bytes to the active report dir and returns
+    /// the stored file path (`<report_dir>/<id8>_<name>`). The path lets
+    /// the live event carry an on-disk location the kiosk can serve from
+    /// `/attachments/*` before the upload queue deletes it. Returns
+    /// `Ok(None)` when no report dir is active (nothing was written).
     pub fn attach_data(
         &mut self,
         job_id: &uuid::Uuid,
         data: &[u8],
         name: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Option<PathBuf>, String> {
         if let Some(report_dir) = &self.current_report_dir {
             // Generate unique attachment ID
             let attachment_id = uuid::Uuid::new_v4();
@@ -215,8 +220,9 @@ impl ReportManager {
                 name,
                 &attachment_id.to_string()[..8]
             );
+            return Ok(Some(dest));
         }
-        Ok(())
+        Ok(None)
     }
 
     pub fn finalize_report(

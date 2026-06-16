@@ -181,7 +181,12 @@ fn resolve_runtime_version(deps: &DepsSource) -> String {
                         .trim()
                         .trim_start_matches([' ', '>', '=', '<', '~', '^', '!']);
                     if !trimmed.is_empty() {
-                        return trimmed.to_string();
+                        // Reduce an exact patch (`>=3.12.13` → `3.12.13`)
+                        // to its minor line so `uv sync --python` doesn't
+                        // demand a python-build-standalone patch the
+                        // station's uv may not yet know about — same
+                        // normalization the pulled path applies.
+                        return crate::commands::pull::sync::minor_version(trimmed);
                     }
                 }
             }
@@ -620,6 +625,21 @@ mod tests {
         let deps = pyproject_at(
             tmp.path(),
             b"[project]\nname='a'\nrequires-python='>=3.12,<3.14'\n",
+        );
+        assert_eq!(resolve_runtime_version(&deps), "3.12");
+    }
+
+    /// An exact-patch `requires-python` (`>=3.12.13`) must reduce to its
+    /// minor line. Passing the full patch to `uv sync --python` fails
+    /// with "No interpreter found" whenever the station's uv predates
+    /// that python-build-standalone patch — the same failure the pulled
+    /// path normalizes away.
+    #[test]
+    fn runtime_version_reduces_exact_patch_to_minor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deps = pyproject_at(
+            tmp.path(),
+            b"[project]\nname='a'\nrequires-python='>=3.12.13'\n",
         );
         assert_eq!(resolve_runtime_version(&deps), "3.12");
     }

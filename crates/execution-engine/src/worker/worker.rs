@@ -15,6 +15,18 @@ use crate::reports::ReportManager;
 use crate::plugs::process::ChildProcess;
 use crate::transport;
 
+/// Best-effort mimetype for an attachment from its filename. The
+/// operator-UI gates image rendering on an `image/*` mimetype, so an
+/// attachment with no mimetype never renders even when its bytes are an
+/// image. `attach.data`/`attach_file` don't carry a content type, so we
+/// derive one from the extension. `None` for unknown extensions — the UI
+/// then shows the attachment as a plain (non-image) row.
+fn guess_attachment_mimetype(name: &str) -> Option<String> {
+    mime_guess::from_path(name)
+        .first()
+        .map(|m| m.essence_str().to_string())
+}
+
 /// Convert protocol Measurement to internal Measurement.
 /// Returns None if value cannot be parsed.
 fn try_measurement_from_protocol(m: protocol::Measurement) -> Option<crate::measurements::Measurement> {
@@ -448,7 +460,10 @@ impl Worker {
                         slot_id: job.slot_id.clone(),
                         name: attachment_name.clone(),
                         path: Some(source_path.clone()),
-                        mimetype: None,
+                        // Guess from the filename so the operator-UI can tell
+                        // images apart (it gates `<img>` rendering on an
+                        // `image/*` mimetype). None for unknown extensions.
+                        mimetype: guess_attachment_mimetype(&attachment_name),
                     });
 
                     if let Some(ref managers_arc) = report_managers {
@@ -469,18 +484,19 @@ impl Worker {
                     }
                 }
                 protocol::WorkerEvent::AttachData(attach_event) => {
-                    event_sink.emit(&ExecutionEvent::AttachmentAdded {
-                        phase_key: job.phase_key.clone(),
-                        slot_id: job.slot_id.clone(),
-                        name: attach_event.attachment_name.clone(),
-                        path: None,
-                        mimetype: None,
-                    });
+                    // Write the bytes to the report dir FIRST so the live
+                    // event can carry the stored on-disk path — the kiosk
+                    // serves attachment images from it (`/attachments/*`)
+                    // until the upload queue deletes the file. Emitting
+                    // before the write would force `path: None` and leave
+                    // the kiosk unable to render `attach.data` images.
+                    let mut stored_path: Option<String> = None;
                     if let Some(ref managers_arc) = report_managers {
                         match base64::engine::general_purpose::STANDARD.decode(&attach_event.data) {
                             Ok(bytes) => {
                                 let attachment_name = attach_event.attachment_name.clone();
                                 let job_id = job.id.to_string();
+                                let path_slot = &mut stored_path;
 
                                 Self::with_report_managers(
                                     managers_arc,
@@ -489,6 +505,10 @@ impl Worker {
                                     |_slot_id, manager| {
                                         manager
                                             .attach_data(&job.id, &bytes, &attachment_name)
+                                            .map(|dest| {
+                                                *path_slot = dest
+                                                    .map(|p| p.to_string_lossy().into_owned());
+                                            })
                                             .map_err(|e| {
                                                 format!(
                                                     "Failed to attach data {}: {}",
@@ -508,6 +528,16 @@ impl Worker {
                             }
                         }
                     }
+                    // Emit after the write so `path` points at the stored
+                    // file (None if no report dir was active or the decode
+                    // failed — the remote UI still resolves via upload id).
+                    event_sink.emit(&ExecutionEvent::AttachmentAdded {
+                        phase_key: job.phase_key.clone(),
+                        slot_id: job.slot_id.clone(),
+                        name: attach_event.attachment_name.clone(),
+                        path: stored_path,
+                        mimetype: guess_attachment_mimetype(&attach_event.attachment_name),
+                    });
                 }
                 protocol::WorkerEvent::UiUpdate(ui_event) => {
                     let update_event = crate::events::UiUpdateEvent {
@@ -1141,5 +1171,26 @@ fn merge_unit_info(
             base
         }
         None => ui_unit,
+    }
+}
+
+#[cfg(test)]
+mod attachment_mimetype_tests {
+    use super::guess_attachment_mimetype;
+
+    #[test]
+    fn images_get_an_image_mimetype() {
+        // The operator-UI keys `<img>` rendering on `image/*`.
+        assert_eq!(guess_attachment_mimetype("board.png").as_deref(), Some("image/png"));
+        assert_eq!(guess_attachment_mimetype("shot.JPG").as_deref(), Some("image/jpeg"));
+        assert_eq!(guess_attachment_mimetype("scan.webp").as_deref(), Some("image/webp"));
+    }
+
+    #[test]
+    fn non_images_and_unknowns_are_not_image_typed() {
+        assert_eq!(guess_attachment_mimetype("log.csv").as_deref(), Some("text/csv"));
+        // Unknown extension → None → UI shows a plain row, not a broken img.
+        assert_eq!(guess_attachment_mimetype("data.bin").as_deref(), Some("application/octet-stream"));
+        assert_eq!(guess_attachment_mimetype("noext"), None);
     }
 }

@@ -585,8 +585,9 @@ pub async fn run_openhtf(
                         plugs: Vec::new(),
                         timestamp: Some(chrono::Utc::now().to_rfc3339()),
                         run_id: None,
-                        deployment_id:
-                            crate::commands::run::deployment_id::lookup_deployment_id(&pid),
+                        deployment_id: crate::commands::run::deployment_id::lookup_deployment_id(
+                            &pid,
+                        ),
                         unit: resolved_wire.as_ref().map(unit_info_to_wire),
                     });
                     if let Some(ref agent) = agent_for_task {
@@ -841,10 +842,16 @@ pub async fn run_openhtf(
                             });
                         }
                     } else {
+                        let phase_key = phase_name
+                            .as_deref()
+                            .map(|n| canonical_phase_key(&phase_keys, n))
+                            .filter(|k| !k.is_empty())
+                            .unwrap_or_else(|| current_phase_key.clone());
                         attachments.push(QueuedAttachment {
                             name,
                             path,
                             mimetype,
+                            phase_key,
                         });
                     }
                 }

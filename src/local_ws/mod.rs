@@ -396,6 +396,15 @@ struct AppState {
     /// Swapped per-run via `attach_run`; `None` between runs, so
     /// `/files/*` 404s when no run is attached.
     procedure_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Root the `/attachments/*` route serves from: the directory the
+    /// engine writes run attachments to (the report dir). Unlike
+    /// `procedure_dir`, this isn't known at `attach_run` time — the
+    /// report dir is created inside the engine during the run — so it's
+    /// learned lazily from the first `AttachmentAdded` event's absolute
+    /// `path` (its parent dir). Lets the kiosk render `attach.data`
+    /// images locally; the remote dashboard uses `/api/attachments/:id`
+    /// instead. Cleared on `attach_run` so a stale run's dir can't leak.
+    attachment_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// Long-lived local WS server. One per CLI process. Bind once at
@@ -598,11 +607,13 @@ impl Server {
             hello,
             dev_dir,
             procedure_dir: Arc::new(Mutex::new(None)),
+            attachment_dir: Arc::new(Mutex::new(None)),
         };
 
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .route("/files/*path", get(files_handler))
+            .route("/attachments/*path", get(attachments_handler))
             .fallback(static_handler)
             .with_state(state.clone());
 
@@ -910,6 +921,10 @@ impl Server {
         *self.state.ui_response_tx.lock().await = ui_response_tx;
         *self.state.cancel_token.lock().await = cancel_token;
         *self.state.procedure_dir.lock().await = procedure_dir;
+        // New run: forget the prior run's attachment dir so a stale path
+        // can't serve a finished run's files. Re-latched lazily from the
+        // next run's first AttachmentAdded.
+        *self.state.attachment_dir.lock().await = None;
 
         // Refresh the hello payload so a tab that connects mid-run
         // (or reconnects after a restart) sees the right procedure
@@ -943,11 +958,26 @@ impl Server {
         let hydration = self.state.hydration.clone();
         let stamped_tx = self.state.seq_broadcast.clone();
         let counter = self.state.seq_counter.clone();
+        let attachment_dir = self.state.attachment_dir.clone();
         let mut rx = event_tx.subscribe();
         let pump_handle = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
+                        // Learn the run's attachment dir from the first
+                        // `AttachmentAdded` that carries an absolute path —
+                        // its parent is the engine's report dir, the root
+                        // `/attachments/*` serves from. The path isn't known
+                        // at attach_run time (the engine creates the dir
+                        // mid-run), so we latch it here instead.
+                        if let StationEvent::AttachmentAdded { path: Some(p), .. } = &event {
+                            if let Some(parent) = std::path::Path::new(p).parent() {
+                                let mut slot = attachment_dir.lock().await;
+                                if slot.is_none() {
+                                    *slot = Some(parent.to_path_buf());
+                                }
+                            }
+                        }
                         let seq = counter.fetch_add(1, Ordering::Relaxed) + 1;
                         let stamped = StampedEvent { seq, event };
                         update_ring(&hydration, &stamped).await;
@@ -1496,6 +1526,57 @@ async fn files_handler(
     resp
 }
 
+/// Serve a run attachment image from the engine's report dir (the root
+/// latched from `AttachmentAdded` paths). The kiosk SPA resolves an
+/// attachment to `/attachments/<stored_name>` — the basename the engine
+/// wrote (`<id8>_<name>`). The remote dashboard can't reach the station
+/// disk and uses `/api/attachments/:id` instead; this route is the
+/// kiosk's local counterpart, mirroring `/files/*`'s clamps:
+/// single-path-component basename only, image-extension whitelist (SVG
+/// excluded), and canonicalization confining the target under the root.
+/// 404 on everything else (no run, not an image, escape attempt, or the
+/// file already removed after upload).
+async fn attachments_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response {
+    let Some(root) = state.attachment_dir.lock().await.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Collapse to Normal components, same as files_handler. Attachments
+    // are flat (`<id8>_<name>`), so this also strips any path separators
+    // an attacker might inject to reach a sibling of the report dir.
+    let safe: PathBuf = std::path::Path::new(&path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    if !is_image_path(&safe) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let full = root.join(safe);
+    let (Ok(canon_root), Ok(canon_full)) = (
+        tokio::fs::canonicalize(&root).await,
+        tokio::fs::canonicalize(&full).await,
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !canon_full.starts_with(&canon_root) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(bytes) = tokio::fs::read(&canon_full).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mime = mime_guess::from_path(&full).first_or_octet_stream();
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
+        resp.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    resp
+}
+
 const PLACEHOLDER_HTML: &str = include_str!("placeholder.html");
 
 #[cfg(test)]
@@ -1529,5 +1610,34 @@ mod tests {
         assert_eq!(clamp("../../etc/passwd"), PathBuf::from("etc/passwd"));
         assert_eq!(clamp("images/../a.png"), PathBuf::from("images/a.png"));
         assert_eq!(clamp("/abs/a.png"), PathBuf::from("abs/a.png"));
+    }
+
+    #[test]
+    fn attachment_basename_clamp_and_whitelist() {
+        // `/attachments/*` serves the engine's flat `<id8>_<name>` stored
+        // files. The kiosk resolver sends a basename; assert the same
+        // clamp + image whitelist the handler applies. A normal stored
+        // image name survives; an escape attempt collapses inside root and
+        // a non-image is rejected.
+        let clamp = |p: &str| -> PathBuf {
+            std::path::Path::new(p)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(s) => Some(s),
+                    _ => None,
+                })
+                .collect()
+        };
+        let stored = clamp("a1b2c3d4_board.png");
+        assert_eq!(stored, PathBuf::from("a1b2c3d4_board.png"));
+        assert!(is_image_path(&stored));
+        // Separators an attacker injects are stripped to a flat path that
+        // canonicalization then confines under the report dir.
+        assert_eq!(
+            clamp("../../secrets/key.png"),
+            PathBuf::from("secrets/key.png")
+        );
+        // Non-image stored file (e.g. a CSV attachment) is not served.
+        assert!(!is_image_path(&clamp("a1b2c3d4_data.csv")));
     }
 }

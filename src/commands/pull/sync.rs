@@ -486,7 +486,9 @@ async fn run_installer(dir: &Path) -> crate::error::CliResult<()> {
             ..
         }) => s,
     };
-    let python_version = source.runtime_version.clone();
+    // Normalize the manifest's exact `X.Y.Z` patch to its `X.Y` minor
+    // line before it reaches venv provisioning (see `minor_version`).
+    let python_version = minor_version(&source.runtime_version);
     let mode = source.mode.clone();
     // Workspace-mode bundles surface the procedure source under a
     // subdirectory of the deployment root; single-package bundles
@@ -612,6 +614,10 @@ pub(crate) fn create_venv(
     cwd: &Path,
 ) -> crate::error::CliResult<()> {
     let _ = std::fs::remove_dir_all(venv);
+    // `runtime_version` is already a minor line here: callers normalize
+    // it at the source (the manifest read on the pulled path, and
+    // `resolve_runtime_version` on the local-run path) via
+    // `minor_version`. We pass it straight through.
     run_subprocess(
         uv,
         &[
@@ -623,6 +629,33 @@ pub(crate) fn create_venv(
         cwd,
         "uv venv",
     )
+}
+
+/// Reduce a `X.Y.Z` runtime version to its `X.Y` minor line.
+///
+/// The build image bakes a full `X.Y.Z` patch into the manifest (the
+/// patch it happened to ship), but pinning that exact patch when
+/// provisioning a venv makes the install fail with "No interpreter
+/// found for Python X.Y.Z" whenever the station's uv predates the
+/// python-build-standalone release for that patch. Requesting the minor
+/// lets uv satisfy `--python` with any already-installed or fetchable
+/// `X.Y.z`, which is what the shipped wheelhouse is ABI-compatible with
+/// anyway (wheels are tagged by minor, not patch).
+///
+/// A value that isn't `X.Y.Z` (a bare `X.Y`, or something exotic from a
+/// local-run fallback) is passed through unchanged so we never widen or
+/// corrupt it.
+pub(crate) fn minor_version(runtime_version: &str) -> String {
+    let parts: Vec<&str> = runtime_version.split('.').collect();
+    if parts.len() >= 2
+        && parts[..2]
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        format!("{}.{}", parts[0], parts[1])
+    } else {
+        runtime_version.to_string()
+    }
 }
 
 /// Venv interpreter path. uv writes the same layout as `python -m venv`:
@@ -657,9 +690,7 @@ pub(crate) fn run_subprocess(
             let _ = std::io::copy(&mut out, &mut std::io::stderr());
         })
     });
-    let status = child
-        .wait()
-        .map_err(|e| format!("Wait {label}: {e}"))?;
+    let status = child.wait().map_err(|e| format!("Wait {label}: {e}"))?;
     // Join the drain so the tool's final output (the part that
     // explains a failure) lands before our error message.
     if let Some(handle) = drain {
@@ -711,4 +742,40 @@ fn install_vendor_wheels(
         args.push(whl.as_os_str());
     }
     run_subprocess(uv, &args, cwd, "uv pip install (workspace members)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::minor_version;
+
+    #[test]
+    fn reduces_exact_patch_to_minor() {
+        assert_eq!(minor_version("3.12.13"), "3.12");
+        assert_eq!(minor_version("3.13.14"), "3.13");
+        assert_eq!(minor_version("3.14.6"), "3.14");
+    }
+
+    #[test]
+    fn passes_through_bare_minor() {
+        // Local-run fallback may hand us an `X.Y` already.
+        assert_eq!(minor_version("3.11"), "3.11");
+    }
+
+    #[test]
+    fn passes_through_non_numeric_unchanged() {
+        // Never widen or corrupt an unexpected value.
+        assert_eq!(minor_version("pypy3.10"), "pypy3.10");
+        assert_eq!(minor_version("3"), "3");
+    }
+
+    #[test]
+    fn handles_empty_segments() {
+        // A trailing dot still yields a valid minor — only the first two
+        // segments matter, and both are present here.
+        assert_eq!(minor_version("3.12."), "3.12");
+        // A leading dot makes the first segment empty: not a minor line,
+        // pass through untouched rather than emit `.12`.
+        assert_eq!(minor_version(".12"), ".12");
+        assert_eq!(minor_version("3."), "3.");
+    }
 }

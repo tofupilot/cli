@@ -133,7 +133,9 @@ enum Msg {
     /// branch exists.
     Resize,
     InputError(io::Error),
-    Station(StationEvent),
+    /// Boxed: `StationEvent` is large (one variant ~360 bytes), so
+    /// inlining it would bloat every `Msg` and trip `large_enum_variant`.
+    Station(Box<StationEvent>),
     StationLagged(u64),
     StationClosed,
     UiRequest(UiRequestData),
@@ -386,7 +388,7 @@ async fn event_loop(
             },
 
             res = rx.recv(), if !station_closed => match res {
-                Ok(ev) => Msg::Station(ev),
+                Ok(ev) => Msg::Station(Box::new(ev)),
                 Err(broadcast::error::RecvError::Lagged(n)) => Msg::StationLagged(n),
                 Err(broadcast::error::RecvError::Closed) => {
                     station_closed = true;
@@ -402,7 +404,7 @@ async fn event_loop(
             // Inbound presence from other participants (dashboard
             // tabs). Same shape as Station events, different source so
             // the managed publisher doesn't pick it up and re-publish.
-            Some(ev) = presence_rx.recv() => Msg::Station(ev),
+            Some(ev) = presence_rx.recv() => Msg::Station(Box::new(ev)),
 
             _ = tick.tick() => Msg::Tick,
         };
@@ -545,7 +547,7 @@ async fn update(app: &mut TuiState, msg: Msg, cancel: &super::cancel::CancelToke
         }
 
         Msg::Station(event) => {
-            app.apply(event);
+            app.apply(*event);
         }
 
         Msg::StationLagged(n) => {

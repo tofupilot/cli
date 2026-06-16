@@ -115,6 +115,14 @@ struct RunData {
     unit_revision: Option<String>,
     unit_batch: Option<String>,
     unit_sub_units: Option<Vec<String>>,
+    /// Attachments written to the report dir during the run, accumulated
+    /// for the upload queue. The native engine path emits AttachmentAdded
+    /// live but, unlike the framework connectors, didn't collect them for
+    /// upload — so a station `attach.data` image never reached the cloud
+    /// and never showed on the remote dashboard. Collected here (only when
+    /// the event carries an on-disk path) so the upload queue ships them
+    /// and emits AttachmentUploaded.
+    attachments: Vec<crate::commands::run::queue::QueuedAttachment>,
 }
 
 /// EventSink that projects to StationEvents for TUI/WebSocket and accumulates data for upload.
@@ -183,6 +191,7 @@ impl CliEventSink {
                 unit_revision: None,
                 unit_batch: None,
                 unit_sub_units: None,
+                attachments: Vec::new(),
             })),
             resolved_unit: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -713,6 +722,24 @@ impl EventSink for CliEventSink {
                     size_bytes: None,
                     execution_id: Some(self.execution_id.clone()),
                 });
+                // Collect for the upload queue so the attachment reaches the
+                // cloud (and the remote dashboard). Only when the event
+                // carries the report-dir path — `attach_data` writes the
+                // file and emits it; an emit without a path has nothing to
+                // upload. Same accumulate-via-spawn pattern as phases above;
+                // the push completes well before the post-run queue build.
+                if let Some(stored) = path.clone() {
+                    let data = self.data.clone();
+                    let queued_attachment = crate::commands::run::queue::QueuedAttachment {
+                        name: name.clone(),
+                        path: stored,
+                        mimetype: mimetype.clone().unwrap_or_default(),
+                        phase_key: phase_key.clone(),
+                    };
+                    tokio::spawn(async move {
+                        data.lock().await.attachments.push(queued_attachment);
+                    });
+                }
             }
 
             ExecutionEvent::UnitIdentified { slot_id, unit_info } => {
@@ -1717,7 +1744,7 @@ pub async fn run_yaml_procedure(
         Ok(request) => {
             let queued = QueuedRun {
                 request,
-                attachments: Vec::new(),
+                attachments: data.attachments.clone(),
                 run_id: None,
                 attempt_count: 0,
                 last_attempt_at: None,

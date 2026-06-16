@@ -349,6 +349,31 @@ pub enum StationEvent {
         queue_id: String,
         reason: String,
     },
+    /// A single attachment finished uploading to storage. Emitted
+    /// per-attachment from the upload queue once the server has minted an
+    /// `upload_id` and the bytes are in object storage. Lets a remote
+    /// operator-UI (which only ever saw a station-disk `path` on
+    /// `AttachmentAdded`) resolve the attachment to a fetchable URL
+    /// (`/api/attachments/{upload_id}`) and swap its pending placeholder
+    /// for the real image. Correlated to the originating `AttachmentAdded`
+    /// by `(phase_key, name)`: the queue carries the phase key on each
+    /// attachment so the join is unique even when two phases attach the
+    /// same file name. `phase_key` may be empty for legacy queue entries
+    /// persisted before it was carried — consumers fall back to name.
+    AttachmentUploaded {
+        run_id: String,
+        /// Phase the attachment belongs to. Matches
+        /// `AttachmentAdded.phase_key`. Empty for legacy queue entries.
+        #[serde(default)]
+        phase_key: String,
+        /// Matches `AttachmentAdded.name` for the same attachment.
+        name: String,
+        /// Server-minted upload id; the operator-UI builds
+        /// `/api/attachments/{upload_id}` from it.
+        upload_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mimetype: Option<String>,
+    },
     /// Run failed to start, or aborted mid-flight before reaching a normal
     /// `RunComplete`. UIs should land on a terminal "errored" view that
     /// surfaces `error` to the operator. Always followed by a `RunComplete`

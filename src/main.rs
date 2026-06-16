@@ -383,7 +383,12 @@ async fn main() {
             startup();
             std::process::exit(commands::pull::run_cmd(json_mode).await);
         }
-        Some(Commands::Deploy { ref path, prod, ref target, yes }) => {
+        Some(Commands::Deploy {
+            ref path,
+            prod,
+            ref target,
+            yes,
+        }) => {
             startup();
             std::process::exit(
                 commands::deploy::run_cmd(

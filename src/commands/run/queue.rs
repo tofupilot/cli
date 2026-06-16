@@ -60,6 +60,14 @@ pub struct QueuedAttachment {
     pub name: String,
     pub path: String,
     pub mimetype: String,
+    /// Phase this attachment belongs to. Carried so the per-attachment
+    /// `AttachmentUploaded` event can correlate back to the originating
+    /// `AttachmentAdded` by `(phase_key, name)` — name alone is not
+    /// unique within a run (two phases can attach the same file name).
+    /// Defaulted for back-compat with queue entries persisted before
+    /// this field existed.
+    #[serde(default)]
+    pub phase_key: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -384,7 +392,20 @@ pub async fn upload_queued_run(
             continue;
         }
         match upload_attachment(http, base, &creds.api_key, &run_id, att).await {
-            Ok(()) => {
+            Ok(upload_id) => {
+                // Tell remote operator-UIs the attachment is now fetchable.
+                // They only saw a station-disk `path` on `AttachmentAdded`;
+                // this carries the server upload id so they can resolve it
+                // to `/api/attachments/{upload_id}` and render the image.
+                if let Some(bus) = bus {
+                    let _ = bus.send(StationEvent::AttachmentUploaded {
+                        run_id: run_id.clone(),
+                        phase_key: att.phase_key.clone(),
+                        name: att.name.clone(),
+                        upload_id,
+                        mimetype: Some(att.mimetype.clone()),
+                    });
+                }
                 let _ = std::fs::remove_file(&att.path);
             }
             Err(e) => {
@@ -495,7 +516,7 @@ async fn upload_attachment(
     api_key: &str,
     run_id: &str,
     att: &QueuedAttachment,
-) -> crate::error::CliResult<()> {
+) -> crate::error::CliResult<String> {
     let res = http
         .post(format!("{base_url}/api/v2/runs/{run_id}/attachments"))
         .bearer(api_key)
@@ -507,13 +528,23 @@ async fn upload_attachment(
         .await
         .map_err(|e| format!("attachment init: {}", e.body()))?;
 
-    let url = res
+    let body = res
         .json::<serde_json::Value>()
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let url = body
         .get("upload_url")
         .and_then(|v| v.as_str())
         .ok_or("no upload_url")?
+        .to_string();
+    // The server mints the upload id and returns it as `id`. The
+    // operator-UI builds `/api/attachments/{id}` from this to fetch the
+    // attachment, so thread it back to the caller for the
+    // `AttachmentUploaded` event.
+    let upload_id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("no attachment id")?
         .to_string();
 
     let data = std::fs::read(&att.path).map_err(|e| format!("read: {e}"))?;
@@ -527,7 +558,7 @@ async fn upload_attachment(
     crate::commands::http::ok_or_describe(put)
         .await
         .map_err(|e| format!("attachment upload: {}", e.body()))?;
-    Ok(())
+    Ok(upload_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1326,7 @@ mod tests {
             name: "log.txt".into(),
             path: "/tmp/log.txt".into(),
             mimetype: "text/plain".into(),
+            phase_key: "k1".into(),
         };
         let json = serde_json::to_string(&att).unwrap();
         let back: QueuedAttachment = serde_json::from_str(&json).unwrap();

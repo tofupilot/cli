@@ -87,11 +87,18 @@ fn cached_version_matches(path: &Path) -> bool {
         .is_some_and(|v| v == UV_VERSION)
 }
 
+/// Find a `uv` on PATH whose version matches `UV_VERSION`. A
+/// system-installed uv is only honoured when it agrees with the pinned
+/// version: otherwise a stale homebrew/system uv would shadow the
+/// pinned cache binary forever, breaking the fleet-consensus invariant
+/// (stations must build identical venvs) and re-introducing the
+/// "uv too old to fetch this Python build" failure that the pin exists
+/// to prevent. A non-matching PATH uv is skipped, not used.
 fn find_on_path() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(UV_BINARY);
-        if candidate.is_file() {
+        if candidate.is_file() && cached_version_matches(&candidate) {
             return Some(candidate);
         }
     }
