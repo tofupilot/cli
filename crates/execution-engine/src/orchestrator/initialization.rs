@@ -2,7 +2,6 @@
 //!
 //! This module handles:
 //! - Orchestrator initialization
-//! - Report manager setup
 //! - Procedure submission and job graph creation
 //! - Job dependency resolution
 
@@ -12,7 +11,6 @@ use uuid::Uuid;
 use crate::constants::limits;
 use crate::events::PlugScope;
 use crate::job::Job;
-use crate::reports::ReportManager;
 
 use super::jobs;
 use super::{ExecutionStrategy, Orchestrator};
@@ -37,46 +35,6 @@ impl Orchestrator {
         // Check for any errors
         for result in results {
             result?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn initialize_report_managers(
-        &mut self,
-        procedure_path: &std::path::Path,
-        slots: &[String],
-        unit_infos: &std::collections::HashMap<String, crate::unit::UnitInfo>,
-    ) -> Result<(), String> {
-        // Store the execution ID
-
-        let mut report_managers = self.report_managers.write().await;
-        report_managers.clear();
-
-        // Create a separate report manager for each slot
-        // Note: Shared phases will be included in each slot's report rather than having a separate SHARED report
-        for slot_id in slots {
-            // Generate unique run ID for this slot
-            let slot_run_id = uuid::Uuid::new_v4().to_string();
-
-            let mut report_manager = ReportManager::new(procedure_path)?;
-
-            // Look up per-slot unit info; fall back to first entry if slot not found
-            let slot_unit_info = unit_infos.get(slot_id)
-                .or_else(|| unit_infos.values().next())
-                .cloned();
-
-            report_manager.start_report(
-                &slot_run_id,
-                &self.execution_id,
-                Some(slot_id),
-                &self.procedure_definition,
-                slot_unit_info,
-            )?;
-
-            // Store the run_id if this is the first slot
-
-            report_managers.insert(slot_id.clone(), report_manager);
         }
 
         Ok(())

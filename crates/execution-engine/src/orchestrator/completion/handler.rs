@@ -5,7 +5,7 @@ use crate::job::{JobResult, JobStatus, Outcome};
 use crate::procedure::schema::{PhaseNextAction, StageScope};
 
 use super::super::{JobCompletionEvent, Orchestrator};
-use super::{attachment_collector, error_handling, event_emitter, next_action, outcome_resolver};
+use super::{error_handling, event_emitter, next_action, outcome_resolver};
 
 impl Orchestrator {
     pub(in crate::orchestrator) async fn handle_job_completion(
@@ -87,26 +87,16 @@ impl Orchestrator {
             &error_message,
         );
 
-        {
-            let attachments = attachment_collector::collect_attachments(
-                &self.report_managers,
-                &event.job_id,
-                &event.original_job.slot_id,
-            )
-            .await;
-
-            event_emitter::emit_job_complete_event(
-                &self.event_sink,
-                event.job_id,
-                &event.original_job,
-                &job_result,
-                phase_outcome,
-                error_message.clone(),
-                event.worker_id,
-                attachments,
-                is_retry_limit_exceeded,
-            );
-        }
+        event_emitter::emit_job_complete_event(
+            &self.event_sink,
+            event.job_id,
+            &event.original_job,
+            &job_result,
+            phase_outcome,
+            error_message.clone(),
+            event.worker_id,
+            is_retry_limit_exceeded,
+        );
 
         self.handle_plug_teardown(&event).await;
 

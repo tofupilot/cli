@@ -389,9 +389,24 @@ pub async fn upload_queued_run(
     let mut last_failure: Option<ClassifiedFailure> = None;
     for att in &queued.attachments {
         if !std::path::Path::new(&att.path).exists() {
+            // File vanished between queueing and upload (manual cleanup, temp
+            // wipe). The bytes are unrecoverable, so the run must NOT report
+            // success — that would silently lose the attachment. But a missing
+            // file never comes back, so retrying is pointless: record a PARKED
+            // failure (no auto-retry; only a manual `queue retry` un-parks).
+            if !silent {
+                eprintln!("  Attachment skipped (file missing): {}", att.name);
+            }
+            all_ok = false;
+            last_failure = Some(ClassifiedFailure {
+                kind: "attachment_missing",
+                status: None,
+                error: truncate_error(format!("attachment file missing: {}", att.name)),
+                park: true,
+            });
             continue;
         }
-        match upload_attachment(http, base, &creds.api_key, &run_id, att).await {
+        match upload_attachment(http, base, &creds.api_key, &run_id, att, silent).await {
             Ok(upload_id) => {
                 // Tell remote operator-UIs the attachment is now fetchable.
                 // They only saw a station-disk `path` on `AttachmentAdded`;
@@ -503,10 +518,17 @@ fn record_failure(
 }
 
 fn cleanup_attachments(attachments: &[QueuedAttachment]) {
-    if let Some(att) = attachments.first() {
-        if let Some(dir) = std::path::Path::new(&att.path).parent() {
-            let _ = std::fs::remove_dir(dir);
-        }
+    // Remove every attachment file (some may survive if their upload failed
+    // a per-file delete), then drop the now-empty per-run dir. A plain
+    // `remove_dir` on the first file's parent leaks the rest; sweep them all.
+    for att in attachments {
+        let _ = std::fs::remove_file(&att.path);
+    }
+    if let Some(dir) = attachments
+        .first()
+        .and_then(|att| std::path::Path::new(&att.path).parent())
+    {
+        let _ = std::fs::remove_dir(dir);
     }
 }
 
@@ -516,6 +538,7 @@ async fn upload_attachment(
     api_key: &str,
     run_id: &str,
     att: &QueuedAttachment,
+    silent: bool,
 ) -> crate::error::CliResult<String> {
     let res = http
         .post(format!("{base_url}/api/v2/runs/{run_id}/attachments"))
@@ -548,9 +571,20 @@ async fn upload_attachment(
         .to_string();
 
     let data = std::fs::read(&att.path).map_err(|e| format!("read: {e}"))?;
+    // Send a real Content-Type so the server's HeadObject (run at finalize)
+    // records a usable type. An empty string here leaves the stored object
+    // with no content-type and the dashboard renders "Unknown" / no preview.
+    // The engine now always guesses a type, but entries queued in redb
+    // before that change (or any future empty-mimetype source) still hit
+    // this fallback — keep it.
+    let content_type = if att.mimetype.is_empty() {
+        "application/octet-stream"
+    } else {
+        att.mimetype.as_str()
+    };
     let put = http
         .put(&url)
-        .header("Content-Type", &att.mimetype)
+        .header("Content-Type", content_type)
         .body(data)
         .send()
         .await
@@ -558,6 +592,37 @@ async fn upload_attachment(
     crate::commands::http::ok_or_describe(put)
         .await
         .map_err(|e| format!("attachment upload: {}", e.body()))?;
+
+    // Finalize: the server runs HeadObject on the stored object and writes
+    // back size + content_type. Without this the run-attachment row exists
+    // but shows size/type Unknown with no preview. The run-create endpoint
+    // already linked the row and the PUT already delivered the bytes, so
+    // finalize is *best-effort metadata*: a failure here must NOT bubble up
+    // as an attachment error. If it did, the caller would re-queue and the
+    // next retry would POST create-attachment again — minting a SECOND
+    // upload id and a duplicate run-attachment row. Treat a finalize miss
+    // as a soft warning (size/type stay null, bytes are still there).
+    let finalized = http
+        .post(format!("{base_url}/api/v2/attachments/{upload_id}/finalize"))
+        .bearer(api_key)
+        .send()
+        .await;
+    // Warn on either a network error or an HTTP error, but stay gated by
+    // `silent` — an ungated eprintln would corrupt the NDJSON stream in
+    // `--json` mode. Metadata is the only thing lost; bytes are already up.
+    let finalize_err = match finalized {
+        Ok(resp) => crate::commands::http::ok_or_describe(resp)
+            .await
+            .err()
+            .map(|e| e.body().to_string()),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(e) = finalize_err {
+        if !silent {
+            eprintln!("  Attachment metadata not finalized ({upload_id}): {e}");
+        }
+    }
+
     Ok(upload_id)
 }
 

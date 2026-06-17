@@ -1443,10 +1443,23 @@ pub async fn run_yaml_procedure(
         })
     });
 
+    // Scratch dir the engine writes attachment bytes into so every
+    // `AttachmentAdded` carries an on-disk path the CLI can upload then
+    // delete — the same `~/.tofupilot/attachments/<id>/` convention the
+    // openhtf/robot connectors use, so the kiosk `/attachments/*` route
+    // and the upload queue's per-run cleanup work uniformly. Keyed by
+    // execution_id (the queue_id isn't minted until post-run upload).
+    // None on failure to resolve home: the run still executes, only the
+    // attachments are skipped (mirrors the prior report-dir-absent path).
+    let attachment_dir = super::super::db::home_dir()
+        .ok()
+        .map(|home| home.join(".tofupilot").join("attachments").join(execution_id));
+
     let mut orchestrator = Orchestrator::new_with_python(
         worker_count,
         procedure_dir.to_path_buf(),
         Some(python_path.to_path_buf()),
+        attachment_dir.clone(),
         orchestrator_execution_id,
         run_id,
         procedure_def,
@@ -1724,6 +1737,11 @@ pub async fn run_yaml_procedure(
             // CLI station-mode loop spawns a fresh orchestrator per
             // run, and the previous one's workers leaked otherwise.
             let _ = orchestrator.shutdown().await;
+            // No upload queue runs on this path, so sweep any attachments
+            // already written this run instead of leaking the scratch dir.
+            if let Some(dir) = &attachment_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             return (1, None);
         }
     };
@@ -1757,6 +1775,13 @@ pub async fn run_yaml_procedure(
         }
         Err(e) => {
             crate::log::error(&format!("Failed to build run request: {e}"));
+            // No QueuedRun means the upload queue never runs, so its
+            // per-run attachment cleanup never fires. Drop the scratch dir
+            // here or every failed-to-build run leaks its attachment files
+            // under ~/.tofupilot/attachments/ forever.
+            if let Some(dir) = &attachment_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             (exit_code, None)
         }
     }

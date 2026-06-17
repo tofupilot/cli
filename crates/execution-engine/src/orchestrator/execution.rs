@@ -71,9 +71,9 @@ impl Orchestrator {
                 }
             }
 
-            // Merge completed phases' unit info on top of initial_unit_info
-            // Same logic as reports/mod.rs finalize_report: only update fields that
-            // differ from the initial value (so phases can't accidentally reset fields)
+            // Merge completed phases' unit info on top of initial_unit_info:
+            // only update fields that differ from the initial value (so phases
+            // can't accidentally reset fields).
             let initial = if let Some(slot_id) = &job.slot_id {
                 self.initial_unit_infos.get(slot_id.as_str())
                     .or_else(|| self.initial_unit_infos.values().next())
@@ -301,7 +301,7 @@ impl Orchestrator {
         let job_id = job.id;
         let completion_tx = self.completion_tx.clone();
         let original_job = job.clone();
-        let report_managers = self.report_managers.clone();
+        let attachment_dir = self.attachment_dir.clone();
         let procedure_dir = self.procedure_dir.clone();
         let python_path = self.python_path.clone();
         let workers = self.workers.clone();
@@ -366,24 +366,6 @@ impl Orchestrator {
                 }))
             } else {
                 None
-            };
-
-            // Get the report managers for recording phase results
-            // For shared phases: record in ALL slot report managers
-            // For slot phases: record in the specific slot's report manager
-            let report_managers_for_job = {
-                let managers = report_managers.read().await;
-                if let Some(slot_id) = &original_job.slot_id {
-                    // Slot-specific phase: use only this slot's manager
-                    if managers.contains_key(slot_id) {
-                        Some(report_managers.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    // Shared phase: record in all slot managers (pass all managers)
-                    Some(report_managers.clone())
-                }
             };
 
             // NOTE: Each-slot plugs will be created before first each-slot setup phase runs
@@ -466,7 +448,7 @@ impl Orchestrator {
                         original_job.clone(),
                         plug_ports,
                         event_sink.clone(),
-                        report_managers_for_job,
+                        attachment_dir.clone(),
                     ),
                 )
                 .await
@@ -562,7 +544,7 @@ impl Orchestrator {
                         original_job.clone(),
                         plug_ports,
                         event_sink.clone(),
-                        report_managers_for_job,
+                        attachment_dir.clone(),
                     )
                     .await
             };

@@ -11,7 +11,6 @@ use tokio::sync::RwLock;
 use crate::event_sink::{EventSink, ExecutionEvent};
 use crate::job::{Job, JobResult};
 use crate::protocol;
-use crate::reports::ReportManager;
 use crate::plugs::process::ChildProcess;
 use crate::transport;
 
@@ -19,12 +18,48 @@ use crate::transport;
 /// operator-UI gates image rendering on an `image/*` mimetype, so an
 /// attachment with no mimetype never renders even when its bytes are an
 /// image. `attach.data`/`attach_file` don't carry a content type, so we
-/// derive one from the extension. `None` for unknown extensions — the UI
-/// then shows the attachment as a plain (non-image) row.
+/// derive one from the extension. Falls back to `application/octet-stream`
+/// for unknown extensions so the upload PUT always carries a real
+/// Content-Type (the server reads it back via HeadObject on finalize).
 fn guess_attachment_mimetype(name: &str) -> Option<String> {
-    mime_guess::from_path(name)
-        .first()
-        .map(|m| m.essence_str().to_string())
+    Some(
+        mime_guess::from_path(name)
+            .first()
+            .map(|m| m.essence_str().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
+    )
+}
+
+/// Write attachment bytes into the caller-supplied dir with a collision-safe
+/// `<uuid8>_<name>` filename and return the stored path. Mirrors the naming
+/// the removed ReportManager used so the kiosk `/attachments/*` route and the
+/// CLI upload queue resolve the same basename.
+fn store_attachment_bytes(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stored_name = format!("{}_{}", &uuid::Uuid::new_v4().to_string()[..8], name);
+    let dest = dir.join(stored_name);
+    std::fs::write(&dest, bytes)?;
+    Ok(dest)
+}
+
+/// Copy an existing file into the attachment dir with the same collision-safe
+/// `<uuid8>_<name>` naming. Uses `fs::copy` (kernel-level, reflink-capable on
+/// CoW filesystems) rather than read-into-RAM-then-write, so a large file
+/// (scope capture, video) never gets buffered whole in memory.
+fn copy_attachment_file(
+    dir: &Path,
+    name: &str,
+    source: &str,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stored_name = format!("{}_{}", &uuid::Uuid::new_v4().to_string()[..8], name);
+    let dest = dir.join(stored_name);
+    std::fs::copy(source, &dest)?;
+    Ok(dest)
 }
 
 /// Convert protocol Measurement to internal Measurement.
@@ -134,49 +169,12 @@ impl Worker {
         Ok(())
     }
 
-    /// Helper to execute operation on report manager(s) based on job slot
-    /// If job has slot_id, operates on single manager. Otherwise operates on all.
-    async fn with_report_managers<F>(
-        managers_arc: &Arc<RwLock<HashMap<String, ReportManager>>>,
-        job_slot_id: Option<&String>,
-        job_id: &str,
-        mut operation: F,
-    ) where
-        F: FnMut(&str, &mut ReportManager) -> Result<(), String>,
-    {
-        let mut managers = managers_arc.write().await;
-
-        if let Some(slot_id) = job_slot_id {
-            if let Some(manager) = managers.get_mut(slot_id) {
-                if let Err(e) = operation(slot_id, manager) {
-                    log::warn!(
-                        "Operation failed for job {} slot {}: {}",
-                        job_id,
-                        slot_id,
-                        e
-                    );
-                }
-            }
-        } else {
-            for (slot_id, manager) in managers.iter_mut() {
-                if let Err(e) = operation(slot_id, manager) {
-                    log::warn!(
-                        "Operation failed for job {} slot {}: {}",
-                        job_id,
-                        slot_id,
-                        e
-                    );
-                }
-            }
-        }
-    }
-
     pub async fn execute_python_phase(
         &self,
         job: Job,
         plug_ports: HashMap<String, u16>,
         event_sink: Arc<dyn EventSink>,
-        report_managers: Option<Arc<RwLock<HashMap<String, ReportManager>>>>,
+        attachment_dir: Option<PathBuf>,
     ) -> Result<JobResult, String> {
         let start_time = chrono::Utc::now();
 
@@ -455,69 +453,57 @@ impl Worker {
                     let source_path = attach_event.source_path.clone();
                     let attachment_name = attach_event.attachment_name.clone();
 
+                    // Copy the source into the caller-owned attachment dir so
+                    // the emitted path points at a file the CLI controls and
+                    // deletes after upload. Without a dir (legacy callers),
+                    // emit the original source path unchanged.
+                    let emitted_path = match attachment_dir {
+                        Some(ref dir) => match copy_attachment_file(dir, &attachment_name, &source_path) {
+                            Ok(dest) => Some(dest.to_string_lossy().into_owned()),
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to copy attachment file {}: {}",
+                                    attachment_name, e
+                                );
+                                Some(source_path.clone())
+                            }
+                        },
+                        None => Some(source_path.clone()),
+                    };
+
                     event_sink.emit(&ExecutionEvent::AttachmentAdded {
                         phase_key: job.phase_key.clone(),
                         slot_id: job.slot_id.clone(),
                         name: attachment_name.clone(),
-                        path: Some(source_path.clone()),
+                        path: emitted_path,
                         // Guess from the filename so the operator-UI can tell
                         // images apart (it gates `<img>` rendering on an
-                        // `image/*` mimetype). None for unknown extensions.
+                        // `image/*` mimetype).
                         mimetype: guess_attachment_mimetype(&attachment_name),
                     });
-
-                    if let Some(ref managers_arc) = report_managers {
-                        let job_id = job.id.to_string();
-                        Self::with_report_managers(
-                            managers_arc,
-                            job.slot_id.as_ref(),
-                            &job_id,
-                            |_slot_id, manager| {
-                                manager
-                                    .attach_file(&job.id, Path::new(&source_path), &attachment_name)
-                                    .map_err(|e| {
-                                        format!("Failed to attach file {}: {}", attachment_name, e)
-                                    })
-                            },
-                        )
-                        .await;
-                    }
                 }
                 protocol::WorkerEvent::AttachData(attach_event) => {
-                    // Write the bytes to the report dir FIRST so the live
+                    // Write the bytes to the attachment dir FIRST so the live
                     // event can carry the stored on-disk path — the kiosk
                     // serves attachment images from it (`/attachments/*`)
                     // until the upload queue deletes the file. Emitting
                     // before the write would force `path: None` and leave
                     // the kiosk unable to render `attach.data` images.
                     let mut stored_path: Option<String> = None;
-                    if let Some(ref managers_arc) = report_managers {
+                    if let Some(ref dir) = attachment_dir {
                         match base64::engine::general_purpose::STANDARD.decode(&attach_event.data) {
                             Ok(bytes) => {
-                                let attachment_name = attach_event.attachment_name.clone();
-                                let job_id = job.id.to_string();
-                                let path_slot = &mut stored_path;
-
-                                Self::with_report_managers(
-                                    managers_arc,
-                                    job.slot_id.as_ref(),
-                                    &job_id,
-                                    |_slot_id, manager| {
-                                        manager
-                                            .attach_data(&job.id, &bytes, &attachment_name)
-                                            .map(|dest| {
-                                                *path_slot = dest
-                                                    .map(|p| p.to_string_lossy().into_owned());
-                                            })
-                                            .map_err(|e| {
-                                                format!(
-                                                    "Failed to attach data {}: {}",
-                                                    attachment_name, e
-                                                )
-                                            })
-                                    },
-                                )
-                                .await;
+                                match store_attachment_bytes(dir, &attach_event.attachment_name, &bytes) {
+                                    Ok(dest) => {
+                                        stored_path = Some(dest.to_string_lossy().into_owned());
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Failed to store attachment data {}: {}",
+                                            attach_event.attachment_name, e
+                                        );
+                                    }
+                                }
                             }
                             Err(e) => {
                                 log::warn!(
@@ -529,7 +515,7 @@ impl Worker {
                         }
                     }
                     // Emit after the write so `path` points at the stored
-                    // file (None if no report dir was active or the decode
+                    // file (None if no attachment dir was active or the decode
                     // failed — the remote UI still resolves via upload id).
                     event_sink.emit(&ExecutionEvent::AttachmentAdded {
                         phase_key: job.phase_key.clone(),
@@ -658,7 +644,7 @@ impl Worker {
         job: Job,
         plug_ports: HashMap<String, u16>,
         event_sink: Arc<dyn EventSink>,
-        report_managers: Option<Arc<RwLock<HashMap<String, ReportManager>>>>,
+        attachment_dir: Option<PathBuf>,
     ) -> Result<JobResult, String> {
         log::debug!(
             "Worker {} executing {} phase: {}",
@@ -674,7 +660,7 @@ impl Worker {
         match job.runtime_type {
             crate::job::RuntimeType::Native => self.execute_native_phase(job, event_sink).await,
             crate::job::RuntimeType::Python => {
-                self.execute_python_phase(job, plug_ports, event_sink, report_managers)
+                self.execute_python_phase(job, plug_ports, event_sink, attachment_dir)
                     .await
             }
             crate::job::RuntimeType::Shell => self.execute_shell_phase(job).await,
@@ -1189,8 +1175,11 @@ mod attachment_mimetype_tests {
     #[test]
     fn non_images_and_unknowns_are_not_image_typed() {
         assert_eq!(guess_attachment_mimetype("log.csv").as_deref(), Some("text/csv"));
-        // Unknown extension → None → UI shows a plain row, not a broken img.
+        // Unknown extension / no extension → octet-stream, never None: the
+        // upload PUT must carry a real Content-Type so the server's HeadObject
+        // records a usable type. Non-image essence still keeps the UI from
+        // rendering a broken <img>.
         assert_eq!(guess_attachment_mimetype("data.bin").as_deref(), Some("application/octet-stream"));
-        assert_eq!(guess_attachment_mimetype("noext"), None);
+        assert_eq!(guess_attachment_mimetype("noext").as_deref(), Some("application/octet-stream"));
     }
 }

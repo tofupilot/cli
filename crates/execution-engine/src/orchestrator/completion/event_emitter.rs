@@ -59,7 +59,6 @@ pub fn emit_job_complete_event(
     phase_outcome: Outcome,
     error_message: Option<String>,
     worker_id: usize,
-    attachments: Vec<String>,
     is_retry_limit_exceeded: bool,
 ) {
     let duration_ms = (job_result.completed_at - job_result.started_at)
@@ -81,7 +80,6 @@ pub fn emit_job_complete_event(
         action: format!("{:?}", job_result.phase_result),
         next_action: job_result.next_action.as_ref().map(|a| format!("{:?}", a)),
         measurements: job_result.measurements.clone(),
-        attachments,
         logs: job_result.logs.clone(),
         resource_metrics: job_result.resource_metrics.clone(),
         retry_count: job.retry_count,

@@ -49,7 +49,6 @@ pub enum ExecutionEvent {
         action: String,
         next_action: Option<String>,
         measurements: Vec<Measurement>,
-        attachments: Vec<String>,
         logs: Vec<LogEntry>,
         resource_metrics: Option<crate::job::ResourceMetrics>,
         retry_count: usize,

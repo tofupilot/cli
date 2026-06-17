@@ -34,7 +34,6 @@ pub mod plugs;
 pub mod procedure;
 pub mod protocol;
 pub mod python;
-pub mod reports;
 pub mod state;
 pub mod transport;
 pub mod ui;

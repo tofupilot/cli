@@ -15,7 +15,6 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::job::{JobResult, JobStatus, Outcome};
-use crate::reports::ReportManager;
 use crate::state::OrchestratorState;
 use crate::worker::Worker;
 use crate::plugs::manager::ResourceManager;
@@ -77,7 +76,6 @@ pub struct JobCompleteEvent {
     pub action: String,
     pub next_action: Option<String>,
     pub measurements: Vec<crate::measurements::Measurement>,
-    pub attachments: Vec<String>,
     pub logs: Vec<crate::log::LogEntry>,
     pub resource_metrics: Option<crate::job::ResourceMetrics>,
     pub retry_count: usize,
@@ -105,9 +103,14 @@ pub struct Orchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
     pub workers: Arc<RwLock<Vec<Worker>>>,
     pub resource_manager: Arc<RwLock<ResourceManager>>,
-    pub(super) report_managers: Arc<RwLock<HashMap<String, ReportManager>>>,
     pub(super) job_semaphore: Arc<Semaphore>,
     pub(super) procedure_dir: std::path::PathBuf,
+    /// Directory the worker writes attachment bytes into (one file per
+    /// `attach.file`/`attach.data`). The CLI supplies a per-run scratch
+    /// dir it owns and deletes after upload; `None` leaves `attach.file`
+    /// pointing at the source path and drops `attach.data` (no on-disk
+    /// destination). Replaces the removed Studio-style ReportManager.
+    pub(super) attachment_dir: Option<std::path::PathBuf>,
     /// Pre-resolved Python interpreter for workers + plug services. When
     /// set, downstream consumers skip the engine's `resolve_python`
     /// walk-up. CLI runs always set this; legacy callers leave it `None`.
@@ -138,6 +141,7 @@ impl Orchestrator {
             worker_count,
             procedure_dir,
             None,
+            None,
             execution_id,
             run_id,
             procedure_definition,
@@ -153,6 +157,7 @@ impl Orchestrator {
         worker_count: usize,
         procedure_dir: std::path::PathBuf,
         python_path: Option<std::path::PathBuf>,
+        attachment_dir: Option<std::path::PathBuf>,
         execution_id: String,
         run_id: String,
         procedure_definition: ProcedureDefinition,
@@ -184,11 +189,11 @@ impl Orchestrator {
                 procedure_dir.clone(),
                 python_path.clone(),
             ))),
-            report_managers: Arc::new(RwLock::new(HashMap::new())),
             job_semaphore: Arc::new(Semaphore::new(
                 crate::constants::limits::MAX_CONCURRENT_JOBS,
             )),
             procedure_dir,
+            attachment_dir,
             python_path,
             completion_tx: tx,
             completion_rx: Some(rx),

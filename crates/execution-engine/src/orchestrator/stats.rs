@@ -93,25 +93,17 @@ impl Orchestrator {
             None
         };
 
-        let run_dir = {
-            let report_managers_lock = self.report_managers.read().await;
-            report_managers_lock
-                .values()
-                .next()
-                .and_then(|manager| manager.get_current_report_dir_name())
-        };
+        // No local report archive anymore (ReportManager removed); the CLI
+        // owns run-dir + run-id at upload time.
+        let run_dir = None;
 
-        let (slot_outcomes, slot_run_ids) = if state.is_complete() {
+        // Per-slot outcomes still come straight from job results; the slot
+        // set is the orchestrator's own `slot_jobs` keys (previously the
+        // report-manager keys). `slot_run_ids` were report-archive-internal
+        // UUIDs the CLI never used — dropped.
+        let slot_outcomes = if state.is_complete() {
             let mut outcomes = HashMap::new();
-            let mut run_ids = HashMap::new();
-
-            let report_managers_lock = self.report_managers.read().await;
-
-            for (slot_id, manager) in report_managers_lock.iter() {
-                if let Some(run_id) = manager.get_current_run_id() {
-                    run_ids.insert(slot_id.clone(), run_id);
-                }
-
+            for slot_id in state.slot_jobs.keys() {
                 let slot_final_attempts = Self::get_final_attempts_for_slot(
                     &state.job_results,
                     &state.job_info,
@@ -123,11 +115,11 @@ impl Orchestrator {
                     self.determine_aggregate_outcome(&slot_final_attempts, state.shutdown_requested, &state.init_error);
                 outcomes.insert(slot_id.clone(), slot_outcome);
             }
-
-            (outcomes, run_ids)
+            outcomes
         } else {
-            (HashMap::new(), HashMap::new())
+            HashMap::new()
         };
+        let slot_run_ids = HashMap::new();
 
         ExecutionStats {
             total_jobs: state.total_jobs_submitted,

@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use crate::event_sink::ExecutionEvent;
 use crate::constants::scheduling;
-use crate::job::{Job, JobResult, JobStatus, Outcome};
+use crate::job::{Job, JobStatus, Outcome};
 use crate::procedure::schema::StageScope;
 
 use super::ExecutionStats;
@@ -230,62 +228,6 @@ impl Orchestrator {
         self.emit_stats().await;
 
         let stats = self.get_stats().await;
-
-        {
-            let mut report_managers = self.report_managers.write().await;
-            let state = self.state.read().await;
-
-            let mut shared_jobs = Vec::new();
-            let mut slot_jobs: HashMap<&str, Vec<(uuid::Uuid, JobResult)>> = HashMap::new();
-
-            for (job_id, result) in &state.job_results {
-                if let Some(info) = state.job_info.get(job_id) {
-                    if let Some(slot_id) = &info.slot_id {
-                        slot_jobs.entry(slot_id.as_str())
-                            .or_default()
-                            .push((*job_id, result.clone()));
-                    } else {
-                        shared_jobs.push((*job_id, result.clone()));
-                    }
-                }
-            }
-
-            for (slot_id, report_manager) in report_managers.iter_mut() {
-                let slot_job_results: HashMap<uuid::Uuid, JobResult> = shared_jobs.iter()
-                    .chain(slot_jobs.get(slot_id.as_str()).map(|v| v.as_slice()).unwrap_or(&[]))
-                    .map(|(id, result)| (*id, result.clone()))
-                    .collect();
-
-                let slot_stats = ExecutionStats {
-                    total_jobs: slot_job_results.len(),
-                    completed_jobs: slot_job_results
-                        .iter()
-                        .filter(|(_, r)| r.error.is_none() && r.timeout_secs.is_none())
-                        .count(),
-                    failed_jobs: slot_job_results
-                        .iter()
-                        .filter(|(_, r)| r.error.is_some() || r.timeout_secs.is_some())
-                        .count(),
-                    running_jobs: 0,
-                    queued_jobs: 0,
-                    workers_busy: 0,
-                    workers_total: stats.workers_total,
-                    run_outcome: stats.slot_outcomes.get(slot_id).copied().or(stats.run_outcome),
-                    run_dir: None,
-                    run_id: None,
-                    slot_outcomes: HashMap::new(),
-                    slot_run_ids: HashMap::new(),
-                    start_time: stats.start_time,
-                    end_time: stats.end_time,
-                };
-
-                if let Err(e) =
-                    report_manager.finalize_report(&slot_stats, &slot_job_results, &state.job_info)
-                {
-                    log::error!("Failed to generate test report for slot {}: {}", slot_id, e);
-                }
-            }
-        }
 
         self.event_sink.emit(&ExecutionEvent::Complete {
             total_jobs: stats.total_jobs,
