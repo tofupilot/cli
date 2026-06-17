@@ -654,7 +654,13 @@ pub async fn start(
     // station-mode daemon (launchd / systemd) runs without a tty but
     // still needs the local-ws server up so the kiosk browser can
     // attach. Don't gate it on `is_terminal()`.
-    let kiosk_enabled = resolve_ui_pref("kiosk_ui", kiosk_override, false);
+    // Never bind the local-WS kiosk channel as root: it forwards station
+    // commands unauthenticated on loopback (local root escalation), and a
+    // root daemon has no graphical session to render a kiosk anyway.
+    // `Server::start` also refuses as the single choke point; gating here
+    // avoids the wasted setup and gives a clear message.
+    let kiosk_enabled = !crate::commands::config::is_root_system()
+        && resolve_ui_pref("kiosk_ui", kiosk_override, false);
 
     // Both modes own stdout: TUI draws ratatui frames, agent-protocol
     // writes NDJSON. Enabling both would interleave garbage. Derivation

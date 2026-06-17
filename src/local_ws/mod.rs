@@ -444,6 +444,22 @@ impl Server {
         station_name: String,
         identity: HelloIdentity,
     ) -> std::io::Result<Self> {
+        // Single choke point: the local-WS channel forwards station
+        // commands (Run, Exit, Reboot, ...) with no authentication, so it
+        // must never bind under a root daemon — any local user could reach
+        // 127.0.0.1 and drive root. A root system service has no graphical
+        // session anyway, so the kiosk it backs can't render. Refuse here
+        // so every caller (station daemon, standalone `run --kiosk`) is
+        // covered by one guard rather than each remembering to gate.
+        if crate::commands::config::is_root_system() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "local operator UI is disabled when running as root \
+                 (unauthenticated loopback command channel); control the \
+                 station from the dashboard instead",
+            ));
+        }
+
         let hydration = Arc::new(Mutex::new(HydrationSnapshot {
             run_started: None,
             events: VecDeque::new(),

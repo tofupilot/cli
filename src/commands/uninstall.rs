@@ -224,8 +224,15 @@ fn launch_on_boot_artifact_exists() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        let dir = base.home_dir().join(".config/systemd/user");
-        dir.join("tofupilot.service").exists() || dir.join("tofupilot-stream.service").exists()
+        // Check every candidate unit (both scopes, current + legacy names)
+        // from the single source of truth in config.rs. A root install
+        // lives in /etc/systemd/system and would otherwise be reported
+        // "not found" and survive uninstall as a boot-time orphan.
+        // apply_launch_on_boot(false) tears down whichever scope exists.
+        let _ = base;
+        config::unit_candidates()
+            .map(|cands| cands.iter().any(|(_, path)| path.exists()))
+            .unwrap_or(false)
     }
     #[cfg(target_os = "windows")]
     {

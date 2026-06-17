@@ -115,6 +115,7 @@ pub(crate) fn collect_hardware_event(installation_id: &str) -> StationEvent {
         platform: hw.platform,
         mac_address: hw.mac_address,
         cli_version: hw.cli_version,
+        run_mode: Some(crate::commands::config::run_mode().to_string()),
     }
 }
 
@@ -373,10 +374,23 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
         }
     }
 
-    let kiosk_enabled = crate::commands::db::open()
-        .ok()
-        .and_then(|db| db.get_config("kiosk_ui").ok().flatten())
-        .is_some_and(|v| v == "on");
+    // Kiosk requires a graphical session to open a browser window. A
+    // root system service has none, so the local-WS server (which also
+    // exposes the unauthenticated Run/SetConfig/Exit command channel on
+    // loopback) must NEVER bind under root, regardless of the kiosk_ui
+    // config value. Gating the bind on run_mode here — not on the DB
+    // value — means kiosk-off under root is a derived property, never a
+    // written config key, so there is no station/dashboard config split.
+    // `local_ws::Server::start` enforces the same refusal as the
+    // authoritative single backstop; this gate is defense-in-depth, so
+    // do not remove either assuming the other covers it. The dashboard
+    // separately disables the kiosk toggle for root_system stations,
+    // derived from the reported run_mode.
+    let kiosk_enabled = !crate::commands::config::is_root_system()
+        && crate::commands::db::open()
+            .ok()
+            .and_then(|db| db.get_config("kiosk_ui").ok().flatten())
+            .is_some_and(|v| v == "on");
 
     // Patch labwc's mouseEmulation default so touch-drag scrolls
     // instead of selecting text on Pi OS Bookworm. No-op on macOS

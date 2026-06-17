@@ -499,10 +499,11 @@ async fn finalize_station_login(creds: &Credentials, installation_id: &str) {
     // service. (This used to be the separate `tofupilot install` step.)
     // Best-effort: a failure here still leaves a working foreground
     // daemon below; it just won't auto-start after a reboot.
-    if let Err(e) = super::config::apply_launch_on_boot(true) {
-        crate::log::warn(&format!(
+    match super::config::apply_launch_on_boot(true) {
+        Ok(()) => super::config::print_launch_on_boot_status(creds),
+        Err(e) => crate::log::warn(&format!(
             "couldn't enable the station service on boot ({e}); the station runs now but won't restart after a reboot"
-        ));
+        )),
     }
     let code = crate::commands::station::run_cmd(creds, false).await;
     std::process::exit(code);

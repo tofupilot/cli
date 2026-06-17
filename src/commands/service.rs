@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-const UNIT: &str = "tofupilot.service";
+use crate::commands::config::UNIT;
 
 #[cfg(target_os = "macos")]
 const LABEL: &str = "com.tofupilot.station";
@@ -72,6 +72,19 @@ fn systemctl_bin() -> String {
         }
     }
     "systemctl".to_string()
+}
+
+#[cfg(target_os = "linux")]
+use crate::commands::config::systemctl_scope;
+
+/// `journalctl` invocation hint matching the current scope.
+#[cfg(target_os = "linux")]
+fn journalctl_hint() -> &'static str {
+    if crate::commands::config::is_root_system() {
+        "Logs: journalctl -u tofupilot -f"
+    } else {
+        "Logs: journalctl --user -u tofupilot -f"
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -257,7 +270,8 @@ pub fn stop_cmd(json_mode: bool) -> i32 {
     {
         shell_status(
             Command::new(systemctl_bin())
-                .args(["--user", "stop", UNIT])
+                .args(systemctl_scope())
+                .args(["stop", UNIT])
                 .status(),
             "stop",
             json_mode,
@@ -377,10 +391,11 @@ pub fn status_cmd(json_mode: bool) -> i32 {
 
     #[cfg(target_os = "linux")]
     {
-        log::info("Logs: journalctl --user -u tofupilot -f");
+        log::info(journalctl_hint());
         log::info("Supervisor:");
         let code = Command::new(systemctl_bin())
-            .args(["--user", "status", UNIT, "--no-pager"])
+            .args(systemctl_scope())
+            .args(["status", UNIT, "--no-pager"])
             .status()
             .map(|s| s.code().unwrap_or(1))
             .unwrap_or(1);

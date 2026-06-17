@@ -5,6 +5,80 @@ use crate::commands::auth::credentials::Credentials;
 use crate::commands::db;
 use station_protocol::StationEvent;
 
+/// True when the CLI runs as root (effective uid 0). On Linux this means
+/// launch-on-boot installs a *system* service (`/etc/systemd/system`,
+/// `systemctl` with no `--user`) rather than a user service, because root
+/// via sudo/su/non-login-SSH has no session bus for `systemctl --user`.
+/// It also derives the station's `run_mode` reported to the dashboard.
+/// Always false on non-unix.
+pub(crate) fn is_root_system() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() is always safe — no args, no shared state.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The station `run_mode` string reported on the Hardware event.
+/// `"root_system"` when running as root, else `"user"`.
+pub(crate) fn run_mode() -> &'static str {
+    if is_root_system() {
+        "root_system"
+    } else {
+        "user"
+    }
+}
+
+/// systemctl scope prefix matching how launch-on-boot installs the unit:
+/// system scope (empty) as root, `--user` otherwise. Single source of
+/// truth for the scope decision, shared by config.rs and service.rs so the
+/// "stop/status/enable" commands always target the installed unit.
+#[cfg(target_os = "linux")]
+pub(crate) fn systemctl_scope() -> &'static [&'static str] {
+    if is_root_system() {
+        &[]
+    } else {
+        &["--user"]
+    }
+}
+
+/// Print an actionable status block after launch-on-boot is enabled, in
+/// the interactive foreground login. Explains what was installed and —
+/// for a headless root system service — that the on-screen kiosk is off
+/// and the station is driven from the dashboard. Skipped on non-Linux
+/// (other platforms have their own supervisors and no root/system split).
+#[cfg(target_os = "linux")]
+pub(crate) fn print_launch_on_boot_status(creds: &Credentials) {
+    if is_root_system() {
+        crate::log::success("Launch on boot enabled. System service, starts at every boot.");
+        crate::log::info(&format!("Unit: {SYSTEM_UNIT_DIR}/tofupilot.service"));
+        crate::log::info("Logs: journalctl -u tofupilot -f");
+        crate::log::info(
+            "On-screen kiosk is off (a root system service has no display). \
+             Control this station from the dashboard:",
+        );
+        crate::log::info(&format!(
+            "  {}/{}/stations",
+            creds.base(),
+            creds.organization_slug
+        ));
+        crate::log::info(
+            "Tip: link a procedure to this station and deploy it so it appears in the picker.",
+        );
+    } else {
+        crate::log::success("Launch on boot enabled. Starts at next login.");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn print_launch_on_boot_status(_creds: &Credentials) {
+    crate::log::success("Launch on boot enabled.");
+}
+
 // Shared brand assets, reused from the Studio Tauri bundle. Embedded so the
 // single-file CLI can place them on disk as needed without an installer step.
 #[cfg(target_os = "linux")]
@@ -198,10 +272,15 @@ mod launchctl {
     }
 }
 
-/// Run a user-level systemctl command, returning a clear error on failure.
+/// Run a systemctl command at the scope implied by the current uid:
+/// system scope (no `--user`) when running as root, user scope otherwise.
+/// Returns a clear error on failure.
+///
+/// Root has no session bus, so `systemctl --user` fails with
+/// "Failed to connect to bus" — the system scope is mandatory there.
 #[cfg(target_os = "linux")]
 fn systemctl(args: &[&str]) -> crate::error::CliResult<()> {
-    let mut cmd_args = vec!["--user"];
+    let mut cmd_args: Vec<&str> = systemctl_scope().to_vec();
     cmd_args.extend_from_slice(args);
     let output = std::process::Command::new("systemctl")
         .args(&cmd_args)
@@ -211,10 +290,125 @@ fn systemctl(args: &[&str]) -> crate::error::CliResult<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let trimmed = stderr.trim();
         if !trimmed.is_empty() {
+            // Translate the most common confusing failure: a user-scope
+            // call with no session bus (e.g. running under sudo/su without
+            // a login session). Map it to an actionable message instead of
+            // the raw D-Bus error. Root never hits this — it uses system
+            // scope — so reaching it means a non-root context lost its bus.
+            if trimmed.contains("Failed to connect to bus") {
+                return Err(
+                    "no user systemd session bus (running without a login session?). \
+                     Run as root for a system service (`sudo tofupilot ...`), or enable \
+                     lingering for the station user: `sudo loginctl enable-linger <user>`."
+                        .into(),
+                );
+            }
             return Err(format!("systemctl failed: {trimmed}").into());
         }
     }
     Ok(())
+}
+
+/// Is the unit already enabled at the current scope? Parses `systemctl
+/// is-enabled` STDOUT (`enabled` / `enabled-runtime`) rather than the
+/// exit code — the `systemctl()` helper masks nonzero exits when stderr
+/// is empty, and `is-enabled` returns nonzero for the common
+/// `disabled`/`static` states. Best-effort: any error → `false` so the
+/// caller falls through to an `enable`, which is idempotent.
+#[cfg(target_os = "linux")]
+fn systemctl_is_enabled(unit: &str) -> bool {
+    let mut cmd_args: Vec<&str> = systemctl_scope().to_vec();
+    cmd_args.push("is-enabled");
+    cmd_args.push(unit);
+    std::process::Command::new("systemctl")
+        .args(&cmd_args)
+        .output()
+        .ok()
+        .map(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let first = s.trim();
+            first == "enabled" || first == "enabled-runtime"
+        })
+        .unwrap_or(false)
+}
+
+/// Canonical unit name and the legacy name still cleaned up on teardown.
+/// Single source of truth, shared by config.rs and uninstall.rs.
+#[cfg(target_os = "linux")]
+pub(crate) const UNIT: &str = "tofupilot.service";
+#[cfg(target_os = "linux")]
+pub(crate) const LEGACY_UNIT: &str = "tofupilot-stream.service";
+
+/// Every launch-on-boot unit path that could exist on disk, paired with
+/// whether it is a system-scope unit. Teardown iterates this so we clean
+/// up whichever scope is actually installed, independent of the current
+/// uid (an enable as root then a plain login as the user must still find
+/// and remove the right artifact). Both current and legacy names included.
+#[cfg(target_os = "linux")]
+pub(crate) fn unit_candidates() -> crate::error::CliResult<Vec<(bool, std::path::PathBuf)>> {
+    let user_dir = db::home_dir()?.join(".config/systemd/user");
+    let sys_dir = std::path::PathBuf::from(SYSTEM_UNIT_DIR);
+    Ok(vec![
+        (true, sys_dir.join(UNIT)),
+        (true, sys_dir.join(LEGACY_UNIT)),
+        (false, user_dir.join(UNIT)),
+        (false, user_dir.join(LEGACY_UNIT)),
+    ])
+}
+
+/// Directory for the root system-scope unit. Single source of truth for
+/// the unit path, the teardown symlink base, and the status message.
+#[cfg(target_os = "linux")]
+const SYSTEM_UNIT_DIR: &str = "/etc/systemd/system";
+
+/// systemd target the unit installs into. Single source of truth shared by
+/// the unit's `WantedBy=` line and the `.wants` symlink path that teardown
+/// removes — they must match or an autostart symlink is orphaned.
+#[cfg(target_os = "linux")]
+const SYSTEM_TARGET: &str = "multi-user.target";
+#[cfg(target_os = "linux")]
+const USER_TARGET: &str = "default.target";
+
+/// Unit file name as a `String` for systemctl args, falling back to the
+/// canonical unit name if the path has no file component.
+#[cfg(target_os = "linux")]
+fn unit_file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(UNIT)
+        .to_string()
+}
+
+/// Remove a unit file + its WantedBy symlink directly on disk, scoped by
+/// `system`. We do NOT rely on `systemctl --user disable` for the user
+/// scope when running as root: root has no user session bus, so that
+/// call no-ops and the symlink survives — the orphan unit would then
+/// autostart at next boot and race the system daemon for the loopback
+/// port. Direct file removal is bus-independent; the systemctl disable
+/// stays best-effort for the in-memory state.
+#[cfg(target_os = "linux")]
+fn remove_unit_on_disk(system: bool, unit_path: &std::path::Path) {
+    let Some(unit_name) = unit_path.file_name() else {
+        return;
+    };
+    // WantedBy symlink location for each scope's target. Built from the
+    // same TARGET consts as the unit body's WantedBy= line so they stay
+    // in sync.
+    let wants_link = if system {
+        std::path::PathBuf::from(SYSTEM_UNIT_DIR)
+            .join(format!("{SYSTEM_TARGET}.wants"))
+            .join(unit_name)
+    } else {
+        match db::home_dir() {
+            Ok(h) => h
+                .join(".config/systemd/user")
+                .join(format!("{USER_TARGET}.wants"))
+                .join(unit_name),
+            Err(_) => return,
+        }
+    };
+    let _ = std::fs::remove_file(&wants_link);
+    let _ = std::fs::remove_file(unit_path);
 }
 
 /// Install (or remove) the OS-level station service. Called on a token
@@ -325,89 +519,220 @@ fn apply_launch_on_boot_macos(enable: bool, exe: &std::path::Path) -> crate::err
 
 #[cfg(target_os = "linux")]
 fn apply_launch_on_boot_linux(enable: bool, exe: &std::path::Path) -> crate::error::CliResult<()> {
-    const UNIT: &str = "tofupilot.service";
-    const LEGACY_UNIT: &str = "tofupilot-stream.service";
+    let root = is_root_system();
 
-    let unit_dir = db::home_dir()?.join(".config/systemd/user");
-    let unit_path = unit_dir.join(UNIT);
-    let legacy_path = unit_dir.join(LEGACY_UNIT);
-
-    if legacy_path.exists() {
-        let _ = systemctl(&["disable", "--now", LEGACY_UNIT]);
-        let _ = std::fs::remove_file(&legacy_path);
-    }
-
+    // --- Disable / uninstall: scope-agnostic, derived from disk. ---
+    // Tear down EVERY candidate unit that exists, regardless of the
+    // current uid: an enable as root then a plain login as the user
+    // must still find and remove the system unit (and vice versa).
+    // Removal is on-disk (file + WantedBy symlink) so it works even
+    // when the opposite scope's bus is unreachable; systemctl calls are
+    // best-effort for in-memory state. System-scope removal is only
+    // attempted when running as root — a normal user can't write
+    // /etc/systemd/system, and silently skipping avoids EACCES noise on
+    // every plain login.
     if !enable {
-        if unit_path.exists() {
-            // Do work that must survive a self-SIGTERM before the stop command:
-            //   1. `disable` (no --now) writes the symlink removal, preventing
-            //      launch-on-boot at next login; doesn't touch the running unit.
-            //   2. Remove the unit file from disk.
-            //   3. `stop --no-block` asks systemd to stop us; the call returns
-            //      before SIGTERM fires, letting daemon-reload complete.
-            let _ = systemctl(&["disable", UNIT]);
-            let _ = std::fs::remove_file(&unit_path);
+        for (system, path) in unit_candidates()? {
+            if !path.exists() {
+                continue;
+            }
+            if system && !root {
+                // Can't manage the system unit without root. Surface it
+                // once so an orphan doesn't silently survive.
+                crate::log::warn(
+                    "A system launch-on-boot service exists but removing it needs root. \
+                     Run `sudo tofupilot ...` to remove it.",
+                );
+                continue;
+            }
+            let unit_name = unit_file_name(&path);
+            // disable (no --now) writes the symlink removal before the
+            // stop, so a self-SIGTERM can't abort it; then on-disk
+            // removal guarantees the symlink is gone even with no bus.
+            let _ = systemctl(&["disable", &unit_name]);
+            remove_unit_on_disk(system, &path);
             let _ = systemctl(&["daemon-reload"]);
-            let _ = systemctl(&["stop", "--no-block", UNIT]);
+            let _ = systemctl(&["stop", "--no-block", &unit_name]);
         }
         return Ok(());
     }
 
-    // `Restart=on-failure`: a clean exit (operator hit Exit, exit 0)
-    // stays dead — no surprise respawn, no fight against the operator.
-    // A failure exit (network not yet reachable at boot, transient
-    // crash) gets retried every 10s. `network-online.target` is a
-    // soft target on a Pi (often satisfied before DHCP completes), so
-    // without retry the unit dies on first boot when the connection
-    // hasn't stabilized yet.
-    //
-    // `Environment=DISPLAY/XAUTHORITY`: the user's systemd instance
-    // does NOT inherit GUI env from the X session, so without these
-    // the kiosk launcher can't open a browser window. `:0` is the
-    // standard single-monitor display on a Pi with auto-login.
-    // `XAUTHORITY=%h/.Xauthority` is the default location lightdm /
-    // raspi-config writes to.
-    //
-    // `After=graphical-session.target` ties unit ordering to the GUI
-    // session so the kiosk launches with X already up.
-    // RestartPreventExitStatus excludes:
-    //  - 75 (EX_TEMPFAIL): credentials revoked. Restarting just spins
-    //    against the same revoked key; operator must reauth.
-    //  - 130: SIGINT (Ctrl+C). Operator deliberately quit.
-    // Honor the operator's current `$DISPLAY` if set so multi-monitor
-    // / non-standard setups install with the right value. Fall back to
-    // `:0` which matches the standard Pi single-monitor auto-login.
-    // Wayland-only hosts will still get `:0` here; the kiosk launcher
-    // detects WAYLAND_DISPLAY at runtime and adapts.
-    let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_string());
-    let unit = format!(
-        "[Unit]\nDescription=TofuPilot Station\nAfter=network-online.target graphical-session.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment=DISPLAY={display}\nEnvironment=XAUTHORITY=%h/.Xauthority\nExecStart={exe} service start\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=75 130\n\n[Install]\nWantedBy=default.target\n",
-        exe = exe.display()
-    );
+    // --- Enable: profile chosen by uid. ---
+    // Before writing the chosen unit, tear down the OPPOSITE scope's unit
+    // so a mode switch (user<->root) doesn't leave two units enabled and
+    // racing for the loopback port. Best-effort: the opposite scope may be
+    // unmanageable from here — e.g. a root enable can't reach the seat
+    // user's ~/.config (db::home_dir resolves to /root, not the SUDO_USER
+    // home), so a pre-existing user unit can survive. The EADDRINUSE
+    // single-instance gate means only one daemon wins at boot; the cost is
+    // log noise, not corruption. Warn so the leftover is visible.
+    let opposite_system = !root;
+    for (system, path) in unit_candidates()? {
+        if system == opposite_system && path.exists() {
+            let unit_name = unit_file_name(&path);
+            let _ = systemctl(&["disable", &unit_name]);
+            // Can remove on disk unless it's a system unit and we aren't
+            // root (no write access to /etc/systemd/system).
+            if !system || root {
+                remove_unit_on_disk(system, &path);
+            } else {
+                // Opposite unit is a system unit we lack root to remove.
+                crate::log::warn(
+                    "A system launch-on-boot service from a previous setup \
+                     still exists. Run `sudo tofupilot login` (or uninstall) \
+                     to remove it so it doesn't start alongside this one.",
+                );
+            }
+        }
+    }
+
+    let (unit_dir, unit_body) = if root {
+        // System service: runs as root at boot, no graphical session, so
+        // no DISPLAY/XAUTHORITY and no graphical-session.target ordering
+        // (meaningless in the system manager). Logs to the journal so
+        // exit-75 (revoked creds) is visible via `journalctl -u tofupilot`.
+        // WantedBy=multi-user.target fires at boot without any login.
+        let body = format!(
+            "[Unit]\nDescription=TofuPilot Station\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={exe} service start\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=75 130\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy={target}\n",
+            exe = exe.display(),
+            target = SYSTEM_TARGET,
+        );
+        (std::path::PathBuf::from(SYSTEM_UNIT_DIR), body)
+    } else {
+        // User service (Raspberry-Pi-style auto-login kiosk). The user's
+        // systemd instance does not inherit GUI env, so DISPLAY/XAUTHORITY
+        // are injected for the kiosk browser; graphical-session.target
+        // ordering ties the launch to X being up. RestartPreventExitStatus
+        // excludes 75 (revoked creds) and 130 (SIGINT) so a deliberate
+        // quit / reauth-needed state isn't fought by respawns.
+        let display = sanitize_display(&std::env::var("DISPLAY").unwrap_or_default());
+        let body = format!(
+            "[Unit]\nDescription=TofuPilot Station\nAfter=network-online.target graphical-session.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment=DISPLAY={display}\nEnvironment=XAUTHORITY=%h/.Xauthority\nExecStart={exe} service start\nRestart=on-failure\nRestartSec=10\nRestartPreventExitStatus=75 130\n\n[Install]\nWantedBy={target}\n",
+            exe = exe.display(),
+            target = USER_TARGET,
+        );
+        (db::home_dir()?.join(".config/systemd/user"), body)
+    };
+
+    // System services must not exec a binary from a user-writable
+    // location: a non-root user who can replace the binary gets root
+    // code execution at next boot. Refuse with an actionable message
+    // rather than installing an escalation vector.
+    if root {
+        guard_system_exe_location(exe)?;
+    }
+
+    let unit_path = unit_dir.join(UNIT);
     std::fs::create_dir_all(&unit_dir).map_err(|e| format!("Create systemd dir: {e}"))?;
 
     let current = std::fs::read_to_string(&unit_path).ok();
-    let unit_changed = current.as_deref() != Some(unit.as_str());
+    let unit_changed = current.as_deref() != Some(unit_body.as_str());
     if unit_changed {
-        std::fs::write(&unit_path, &unit).map_err(|e| format!("Write unit: {e}"))?;
+        std::fs::write(&unit_path, &unit_body).map_err(|e| format!("Write unit: {e}"))?;
         let _ = systemctl(&["daemon-reload"]);
     }
 
-    // `enable` (no `--now`) just writes the WantedBy symlink. It does
-    // NOT spawn a second daemon, so it's safe to call from inside the
-    // already-running CLI. The change takes effect at next reboot;
-    // the current foreground session keeps running unchanged.
-    systemctl(&["enable", UNIT])?;
+    // Idempotency: only shell out to `enable` when not already enabled.
+    // `apply_launch_on_boot` is reapplied on every config sync to
+    // self-heal a unit removed out-of-band; the is-enabled gate keeps
+    // the steady state to one cheap probe with no symlink churn.
+    if !systemctl_is_enabled(UNIT) {
+        systemctl(&["enable", UNIT])?;
+    }
 
-    // The user's systemd instance only runs while the user is logged
-    // in (no SSH session, no auto-login). Without lingering, the unit
-    // never fires at boot on a fresh-boot-then-no-login machine. On a
-    // typical Pi with auto-login this isn't a problem — the user logs
-    // in automatically — but for kiosks running headless or via SSH
-    // we need linger. Detect + warn rather than silently fail at next
-    // reboot.
-    warn_if_linger_disabled();
+    if root {
+        // Root system service: authenticated from /root/.tofupilot. If
+        // creds aren't there the station boots unauthenticated with no
+        // obvious cause — warn so the operator runs `sudo tofupilot login`.
+        warn_if_root_creds_missing();
+    } else {
+        // User instance only runs while the user is logged in. Without
+        // lingering the unit never fires on a headless / no-auto-login
+        // box. Detect + warn rather than silently failing at next reboot.
+        warn_if_linger_disabled();
+    }
     Ok(())
+}
+
+/// Validate a `DISPLAY` value before interpolating it into a unit file.
+/// Accepts `:N`, `:N.M`, or `host:N(.M)`; anything else (incl. a value
+/// with a newline that could inject unit directives) falls back to `:0`.
+#[cfg(target_os = "linux")]
+fn sanitize_display(raw: &str) -> String {
+    let candidate = raw.trim();
+    let valid = {
+        // host part: no control chars, no whitespace, no colon
+        let (host, rest) = match candidate.split_once(':') {
+            Some((h, r)) => (h, r),
+            None => ("", ""),
+        };
+        let host_ok = host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        // display(.screen): digits, optional `.digits`
+        let nums_ok = !rest.is_empty()
+            && rest.split_once('.').map_or_else(
+                || rest.chars().all(|c| c.is_ascii_digit()),
+                |(d, s)| {
+                    !d.is_empty()
+                        && d.chars().all(|c| c.is_ascii_digit())
+                        && !s.is_empty()
+                        && s.chars().all(|c| c.is_ascii_digit())
+                },
+            );
+        candidate.contains(':') && host_ok && nums_ok
+    };
+    if valid {
+        candidate.to_string()
+    } else {
+        ":0".to_string()
+    }
+}
+
+/// Refuse to install a system unit whose ExecStart points at a binary in
+/// a user-writable directory (user home or world/group-writable). A
+/// non-root user able to overwrite that binary would gain root at boot.
+#[cfg(target_os = "linux")]
+fn guard_system_exe_location(exe: &std::path::Path) -> crate::error::CliResult<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let canonical = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let lossy = canonical.to_string_lossy();
+    if lossy.starts_with("/home/") || lossy.starts_with("/Users/") {
+        return Err(format!(
+            "Refusing to install a root system service from a user home ({}). \
+             Move the binary to /usr/local/bin first, then re-run.",
+            canonical.display()
+        )
+        .into());
+    }
+    // Reject group/world-writable binary or parent dir (non-root could
+    // replace it). Owner must be root for a root service's ExecStart.
+    if let Ok(meta) = std::fs::metadata(&canonical) {
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 || meta.uid() != 0 {
+            return Err(format!(
+                "Refusing to install a root system service from a non-root-owned or \
+                 writable binary ({}). Install it to /usr/local/bin owned by root first.",
+                canonical.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Warn when running as a root system service but /root has no
+/// credentials — the daemon would boot unauthenticated.
+#[cfg(target_os = "linux")]
+fn warn_if_root_creds_missing() {
+    if crate::commands::auth::credentials::load().is_none() {
+        crate::log::warn(
+            "No credentials found for the root system service. \
+             Run `sudo tofupilot login` so the station authenticates at boot.",
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -770,4 +1095,30 @@ fn create_windows_shortcut(
         .into());
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::sanitize_display;
+
+    #[test]
+    fn sanitize_display_accepts_valid() {
+        assert_eq!(sanitize_display(":0"), ":0");
+        assert_eq!(sanitize_display(":1"), ":1");
+        assert_eq!(sanitize_display(":0.0"), ":0.0");
+        assert_eq!(sanitize_display("localhost:10.0"), "localhost:10.0");
+        assert_eq!(sanitize_display(" :0 "), ":0"); // trimmed
+    }
+
+    #[test]
+    fn sanitize_display_rejects_injection_and_garbage() {
+        // Newline injection would add unit directives — must fall back.
+        assert_eq!(sanitize_display(":0\nExecStart=/bin/sh"), ":0");
+        assert_eq!(sanitize_display(""), ":0");
+        assert_eq!(sanitize_display("nonsense"), ":0");
+        assert_eq!(sanitize_display(":"), ":0");
+        assert_eq!(sanitize_display(":abc"), ":0");
+        assert_eq!(sanitize_display(":0."), ":0");
+        assert_eq!(sanitize_display("ho st:0"), ":0"); // space in host
+    }
 }

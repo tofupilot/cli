@@ -20,6 +20,15 @@ pub enum StationEvent {
         platform: String,
         mac_address: Option<String>,
         cli_version: String,
+        /// How the station daemon is running: `"root_system"` when the
+        /// CLI runs as root (installed as a system service), `"user"`
+        /// otherwise. Drives the dashboard's run-mode-derived UI (e.g.
+        /// disabling the kiosk toggle, since a root system service has
+        /// no graphical session). Optional + `default` so older CLIs
+        /// that omit it deserialize cleanly; consumers treat a missing
+        /// value as unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_mode: Option<String>,
     },
     /// System telemetry, published periodically
     Telemetry {
@@ -1507,6 +1516,7 @@ mod tests {
             platform: "p".into(),
             mac_address: None,
             cli_version: "v".into(),
+            run_mode: None,
         };
         assert_eq!(ev.execution_id(), None);
     }
