@@ -24,7 +24,7 @@ use tofupilot_sdk::types::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 
-use super::agent_proto::{AgentProtoCtx, AgentUiComponent, CliEvent};
+use super::agent_proto::{AgentProtoCtx, AgentUiComponent, CliEvent, UiAutoContinueSource};
 use super::queue::{upload_queued_run, QueuedAttachment, QueuedRun};
 use crate::commands::auth::credentials::Credentials;
 use crate::commands::db;
@@ -751,7 +751,66 @@ pub async fn run_openhtf(
                     if let Some(ref ui) = ui_tx {
                         let _ = ui.try_send(request_data.clone());
                     }
+
+                    // Pre-baked auto-respond (agent protocol `--ui-values`).
+                    // The native engine path does this in
+                    // `engine::handle_agent_ui_request`, but OpenHTF prompts
+                    // flow through this connector loop instead, so mirror the
+                    // logic here: if every required input is pre-baked, resolve
+                    // the oneshot immediately and skip registering a pending
+                    // request. `ui_response::send` resolves the `resp_tx` we
+                    // just inserted, so the `resp_rx.await` below returns the
+                    // coerced values without blocking on operator input.
+                    let prebaked_resolved = if let Some(ref agent) = agent_for_task {
+                        let components = &request_data.config.components;
+                        match agent.prebaked.for_phase(&current_phase_key) {
+                            Some(map)
+                                if components.iter().all(|c| {
+                                    !c.is_input || !c.required || map.contains_key(&c.key)
+                                }) =>
+                            {
+                                let values: std::collections::HashMap<String, serde_json::Value> =
+                                    components
+                                        .iter()
+                                        .filter(|c| c.is_input)
+                                        .filter_map(|c| {
+                                            map.get(&c.key).map(|v| (c.key.clone(), v.clone()))
+                                        })
+                                        .collect();
+                                match super::agent_proto::validate::validate_and_coerce(
+                                    components,
+                                    values.clone(),
+                                ) {
+                                    Ok(coerced) => {
+                                        super::ui_response::send(&prompt_id, coerced).await;
+                                        agent.emitter.enqueue(CliEvent::UiAutoContinue {
+                                            request_id: prompt_id.clone(),
+                                            phase_key: current_phase_key.clone(),
+                                            source: UiAutoContinueSource::PreBaked,
+                                            values,
+                                        });
+                                        true
+                                    }
+                                    Err(err) => {
+                                        // Bad pre-baked value: surface it and
+                                        // fall back to a normal prompt.
+                                        agent.emitter.enqueue(err.into_event(&prompt_id));
+                                        false
+                                    }
+                                }
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
                     if let Some(ref agent) = agent_for_task {
+                        if prebaked_resolved {
+                            // Already auto-responded above; don't register a
+                            // pending request or emit a `ui_request` the
+                            // operator/agent would be expected to answer.
+                        } else {
                         {
                             let mut guard = agent.pending.write().await;
                             guard.insert(
@@ -773,6 +832,7 @@ pub async fn run_openhtf(
                             requires_input: true,
                             components: payload_components,
                         });
+                        }
                     }
 
                     // Per-prompt `timeout_s` from Python wins over the agent's

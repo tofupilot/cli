@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.4]
+
+### Fixed
+
+- OpenHTF operator prompts now honor `--ui-values` in agent/JSON mode. Pre-baked
+  responses auto-resolve `prompts.prompt(...)` instead of timing out, matching the
+  native YAML procedure path.
+
 ## [0.22.19]
 
 ### Fixed
