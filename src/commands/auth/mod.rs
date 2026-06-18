@@ -230,15 +230,18 @@ pub async fn login_cmd(
     unpark_and_drain(&creds).await;
 
     // Step 8: Station login finalization (sync config, pull, hand off to
-    // station mode / service) for token logins; for a plain browser login
-    // the machine is going back to development use, so tear down any boot
-    // service a previous station login installed. This makes browser login
-    // the symmetric "return to development" command — no separate disable
-    // step. Best-effort: a failure just leaves a stale unit that the next
-    // `tofupilot uninstall` removes.
+    // station mode / service) for token logins. A browser login on a
+    // machine with NO station identity is a "return to development" — tear
+    // down any boot service a previous station login left. But a browser
+    // login on a machine that is STILL a station (the common case: an
+    // operator logging in as a user only to run `tofupilot deploy`) must
+    // leave the station's boot service intact, now that user and station
+    // credentials live in separate slots. Best-effort: a failure just
+    // leaves a stale unit that the next `tofupilot uninstall` removes.
     match creds.installation_id {
         Some(ref installation_id) => finalize_station_login(&creds, installation_id).await,
-        None => teardown_boot_service().await,
+        None if credentials::load_station().is_none() => teardown_boot_service().await,
+        None => {}
     }
 
     Ok(())
@@ -324,8 +327,20 @@ pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
 /// Clear stored credentials, whoami cache, and local deployments.
 /// Notifies server to mark installation as logged out.
 pub async fn logout_cmd() -> Result<(), CliError> {
-    if let Some(creds) = credentials::load() {
-        notify_server_logout(&creds, false).await;
+    // A machine can hold both a user and a station identity in separate
+    // slots; logout clears both, so notify the server for each so neither
+    // is left "active" server-side. Skip the station notify when it shares
+    // the user's api_key (a pure-station machine or legacy single-file
+    // install, where load() and load_station() resolve the same record).
+    let user = credentials::load();
+    let station = credentials::load_station();
+    if let Some(creds) = &user {
+        notify_server_logout(creds, false).await;
+    }
+    if let Some(creds) = &station {
+        if user.as_ref().map(|u| &u.api_key) != Some(&creds.api_key) {
+            notify_server_logout(creds, false).await;
+        }
     }
 
     credentials::clear()?;

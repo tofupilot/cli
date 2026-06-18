@@ -727,10 +727,13 @@ fn guard_system_exe_location(exe: &std::path::Path) -> crate::error::CliResult<(
 /// credentials — the daemon would boot unauthenticated.
 #[cfg(target_os = "linux")]
 fn warn_if_root_creds_missing() {
-    if crate::commands::auth::credentials::load().is_none() {
+    // Check the station slot specifically: the daemon boots from the
+    // station identity, so a user-only login (no station.json) still means
+    // the service can't authenticate at boot.
+    if crate::commands::auth::credentials::load_station().is_none() {
         crate::log::warn(
-            "No credentials found for the root system service. \
-             Run `sudo tofupilot login` so the station authenticates at boot.",
+            "No station credentials found for the root system service. \
+             Run `sudo tofupilot login --token <setup-token>` so the station authenticates at boot.",
         );
     }
 }

@@ -575,11 +575,11 @@ async fn main() {
                     // Run the daemon in the foreground. systemd /
                     // launchd's ExecStart points here.
                     startup_skip_background_check();
-                    match commands::auth::credentials::load() {
-                        Some(creds) if creds.installation_id.is_some() => {
+                    match commands::auth::credentials::load_station() {
+                        Some(creds) => {
                             std::process::exit(commands::station::run_cmd(&creds, json_mode).await);
                         }
-                        _ => {
+                        None => {
                             log::error("Not logged in as a station. Generate a setup token from the station's page in the dashboard, then run `tofupilot login --token <setup-token>`.");
                             std::process::exit(1);
                         }
@@ -606,8 +606,8 @@ async fn main() {
             //     installs the unit on first run so reboots come back.
             //   * Not logged in → short usage hint.
             startup_skip_background_check();
-            match commands::auth::credentials::load() {
-                Some(creds) if creds.installation_id.is_some() => {
+            match commands::auth::credentials::load_station() {
+                Some(creds) => {
                     if commands::service::is_running() {
                         let port = commands::service::local_port();
                         log::success("Station service is already running.");

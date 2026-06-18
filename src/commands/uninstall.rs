@@ -66,8 +66,18 @@ pub async fn run_cmd(keep_data: bool, yes: bool, json_mode: bool) -> i32 {
     // was already revoked (e.g. another install replaced us), the server
     // logged_out event stays at its existing reason and we just continue
     // with local cleanup. Local uninstall always completes regardless.
-    if let Some(creds) = credentials::load() {
-        crate::commands::auth::notify_server_logout(&creds, true).await;
+    // Notify both the user and station identities (separate slots) so
+    // neither is left active server-side; skip the station notify when it
+    // shares the user key (pure-station / legacy single-file install).
+    let user = credentials::load();
+    let station = credentials::load_station();
+    if let Some(creds) = &user {
+        crate::commands::auth::notify_server_logout(creds, true).await;
+    }
+    if let Some(creds) = &station {
+        if user.as_ref().map(|u| &u.api_key) != Some(&creds.api_key) {
+            crate::commands::auth::notify_server_logout(creds, true).await;
+        }
     }
 
     let mut output = UninstallOutput {
@@ -105,9 +115,13 @@ pub async fn run_cmd(keep_data: bool, yes: bool, json_mode: bool) -> i32 {
     }
     turn_off("desktop_icon", icon, "desktop icon", json_mode, &mut output);
 
-    // 2. Remove credentials
+    // 2. Remove credentials (both the user and station slots)
     remove_file(
         &crate::commands::auth::credentials::credentials_path(),
+        &mut output,
+    );
+    remove_file(
+        &crate::commands::auth::credentials::station_credentials_path(),
         &mut output,
     );
 

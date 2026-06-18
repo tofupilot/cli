@@ -318,8 +318,7 @@ pub async fn run_update_with_publisher(
         return Ok(false);
     }
     if let Some(pub_handle) = publisher {
-        let inst_id = crate::commands::auth::credentials::require()
-            .ok()
+        let inst_id = crate::commands::auth::credentials::load_station()
             .and_then(|c| c.installation_id)
             .unwrap_or_default();
         let _ = pub_handle
