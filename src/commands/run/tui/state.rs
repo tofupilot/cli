@@ -62,7 +62,26 @@ impl ComponentState {
                 Self::Slider(default_number(&comp.default_value).unwrap_or(min))
             }
             ComponentType::Radio | ComponentType::Select => {
-                let value = default_single(&comp.default_value);
+                // Mirror the web `getComponentDefaultValue`: a required
+                // radio/select with no explicit default pre-selects the
+                // first option, so both surfaces record the same value
+                // and impose the same submit gate. Image-grid options
+                // stay unselected (pre-highlighting a card biases the
+                // operator's visual choice) — match the web `''` there.
+                let has_image = comp
+                    .options
+                    .as_ref()
+                    .is_some_and(|opts| opts.iter().any(|o| o.image.is_some()));
+                let value = default_single(&comp.default_value).or_else(|| {
+                    if comp.required && !has_image {
+                        comp.options
+                            .as_ref()
+                            .and_then(|opts| opts.first())
+                            .map(|o| o.value.clone())
+                    } else {
+                        None
+                    }
+                });
                 let cursor = value
                     .as_ref()
                     .and_then(|v| comp.options.as_ref()?.iter().position(|o| &o.value == v))
@@ -244,6 +263,28 @@ impl ActiveUiRequest {
             if let Some(v) = state.to_response(comp) {
                 out.insert(comp.key.clone(), v);
             }
+        }
+        // Pack `bind:` components into the `__bound_measurements__`
+        // sentinel the engine consumes. Without this the engine never
+        // creates a measurement from an operator answer, and a later
+        // phase reading `phase_x.measure` raises AttributeError. Shared
+        // with the agent path and mirroring the web operator-ui; the
+        // kiosk (React) path already did this, the TUI previously did not.
+        //
+        // Resolve each component's answer by its position in the parallel
+        // `states` vec (built from the same components in `new`).
+        let resolved: HashMap<&str, String> = self
+            .components
+            .iter()
+            .zip(self.states.iter())
+            .filter_map(|(comp, state)| state.to_response(comp).map(|v| (comp.key.as_str(), v)))
+            .collect();
+        let bound = execution_engine::ui::build_bound_measurements_payload(
+            &self.components,
+            |comp| resolved.get(comp.key.as_str()).cloned(),
+        );
+        if let Some(bound) = bound {
+            out.insert("__bound_measurements__".to_string(), bound);
         }
         out
     }
@@ -710,6 +751,107 @@ mod tests {
             phase_key: phase_key.into(),
             slot_id: None,
         }
+    }
+
+    fn radio_with_bind(key: &str, bind: &str, options: &[&str]) -> UiComponent {
+        use execution_engine::ui::UiOption;
+        UiComponent {
+            key: key.into(),
+            bind: Some(bind.into()),
+            options: Some(
+                options
+                    .iter()
+                    .map(|v| UiOption {
+                        label: (*v).into(),
+                        value: (*v).into(),
+                        image: None,
+                    })
+                    .collect(),
+            ),
+            ..UiComponent::new(ComponentType::Radio)
+        }
+    }
+
+    #[test]
+    fn collect_response_packs_bound_measurement_for_radio() {
+        // Repro: phase_13 radio bound to measurements.motor_type_measure.
+        // The TUI must emit `__bound_measurements__` so the engine creates
+        // the measurement a downstream python phase reads.
+        let comp = radio_with_bind(
+            "motor_type_measure",
+            "measurements.motor_type_measure",
+            &["Decapsuleur", "Pancake"],
+        );
+        let mut req = ui_request("r1", "phase_13");
+        req.config.components = vec![comp];
+        let mut active = ActiveUiRequest::new(&req);
+        // Operator selects the first option.
+        active.states[0] = ComponentState::SingleChoice {
+            value: Some("Decapsuleur".into()),
+            cursor: 0,
+        };
+
+        let resp = active.collect_response();
+        let bound = resp
+            .get("__bound_measurements__")
+            .expect("__bound_measurements__ must be present");
+        let parsed: serde_json::Value = serde_json::from_str(bound).unwrap();
+        assert_eq!(parsed["motor_type_measure"], "Decapsuleur");
+    }
+
+    #[test]
+    fn required_radio_without_default_preselects_first_option() {
+        // Parity with the web `getComponentDefaultValue`: a required
+        // non-image radio with no default seeds the first option, so the
+        // recorded measurement matches the kiosk path even if the
+        // operator submits without changing the selection.
+        let comp = radio_with_bind("pick", "measurements.pick", &["A", "B"]);
+        let mut req = ui_request("r3", "p");
+        req.config.components = vec![comp];
+        let active = ActiveUiRequest::new(&req);
+        let resp = active.collect_response();
+        let bound = resp.get("__bound_measurements__").expect("present");
+        let parsed: serde_json::Value = serde_json::from_str(bound).unwrap();
+        assert_eq!(parsed["pick"], "A");
+    }
+
+    #[test]
+    fn image_radio_without_default_stays_unselected() {
+        use execution_engine::ui::UiOption;
+        // Image-grid radios must NOT pre-select (matches web `''`).
+        let comp = UiComponent {
+            key: "motor".into(),
+            bind: Some("measurements.motor".into()),
+            options: Some(vec![
+                UiOption { label: "A".into(), value: "A".into(), image: Some("a.png".into()) },
+                UiOption { label: "B".into(), value: "B".into(), image: Some("b.png".into()) },
+            ]),
+            ..UiComponent::new(ComponentType::Radio)
+        };
+        let mut req = ui_request("r4", "p");
+        req.config.components = vec![comp];
+        let active = ActiveUiRequest::new(&req);
+        // Image radio is not pre-seeded, so before the operator picks,
+        // the value is empty — matching the web client, which also ships
+        // `''` for an untouched image radio.
+        assert!(matches!(
+            &active.states[0],
+            ComponentState::SingleChoice { value: None, .. }
+        ));
+    }
+
+    #[test]
+    fn collect_response_no_bound_when_nothing_binds() {
+        let comp = UiComponent {
+            key: "freeform".into(),
+            required: false,
+            bind: None,
+            ..UiComponent::new(ComponentType::Text)
+        };
+        let mut req = ui_request("r2", "p");
+        req.config.components = vec![comp];
+        let active = ActiveUiRequest::new(&req);
+        assert!(!active.collect_response().contains_key("__bound_measurements__"));
     }
 
     #[test]
