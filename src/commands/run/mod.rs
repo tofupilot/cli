@@ -654,13 +654,14 @@ pub async fn start(
     // station-mode daemon (launchd / systemd) runs without a tty but
     // still needs the local-ws server up so the kiosk browser can
     // attach. Don't gate it on `is_terminal()`.
-    // Never bind the local-WS kiosk channel as root: it forwards station
-    // commands unauthenticated on loopback (local root escalation), and a
-    // root daemon has no graphical session to render a kiosk anyway.
-    // `Server::start` also refuses as the single choke point; gating here
-    // avoids the wasted setup and gives a clear message.
-    let kiosk_enabled = !crate::commands::config::is_root_system()
-        && resolve_ui_pref("kiosk_ui", kiosk_override, false);
+    // Foreground `run --kiosk` is allowed under root: it never installs a
+    // station-command sink, so its loopback channel can't drive root (the
+    // only commands a connected tab can issue are the current run's
+    // UiResponse/Stop/Kill — same posture as any local `tofupilot`
+    // process). This is the headless-root + SSH-forward operator workflow.
+    // The *daemon* still refuses root, gated separately in `station::start`
+    // and backstopped by `Server::start(allow_root: false)`.
+    let kiosk_enabled = resolve_ui_pref("kiosk_ui", kiosk_override, false);
 
     // Both modes own stdout: TUI draws ratatui frames, agent-protocol
     // writes NDJSON. Enabling both would interleave garbage. Derivation
@@ -770,10 +771,14 @@ pub async fn start(
                         user_name: w.user_name,
                     })
                     .unwrap_or_default();
+                // Foreground `run --kiosk` never installs a station-command
+                // sink, so its loopback channel can't drive root — allow it
+                // to bind under root (headless-root + SSH-forward workflow).
                 match crate::local_ws::Server::start(
                     procedure_id.to_string(),
                     "CLI".to_string(),
                     identity,
+                    true,
                 )
                 .await
                 {

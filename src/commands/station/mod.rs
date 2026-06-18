@@ -427,8 +427,15 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 user_name: w.user_name.clone(),
             })
             .unwrap_or_default();
-        match crate::local_ws::Server::start(installation_id.to_string(), station_name, identity)
-            .await
+        // Daemon installs the station-command sink below, so its loopback
+        // channel CAN drive root — refuse to bind as root.
+        match crate::local_ws::Server::start(
+            installation_id.to_string(),
+            station_name,
+            identity,
+            false,
+        )
+        .await
         {
             Ok(s) => {
                 if !json_mode {

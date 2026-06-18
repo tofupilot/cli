@@ -443,18 +443,24 @@ impl Server {
         station_id: String,
         station_name: String,
         identity: HelloIdentity,
+        // Whether the caller may bind this server as root. The danger is
+        // not root itself — it's binding the *station command* channel
+        // (Run, Exit, Reboot, ...) unauthenticated on loopback, where any
+        // local user reaching 127.0.0.1 could drive root. Only the station
+        // daemon installs that sink (`set_station_cmd_sink`); a standalone
+        // foreground `run --kiosk` leaves it `None`, so its station
+        // commands are dropped and the residual surface is just the
+        // current run's UiResponse/Stop/Kill — the same posture as the
+        // rest of the CLI (any local `tofupilot` process already has full
+        // access). So the daemon passes `false` (refuse root); the
+        // foreground run passes `true`. This unblocks the legitimate
+        // headless-root + SSH-forward operator workflow.
+        allow_root: bool,
     ) -> std::io::Result<Self> {
-        // Single choke point: the local-WS channel forwards station
-        // commands (Run, Exit, Reboot, ...) with no authentication, so it
-        // must never bind under a root daemon — any local user could reach
-        // 127.0.0.1 and drive root. A root system service has no graphical
-        // session anyway, so the kiosk it backs can't render. Refuse here
-        // so every caller (station daemon, standalone `run --kiosk`) is
-        // covered by one guard rather than each remembering to gate.
-        if crate::commands::config::is_root_system() {
+        if !allow_root && crate::commands::config::is_root_system() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "local operator UI is disabled when running as root \
+                "local operator UI is disabled for the root station service \
                  (unauthenticated loopback command channel); control the \
                  station from the dashboard instead",
             ));
