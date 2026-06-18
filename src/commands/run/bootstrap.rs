@@ -310,6 +310,12 @@ async fn provision(
             // means a corrupted prior run can't taint the rebuild.
             let _ = std::fs::remove_dir_all(&venv);
             let args = vec!["sync".into(), "--python".into(), runtime_version.into()];
+            // NOTE: the `system_packages` station opt-in does NOT apply on
+            // this path. It maps to `uv venv --system-site-packages`, which
+            // `uv sync` doesn't accept, and uv has no env-var equivalent
+            // (astral-sh/uv#9996). So local `tofupilot run` against a
+            // pyproject keeps an isolated project env; the station deploy
+            // path (create_venv) is where the opt-in takes effect.
             run_uv(
                 &uv,
                 args,

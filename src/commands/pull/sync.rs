@@ -618,17 +618,35 @@ pub(crate) fn create_venv(
     // it at the source (the manifest read on the pulled path, and
     // `resolve_runtime_version` on the local-run path) via
     // `minor_version`. We pass it straight through.
-    run_subprocess(
-        uv,
-        &[
-            std::ffi::OsStr::new("venv"),
-            std::ffi::OsStr::new("--python"),
-            std::ffi::OsStr::new(runtime_version),
-            venv.as_os_str(),
-        ],
-        cwd,
-        "uv venv",
-    )
+    let mut args = vec![
+        std::ffi::OsStr::new("venv"),
+        std::ffi::OsStr::new("--python"),
+        std::ffi::OsStr::new(runtime_version),
+        venv.as_os_str(),
+    ];
+    // When the station opts into system packages, add uv's
+    // `--system-site-packages` so the venv can import packages installed
+    // outside pip on this machine (native deps that aren't pip-installable).
+    // This is uv's documented flag; there is no env-var equivalent yet
+    // (astral-sh/uv#9996). Read fresh here, so the setting takes effect on
+    // the next pull with no venv left behind to wipe.
+    if system_packages_enabled() {
+        args.push(std::ffi::OsStr::new("--system-site-packages"));
+    }
+    run_subprocess(uv, &args, cwd, "uv venv")
+}
+
+/// Whether the `system_packages` station config is on. Lets a deployment's
+/// venv reach Python packages already present in the station's system
+/// Python (e.g. vendor SDKs installed natively, not via pip). Off by
+/// default — the isolated venv is the right model unless a station
+/// explicitly opts in. Maps to uv's `uv venv --system-site-packages` flag.
+pub(crate) fn system_packages_enabled() -> bool {
+    crate::commands::db::open()
+        .ok()
+        .and_then(|db| db.get_config("system_packages").ok().flatten())
+        .map(|v| v == "on")
+        .unwrap_or(false)
 }
 
 /// Reduce a `X.Y.Z` runtime version to its `X.Y` minor line.
