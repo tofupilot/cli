@@ -10,6 +10,11 @@ pub const VERSION_URL: &str = "https://tofupilot.sh/api/cli/version";
 /// retries is enough; more would only add latency on a genuine outage.
 pub const VERSION_FETCH_ATTEMPTS: u32 = 3;
 
+/// Total archive-download attempts before giving up. The same transient
+/// reset that the version check survives can also drop the (longer-running,
+/// so more exposed) binary transfer; restart the whole transfer on it.
+pub const DOWNLOAD_ATTEMPTS: u32 = 3;
+
 /// Base backoff between transient retries, scaled by the attempt number
 /// (200ms, then 400ms). Kept small because a reset clears immediately and
 /// this fetch blocks a background startup task.

@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "0.26.6"
+version = "0.26.7"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -22,6 +22,14 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# Direct dep so the update retry can downcast `reqwest::Error` sources to
+# `hyper::Error` and detect a mid-stream "connection closed before message
+# completed" reset. Load-bearing invariant: this MUST resolve to the SAME
+# hyper node reqwest links (today both are 1.9.0). `"1"` is a range, not a
+# pin — if a future reqwest bump ever splits hyper into two majors, the
+# downcast silently returns None and the stream retry stops firing. Keep them
+# unified; see `is_transient_stream` in commands/update/download.rs.
+hyper = "1"
 directories = "6"
 tofupilot-sdk = { package = "tofupilot", path = "crates/tofupilot-sdk" }
 self-replace = "1"
