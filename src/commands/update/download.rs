@@ -13,7 +13,9 @@ use std::{fs, path::Path};
 use tar::Archive;
 
 use super::cache;
-use super::config::{DOWNLOAD_TIMEOUT, REQUEST_TIMEOUT, VERSION_URL};
+use super::config::{
+    DOWNLOAD_TIMEOUT, REQUEST_TIMEOUT, VERSION_FETCH_ATTEMPTS, VERSION_FETCH_BACKOFF, VERSION_URL,
+};
 
 use super::platform::platform_key;
 
@@ -27,13 +29,37 @@ pub struct VersionInfo {
 
 pub async fn fetch() -> crate::error::CliResult<VersionInfo> {
     let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
-    Ok(client
-        .get(VERSION_URL)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
+
+    // Retry the send leg. A reset right after a network switch/wake makes the
+    // first `.send()` fail with "error sending request for url" even though the
+    // endpoint is healthy — the very next call succeeds, which is the exact
+    // failure a user hit. In reqwest 0.12 that error is `Kind::Request`
+    // (is_request) — NOT is_connect (which is only the pre-connection phase)
+    // and NOT is_timeout — so we must retry on is_request to catch it. A status
+    // error (4xx/5xx) is a real server response, so .error_for_status() below
+    // is left outside the loop: hammering a known-bad status would not help.
+    let mut attempt = 0u32;
+    let response = loop {
+        attempt += 1;
+        match client.get(VERSION_URL).send().await {
+            Ok(resp) => break resp,
+            Err(e) if attempt < VERSION_FETCH_ATTEMPTS && is_transient_send(&e) => {
+                tokio::time::sleep(VERSION_FETCH_BACKOFF * attempt).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+
+    Ok(response.error_for_status()?.json().await?)
+}
+
+/// A send-leg failure worth retrying: one that never produced an HTTP status.
+/// `is_request` is the predicate that actually covers the observed
+/// "error sending request for url" reset (and the connect/timeout cases, which
+/// also surface as `Kind::Request`); a status error is excluded because it is a
+/// real server response, not a transport hiccup.
+fn is_transient_send(e: &reqwest::Error) -> bool {
+    e.is_request() && e.status().is_none()
 }
 
 pub async fn download_and_stage(info: &VersionInfo, staged: &Path) -> crate::error::CliResult<()> {
