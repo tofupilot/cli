@@ -1451,9 +1451,11 @@ pub async fn run_yaml_procedure(
     // execution_id (the queue_id isn't minted until post-run upload).
     // None on failure to resolve home: the run still executes, only the
     // attachments are skipped (mirrors the prior report-dir-absent path).
-    let attachment_dir = super::super::db::home_dir()
-        .ok()
-        .map(|home| home.join(".tofupilot").join("attachments").join(execution_id));
+    let attachment_dir = super::super::db::home_dir().ok().map(|home| {
+        home.join(".tofupilot")
+            .join("attachments")
+            .join(execution_id)
+    });
 
     let mut orchestrator = Orchestrator::new_with_python(
         worker_count,

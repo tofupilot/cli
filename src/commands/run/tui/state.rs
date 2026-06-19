@@ -279,10 +279,10 @@ impl ActiveUiRequest {
             .zip(self.states.iter())
             .filter_map(|(comp, state)| state.to_response(comp).map(|v| (comp.key.as_str(), v)))
             .collect();
-        let bound = execution_engine::ui::build_bound_measurements_payload(
-            &self.components,
-            |comp| resolved.get(comp.key.as_str()).cloned(),
-        );
+        let bound =
+            execution_engine::ui::build_bound_measurements_payload(&self.components, |comp| {
+                resolved.get(comp.key.as_str()).cloned()
+            });
         if let Some(bound) = bound {
             out.insert("__bound_measurements__".to_string(), bound);
         }
@@ -823,8 +823,16 @@ mod tests {
             key: "motor".into(),
             bind: Some("measurements.motor".into()),
             options: Some(vec![
-                UiOption { label: "A".into(), value: "A".into(), image: Some("a.png".into()) },
-                UiOption { label: "B".into(), value: "B".into(), image: Some("b.png".into()) },
+                UiOption {
+                    label: "A".into(),
+                    value: "A".into(),
+                    image: Some("a.png".into()),
+                },
+                UiOption {
+                    label: "B".into(),
+                    value: "B".into(),
+                    image: Some("b.png".into()),
+                },
             ]),
             ..UiComponent::new(ComponentType::Radio)
         };
@@ -851,7 +859,9 @@ mod tests {
         let mut req = ui_request("r2", "p");
         req.config.components = vec![comp];
         let active = ActiveUiRequest::new(&req);
-        assert!(!active.collect_response().contains_key("__bound_measurements__"));
+        assert!(!active
+            .collect_response()
+            .contains_key("__bound_measurements__"));
     }
 
     #[test]

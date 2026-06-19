@@ -271,25 +271,26 @@ fn launch_on_boot_artifact_exists() -> bool {
 }
 
 fn desktop_icon_exists() -> bool {
-    let Some(base) = directories::BaseDirs::new() else {
-        return false;
-    };
     #[cfg(target_os = "macos")]
     {
+        let Ok(desktop) = config::desktop_dir() else {
+            return false;
+        };
         // Current .app bundle + legacy .command script.
-        base.home_dir().join("Desktop/TofuPilot.app").exists()
-            || base.home_dir().join("Desktop/TofuPilot.command").exists()
+        desktop.join("TofuPilot.app").exists() || desktop.join("TofuPilot.command").exists()
     }
     #[cfg(target_os = "linux")]
     {
-        base.home_dir().join("Desktop/tofupilot.desktop").exists()
+        config::desktop_dir()
+            .map(|d| d.join("tofupilot.desktop").exists())
+            .unwrap_or(false)
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = base;
-        let desktop = std::env::var_os("USERPROFILE")
-            .map(std::path::PathBuf::from)
-            .map(|p| p.join("Desktop/TofuPilot.lnk").exists())
+        // Resolve via the same KFM/locale-aware helper install and removal use,
+        // so detection doesn't miss a shortcut on a OneDrive-redirected desktop.
+        let desktop = config::desktop_dir()
+            .map(|d| d.join("TofuPilot.lnk").exists())
             .unwrap_or(false);
         let start = std::env::var_os("APPDATA")
             .map(std::path::PathBuf::from)
@@ -302,7 +303,6 @@ fn desktop_icon_exists() -> bool {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = base;
         false
     }
 }

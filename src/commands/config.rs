@@ -784,9 +784,30 @@ fn apply_desktop_icon(_enable: bool) -> crate::error::CliResult<()> {
     Ok(())
 }
 
+/// Resolve the user's Desktop folder via the OS known-folder mechanism.
+///
+/// Linux reads `~/.config/user-dirs.dirs`, so locales that rename the folder
+/// (e.g. `~/Bureau` on fr_FR) resolve correctly instead of spawning a stray
+/// `~/Desktop`. Windows follows `SHGetKnownFolderPath(FOLDERID_Desktop)` and
+/// thus OneDrive Known Folder Move redirects. macOS is always `~/Desktop` (the
+/// localized name is a Finder display alias, not a real directory).
+///
+/// Falls back to `~/Desktop` only when the known-folder lookup yields nothing
+/// (e.g. a minimal Linux install with no `user-dirs.dirs`), where any choice is
+/// a guess and the English default is the least surprising.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub(crate) fn desktop_dir() -> crate::error::CliResult<std::path::PathBuf> {
+    if let Some(dir) =
+        directories::UserDirs::new().and_then(|d| d.desktop_dir().map(std::path::Path::to_path_buf))
+    {
+        return Ok(dir);
+    }
+    Ok(db::home_dir()?.join("Desktop"))
+}
+
 #[cfg(target_os = "macos")]
 fn macos_app_bundle() -> crate::error::CliResult<std::path::PathBuf> {
-    Ok(db::home_dir()?.join("Desktop/TofuPilot.app"))
+    Ok(desktop_dir()?.join("TofuPilot.app"))
 }
 
 #[cfg(target_os = "macos")]
@@ -796,7 +817,7 @@ fn apply_desktop_icon_macos(enable: bool) -> crate::error::CliResult<()> {
     let bundle = macos_app_bundle()?;
     // Legacy .command script artifact; remove unconditionally so upgrades
     // don't leave two icons on the user's desktop.
-    let legacy = db::home_dir()?.join("Desktop/TofuPilot.command");
+    let legacy = desktop_dir()?.join("TofuPilot.command");
     if legacy.exists() {
         let _ = std::fs::remove_file(&legacy);
     }
@@ -878,7 +899,7 @@ fn linux_icon_path() -> crate::error::CliResult<std::path::PathBuf> {
 fn apply_desktop_icon_linux(enable: bool) -> crate::error::CliResult<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let desktop_dir = db::home_dir()?.join("Desktop");
+    let desktop_dir = desktop_dir()?;
     let desktop_file = desktop_dir.join("tofupilot.desktop");
     let icon_path = linux_icon_path()?;
 
@@ -948,17 +969,6 @@ fn windows_icon_path() -> crate::error::CliResult<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_desktop_dir() -> crate::error::CliResult<std::path::PathBuf> {
-    // Resolve via SHGetKnownFolderPath(FOLDERID_Desktop) so we follow
-    // OneDrive Known Folder Move redirects. The naive `USERPROFILE\Desktop`
-    // path is stale on any machine where the user moved Desktop into
-    // OneDrive, and `WshShell.SaveAs` then throws DirectoryNotFoundException.
-    directories::UserDirs::new()
-        .and_then(|d| d.desktop_dir().map(std::path::Path::to_path_buf))
-        .ok_or_else(|| "Could not resolve Desktop folder".into())
-}
-
-#[cfg(target_os = "windows")]
 fn windows_start_menu_dir() -> crate::error::CliResult<std::path::PathBuf> {
     let appdata = std::env::var_os("APPDATA")
         .map(std::path::PathBuf::from)
@@ -1016,7 +1026,7 @@ fn apply_launch_on_boot_windows(
 #[cfg(target_os = "windows")]
 fn apply_desktop_icon_windows(enable: bool) -> crate::error::CliResult<()> {
     let icon_path = windows_icon_path()?;
-    let desktop_lnk = windows_desktop_dir()?.join("TofuPilot.lnk");
+    let desktop_lnk = desktop_dir()?.join("TofuPilot.lnk");
     let start_lnk = windows_start_menu_dir()?.join("TofuPilot.lnk");
 
     if !enable {

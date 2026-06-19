@@ -603,7 +603,9 @@ async fn upload_attachment(
     // upload id and a duplicate run-attachment row. Treat a finalize miss
     // as a soft warning (size/type stay null, bytes are still there).
     let finalized = http
-        .post(format!("{base_url}/api/v2/attachments/{upload_id}/finalize"))
+        .post(format!(
+            "{base_url}/api/v2/attachments/{upload_id}/finalize"
+        ))
         .bearer(api_key)
         .send()
         .await;

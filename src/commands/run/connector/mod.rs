@@ -811,27 +811,27 @@ pub async fn run_openhtf(
                             // pending request or emit a `ui_request` the
                             // operator/agent would be expected to answer.
                         } else {
-                        {
-                            let mut guard = agent.pending.write().await;
-                            guard.insert(
-                                prompt_id.clone(),
-                                current_phase_key.clone(),
-                                request_data.config.components.clone(),
-                            );
-                        }
-                        let payload_components: Vec<AgentUiComponent> = request_data
-                            .config
-                            .components
-                            .iter()
-                            .map(super::agent_proto::events::to_agent_ui_component)
-                            .collect();
-                        agent.emitter.enqueue(CliEvent::UiRequest {
-                            request_id: prompt_id.clone(),
-                            phase_key: current_phase_key.clone(),
-                            phase_description: Some(message.clone()),
-                            requires_input: true,
-                            components: payload_components,
-                        });
+                            {
+                                let mut guard = agent.pending.write().await;
+                                guard.insert(
+                                    prompt_id.clone(),
+                                    current_phase_key.clone(),
+                                    request_data.config.components.clone(),
+                                );
+                            }
+                            let payload_components: Vec<AgentUiComponent> = request_data
+                                .config
+                                .components
+                                .iter()
+                                .map(super::agent_proto::events::to_agent_ui_component)
+                                .collect();
+                            agent.emitter.enqueue(CliEvent::UiRequest {
+                                request_id: prompt_id.clone(),
+                                phase_key: current_phase_key.clone(),
+                                phase_description: Some(message.clone()),
+                                requires_input: true,
+                                components: payload_components,
+                            });
                         }
                     }
 

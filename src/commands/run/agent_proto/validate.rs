@@ -394,8 +394,16 @@ mod tests {
             key: key.into(),
             bind: Some(bind.into()),
             options: Some(vec![
-                UiOption { label: "A".into(), value: "A".into(), image: None },
-                UiOption { label: "B".into(), value: "B".into(), image: None },
+                UiOption {
+                    label: "A".into(),
+                    value: "A".into(),
+                    image: None,
+                },
+                UiOption {
+                    label: "B".into(),
+                    value: "B".into(),
+                    image: None,
+                },
             ]),
             ..UiComponent::new(ComponentType::Radio)
         }
@@ -406,7 +414,10 @@ mod tests {
         // An agent-driven run must record the operator answer as a
         // measurement, not just pass the raw value through. The engine
         // reads only `__bound_measurements__`.
-        let comps = vec![radio("motor_type_measure", "measurements.motor_type_measure")];
+        let comps = vec![radio(
+            "motor_type_measure",
+            "measurements.motor_type_measure",
+        )];
         let mut values = HashMap::new();
         values.insert(
             "motor_type_measure".to_string(),
@@ -450,7 +461,10 @@ mod tests {
         // kiosk/TUI (trimmed), not the raw padded input.
         let comps = vec![text("serial")];
         let mut values = HashMap::new();
-        values.insert("serial".to_string(), serde_json::Value::String("  SN-1  ".into()));
+        values.insert(
+            "serial".to_string(),
+            serde_json::Value::String("  SN-1  ".into()),
+        );
         let out = validate_and_coerce(&comps, values).expect("valid");
         assert_eq!(out.get("serial").map(String::as_str), Some("SN-1"));
         let v: serde_json::Value =
@@ -466,7 +480,10 @@ mod tests {
         };
         let mut values = HashMap::new();
         // lowercase violates the pattern — must be rejected like the TUI.
-        values.insert("serial".to_string(), serde_json::Value::String("sn 1".into()));
+        values.insert(
+            "serial".to_string(),
+            serde_json::Value::String("sn 1".into()),
+        );
         let err = validate_and_coerce(&[comp], values).expect_err("pattern violation rejected");
         assert!(matches!(err.reason, UiErrorReason::InvalidValue));
     }
