@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "0.26.13"
+version = "0.26.14"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
