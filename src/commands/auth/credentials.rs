@@ -160,6 +160,38 @@ pub fn load_station() -> Option<Credentials> {
         .or_else(|| read_file(&credentials_path()).filter(|c| c.installation_id.is_some()))
 }
 
+/// Resolve the credential for the *station-scoped* `pull` command. `pull`
+/// hits a station-only route on the server, which requires the request to
+/// carry a station key (the server rejects user keys with 403). Station-first
+/// so a leftover user `credentials.json` — written by a prior `tofupilot
+/// login`/`deploy` on the same machine — can never shadow the station
+/// identity. Falls back to `load()` so a pure-user invocation still resolves
+/// *some* key and the server returns its own (clearer) error.
+///
+/// (The other station-only route, `/api/cli/config`, is never fetched through
+/// this loader: its CLI caller `sync_config` is always handed station creds
+/// directly, so there's nothing to shadow.)
+///
+/// Regression history: before the credential-file split (#1573) a single
+/// `credentials.json` held whichever identity logged in last, so a station
+/// re-login fixed pull. After the split, `pull` kept calling the user-first
+/// `load()`, so a stale user file permanently shadowed the station key and a
+/// re-login (which writes `station.json`) no longer helped. This loader is
+/// the fix.
+pub fn load_station_first() -> Option<Credentials> {
+    pick_station_first(load_station(), load())
+}
+
+/// Precedence rule for [`load_station_first`], split out so it's unit-testable
+/// without touching the real `~/.tofupilot`. Station identity wins; user creds
+/// are the fallback.
+fn pick_station_first(
+    station: Option<Credentials>,
+    user: Option<Credentials>,
+) -> Option<Credentials> {
+    station.or(user)
+}
+
 /// Canonical "not logged in" message. Centralized so a UX tweak lands
 /// in one place across every command that requires auth.
 pub const NOT_LOGGED_IN: &str = "Not logged in. Run `tofupilot login` first.";
@@ -168,6 +200,13 @@ pub const NOT_LOGGED_IN: &str = "Not logged in. Run `tofupilot login` first.";
 /// error carries [`NOT_LOGGED_IN`]; callers typically log it and exit.
 pub fn require() -> crate::error::CliResult<Credentials> {
     load().ok_or_else(|| crate::error::CliError::msg(NOT_LOGGED_IN))
+}
+
+/// `load_station_first()` + canonical error, for station-scoped commands
+/// (`pull`, `config`). See [`load_station_first`] for why these must not go
+/// through the user-first [`require`].
+pub fn require_station_first() -> crate::error::CliResult<Credentials> {
+    load_station_first().ok_or_else(|| crate::error::CliError::msg(NOT_LOGGED_IN))
 }
 
 /// Clear both credential slots. Logout is a full reset, so it removes the
@@ -310,5 +349,27 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // The regression #1573 introduced: on a machine with BOTH a station and a
+    // stale user login, `pull` (station-only endpoint) must send the STATION
+    // key. User-first selection would 403. Station wins.
+    #[test]
+    fn station_first_prefers_station_over_stale_user() {
+        let picked = pick_station_first(Some(station("inst_1")), Some(creds("https://x.app")));
+        assert_eq!(picked.unwrap().installation_id.as_deref(), Some("inst_1"));
+    }
+
+    // A pure-user machine (no station.json) still resolves the user key so the
+    // server returns its own clearer error rather than "not logged in".
+    #[test]
+    fn station_first_falls_back_to_user_when_no_station() {
+        let picked = pick_station_first(None, Some(creds("https://x.app")));
+        assert_eq!(picked.unwrap().installation_id, None);
+    }
+
+    #[test]
+    fn station_first_none_when_neither_present() {
+        assert!(pick_station_first(None, None).is_none());
     }
 }

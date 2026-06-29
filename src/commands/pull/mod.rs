@@ -54,7 +54,10 @@ struct PullDeployment {
 /// mode must call `run_with(json_mode, Some(&publisher))` instead, threading
 /// in a borrowed `PublishHandle` cloned off the long-lived StreamClient.
 pub async fn run_cmd(json_mode: bool) -> i32 {
-    let creds = match credentials::require() {
+    // `pull` hits a station-only endpoint, so resolve the station identity
+    // first — a stale user `credentials.json` must not shadow it (see
+    // `credentials::load_station_first`).
+    let creds = match credentials::require_station_first() {
         Ok(c) => c,
         Err(e) => {
             crate::log::error(&e.to_string());
@@ -104,13 +107,27 @@ pub async fn run_with(
     // events without waiting for a fresh `hello` frame on reconnect.
     local_ws: Option<&std::sync::Arc<crate::local_ws::Server>>,
 ) -> i32 {
-    let creds = match credentials::require() {
+    // Station-only endpoint: prefer the station identity. See
+    // `credentials::load_station_first`.
+    let creds = match credentials::require_station_first() {
         Ok(c) => c,
         Err(e) => {
             crate::log::error(&e.to_string());
             return 1;
         }
     };
+
+    // Self-heal visibility: if a stale user login is also on disk, it would
+    // have shadowed the station key before the station-first switch. Tell the
+    // operator we ignored it so a lingering `credentials.json` doesn't look
+    // like the cause of a future problem.
+    if creds.installation_id.is_some()
+        && credentials::load().is_some_and(|u| u.installation_id.is_none())
+    {
+        crate::log::info(
+            "Using station identity for pull; a stale user login in credentials.json was ignored.",
+        );
+    }
 
     let base = creds.base();
 
