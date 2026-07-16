@@ -38,6 +38,9 @@ sha2 = "0.10"
 specta = { version = "2.0.0-rc.22", features = ["chrono", "uuid"], optional = true }
 station-protocol = { path = "../station-protocol" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = []
 specta = ["dep:specta"]

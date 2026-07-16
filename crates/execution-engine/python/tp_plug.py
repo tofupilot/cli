@@ -191,7 +191,8 @@ class PlugHandler:
             spec.loader.exec_module(module)
 
             plug_class = getattr(module, class_name)
-            self.plug_instance = plug_class()
+            config = self.plug_config.get("config") or {}
+            self.plug_instance = plug_class(**config)
 
         except Exception as e:
             error_msg = (

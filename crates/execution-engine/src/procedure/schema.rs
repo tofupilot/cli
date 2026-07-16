@@ -806,6 +806,10 @@ pub struct PlugDefinitionYaml {
         deserialize_with = "serde_trim::string_trim"
     )]
     pub description: String,
+    /// Keyword arguments passed to the plug class `__init__` at instantiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "specta", specta(skip))]
+    pub config: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 // Runtime representation (key always present)
@@ -829,6 +833,11 @@ pub struct PlugDefinition {
     #[validate(length(max = 50000))]
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+
+    /// Keyword arguments passed to the plug class `__init__` at instantiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "specta", specta(skip))]
+    pub config: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl From<PlugDefinitionYaml> for PlugDefinition {
@@ -843,6 +852,7 @@ impl From<PlugDefinitionYaml> for PlugDefinition {
             scope: yaml.scope.unwrap_or(Scope::Each),
             python: yaml.python,
             description: yaml.description,
+            config: yaml.config,
         }
     }
 }
@@ -860,6 +870,7 @@ impl PlugDefinition {
             scope: Some(self.scope),
             python: self.python.clone(),
             description: self.description.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -879,7 +890,8 @@ impl PlugDefinition {
         let (file_path, callable_name) = self.python.parse(project_dir)?;
         Ok(serde_json::json!({
             "file": file_path.to_string_lossy(),
-            "class": callable_name
+            "class": callable_name,
+            "config": self.config,
         }))
     }
 
@@ -2185,6 +2197,71 @@ main:
         // too many
         let many: Vec<String> = (0..51).map(|i| format!("k{i}")).collect();
         assert!(validate_metadata_keys(many.iter().map(|s| s.as_str()), "metadata").is_err());
+    }
+
+    #[test]
+    fn test_plug_config_parses_and_roundtrips() {
+        let yaml = r#"
+key: rigol_a
+name: Rigol A
+python: instruments.rigol:RigolDP832
+config:
+  address: "192.168.1.100"
+  channel: 1
+"#;
+        let plug: PlugDefinition =
+            serde_yaml::from_str(yaml).expect("plug with config should parse");
+
+        let config = plug.config.as_ref().expect("config should be present");
+        assert_eq!(config.get("address").unwrap(), "192.168.1.100");
+        assert_eq!(config.get("channel").unwrap(), 1);
+
+        // config survives the roundtrip back to the YAML representation
+        let back = plug.to_yaml();
+        assert_eq!(
+            back.config.as_ref().and_then(|c| c.get("channel")),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    #[test]
+    fn test_plug_without_config_is_none() {
+        let yaml = r#"
+name: Power Supply
+python: instruments.power_supply:PowerSupply
+"#;
+        let plug: PlugDefinition =
+            serde_yaml::from_str(yaml).expect("plug without config should parse");
+        assert!(plug.config.is_none());
+    }
+
+    #[test]
+    fn test_to_config_json_emits_config() {
+        // to_config_json feeds the plug runtime; assert the config it emits is
+        // exactly the parsed mapping. PythonSpec::parse checks the file exists,
+        // so back the spec with a real file in a temp project dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("rigol.py"), "class Rigol:\n    pass\n")
+            .expect("write plug file");
+
+        let with_config: PlugDefinition = serde_yaml::from_str(
+            "name: Rigol\npython: rigol:Rigol\nconfig:\n  address: \"10.0.0.1\"\n  channel: 2\n",
+        )
+        .expect("parse plug with config");
+        let json = with_config
+            .to_config_json(dir.path())
+            .expect("to_config_json");
+        assert_eq!(json["config"]["address"], "10.0.0.1");
+        assert_eq!(json["config"]["channel"], 2);
+
+        // a config-less plug emits a null config, which the runtime treats as {}
+        let without_config: PlugDefinition =
+            serde_yaml::from_str("name: Rigol\npython: rigol:Rigol\n")
+                .expect("parse plug without config");
+        let json = without_config
+            .to_config_json(dir.path())
+            .expect("to_config_json");
+        assert!(json["config"].is_null());
     }
 
     #[test]
