@@ -84,6 +84,22 @@ pub struct Worker {
     /// always set this (deterministic `<package_dir>/venv/python`); legacy
     /// callers (Studio, tests) leave it `None` and keep the walk-up.
     python_path: Option<PathBuf>,
+    /// When `Some(port)`, the worker subprocess gets TP_DEBUG +
+    /// TP_DEBUG_PORT so tp_worker.py starts the debugpy listener. Only
+    /// set on pool workers; respawn and teardown workers stay None.
+    debug_port: Option<u16>,
+}
+
+/// Build the subprocess env for a worker. When `debug_port` is set the
+/// worker gets `TP_DEBUG=1` + `TP_DEBUG_PORT`, which makes tp_worker.py
+/// start a debugpy listener. Pure so the env contract is unit-testable.
+fn build_worker_env(worker_id: usize, debug_port: Option<u16>) -> Vec<(String, String)> {
+    let mut env_vars = vec![("WORKER_ID".to_string(), worker_id.to_string())];
+    if let Some(port) = debug_port {
+        env_vars.push(("TP_DEBUG".to_string(), "1".to_string()));
+        env_vars.push(("TP_DEBUG_PORT".to_string(), port.to_string()));
+    }
+    env_vars
 }
 
 impl Worker {
@@ -101,7 +117,15 @@ impl Worker {
             inner: Arc::new(RwLock::new(None)),
             procedure_dir,
             python_path,
+            debug_port: None,
         }
+    }
+
+    /// Builder: mark this worker as a debug worker (adds TP_DEBUG +
+    /// TP_DEBUG_PORT to the subprocess env at spawn). `None` = no debug.
+    pub fn with_debug_port(mut self, debug_port: Option<u16>) -> Self {
+        self.debug_port = debug_port;
+        self
     }
 
     /// Bundled worker script, embedded at compile time.
@@ -145,12 +169,14 @@ impl Worker {
 
         let worker_id = self.id;
 
+        let env_vars = build_worker_env(worker_id, self.debug_port);
+
         let process = ChildProcess::spawn(
             python_cmd,
             worker_script,
             vec![abs_procedure_dir.to_string_lossy().to_string()],
             Some(&abs_procedure_dir),
-            vec![("WORKER_ID".to_string(), worker_id.to_string())],
+            env_vars,
             Some(Box::new(move |stderr| {
                 Self::spawn_stderr_reader_static(worker_id, stderr);
             })),
@@ -1220,6 +1246,40 @@ fn merge_unit_info(
             base
         }
         None => ui_unit,
+    }
+}
+
+#[cfg(test)]
+mod debug_env_tests {
+    use super::build_worker_env;
+
+    #[test]
+    fn no_debug_port_sets_only_worker_id() {
+        let env = build_worker_env(3, None);
+        assert_eq!(env, vec![("WORKER_ID".to_string(), "3".to_string())]);
+        assert!(!env.iter().any(|(k, _)| k == "TP_DEBUG"));
+    }
+
+    #[test]
+    fn debug_port_sets_tp_debug_and_port() {
+        let env = build_worker_env(0, Some(5678));
+        assert!(env.contains(&("TP_DEBUG".to_string(), "1".to_string())));
+        assert!(env.contains(&("TP_DEBUG_PORT".to_string(), "5678".to_string())));
+    }
+
+    #[test]
+    fn debug_port_honors_custom_port() {
+        let env = build_worker_env(0, Some(9999));
+        assert!(env.contains(&("TP_DEBUG_PORT".to_string(), "9999".to_string())));
+    }
+
+    #[test]
+    fn with_debug_port_builder_threads_into_env() {
+        // Pool workers opt in; the default (teardown/respawn) stays clean.
+        let plain = super::Worker::new(0, std::path::PathBuf::from("/tmp"));
+        assert_eq!(plain.debug_port, None);
+        let dbg = plain.with_debug_port(Some(5678));
+        assert_eq!(dbg.debug_port, Some(5678));
     }
 }
 

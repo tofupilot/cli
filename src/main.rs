@@ -139,6 +139,15 @@ enum Commands {
         /// Ignored for `--deployment` runs, which always upload.
         #[arg(long)]
         upload: bool,
+        /// Run in debug mode: start a debugpy listener in the Python
+        /// worker, force a single worker, and disable phase timeouts so
+        /// you can attach a debugger (e.g. VS Code) and set breakpoints
+        /// in your phase code. Requires `debugpy` in the procedure venv.
+        #[arg(long)]
+        debug: bool,
+        /// Port for the debugpy listener when `--debug` is set.
+        #[arg(long, value_name = "PORT", default_value_t = 5678, value_parser = clap::value_parser!(u16).range(1..))]
+        debug_port: u16,
     },
     /// Link a local procedure directory to a remote dashboard procedure
     Link {
@@ -414,11 +423,19 @@ async fn main() {
             no_kiosk,
             no_bootstrap,
             upload,
+            debug,
+            debug_port,
         }) => {
             startup();
-            let agent_opts = commands::run::AgentProtoOptions {
-                ui_values: ui_values.clone(),
-                ui_timeout_secs: ui_timeout,
+            let run_opts = commands::run::RunOptions {
+                agent: commands::run::AgentProtoOptions {
+                    ui_values: ui_values.clone(),
+                    ui_timeout_secs: ui_timeout,
+                },
+                debug: commands::run::DebugOptions {
+                    enabled: debug,
+                    port: debug_port,
+                },
             };
             // Tri-state UI overrides: explicit flag wins, otherwise fall
             // back to station config in `commands::run::run`.
@@ -466,7 +483,7 @@ async fn main() {
                     source,
                     json_mode,
                     creds.as_ref(),
-                    agent_opts,
+                    run_opts,
                     tui_override,
                     kiosk_override,
                     !no_bootstrap,

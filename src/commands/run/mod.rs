@@ -144,6 +144,24 @@ impl Drop for RunHandle {
 /// For `tofupilot run` (standalone), use `run()` which calls start() + awaits.
 pub type AgentProtoOptions = agent_proto::Options;
 
+/// Debug-run options. When `enabled`, the Python worker starts a debugpy
+/// listener on `port`, the pool is forced to a single worker, and phase
+/// timeouts are disabled so a breakpoint pause isn't killed.
+#[derive(Clone, Debug, Default)]
+pub struct DebugOptions {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+/// Umbrella for per-run options threaded from the CLI into the engine.
+/// The agent protocol keeps its own name; new run-scoped flags land here
+/// instead of growing call signatures.
+#[derive(Clone, Default)]
+pub struct RunOptions {
+    pub agent: AgentProtoOptions,
+    pub debug: DebugOptions,
+}
+
 /// Source of the procedure to run.
 #[derive(Clone, Debug)]
 pub enum RunSource {
@@ -549,7 +567,7 @@ pub async fn start(
     json_mode: bool,
     creds: Option<&Credentials>,
     publisher: Option<EventPublisher>,
-    agent_opts: AgentProtoOptions,
+    run_opts: RunOptions,
     tui_presence: Option<TuiPresenceIdentity>,
     tui_override: Option<bool>,
     kiosk_override: Option<bool>,
@@ -874,7 +892,7 @@ pub async fn start(
         tui_enabled,
         procedure_id,
         &package_dir,
-        &agent_opts,
+        &run_opts.agent,
     )
     .await;
     let (agent_ctx, agent_stdin_handle, agent_abort_rx) = match agent_init {
@@ -1191,6 +1209,7 @@ pub async fn start(
             reuse_unit,
             operated_by,
             cancel_rx,
+            run_opts.debug.clone(),
         );
         tokio::pin!(run_fut);
 
@@ -1284,7 +1303,7 @@ pub async fn run_cmd(
     source: RunSource,
     json_mode: bool,
     creds: Option<&Credentials>,
-    agent_opts: AgentProtoOptions,
+    run_opts: RunOptions,
     tui_override: Option<bool>,
     kiosk_override: Option<bool>,
     bootstrap_enabled: bool,
@@ -1311,7 +1330,7 @@ pub async fn run_cmd(
         json_mode,
         creds,
         publisher,
-        agent_opts,
+        run_opts,
         // Standalone `tofupilot run` has no stable identity to stamp;
         // let the TUI only receive presence, never publish its own.
         None,
@@ -1689,7 +1708,17 @@ async fn run_test(
     // `wait_force` (escalation). One channel, one source of truth —
     // replaces the prior trio of oneshot pairs.
     cancel_rx: cancel::Receiver,
+    // Debug-run options (only the YAML/native engine path honors them).
+    debug: DebugOptions,
 ) -> i32 {
+    // Debug mode is only wired through the native YAML engine. Warn
+    // rather than silently ignore it on connector frameworks.
+    if debug.enabled && !matches!(framework, Framework::Yaml(_)) {
+        crate::log::warn(
+            "--debug is only supported for TofuPilot Framework (YAML) procedures; \
+             ignoring it for this run. Start debugpy from your test code instead.",
+        );
+    }
     match framework {
         Framework::Yaml(procedure_yaml) => {
             // The engine needs the package dir so file-path module references
@@ -1713,6 +1742,7 @@ async fn run_test(
                 reuse_unit,
                 operated_by,
                 cancel_rx,
+                debug.clone(),
             )
             .await;
 

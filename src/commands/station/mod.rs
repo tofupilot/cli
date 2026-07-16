@@ -1461,7 +1461,8 @@ async fn try_start_run(
             json_mode,
             Some(creds),
             Some(publisher),
-            crate::commands::run::AgentProtoOptions::default(),
+            // Station runs never enable debug mode.
+            crate::commands::run::RunOptions::default(),
             tui_presence_identity,
             // Station mode honours station config, never overrides.
             None,

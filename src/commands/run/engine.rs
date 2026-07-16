@@ -1476,6 +1476,9 @@ pub async fn run_yaml_procedure(
     // `force_kill_immediate`). The watch lets the same receiver
     // observe escalation from Stop → Kill without a second oneshot.
     cancel_rx: super::cancel::Receiver,
+    // Debug run: single worker, phase timeouts disabled, TP_DEBUG set on
+    // the worker so tp_worker.py starts a debugpy listener.
+    debug: super::DebugOptions,
 ) -> (i32, Option<QueuedRun>) {
     let procedure_def = match load_procedure_definition(procedure_yaml) {
         Ok(def) => def,
@@ -1493,11 +1496,17 @@ pub async fn run_yaml_procedure(
         }
     };
 
-    let worker_count = procedure_def
-        .execution
-        .as_ref()
-        .map(|e| e.workers)
-        .unwrap_or(4);
+    // Debug mode forces a single worker so the fixed debug port doesn't
+    // collide across the pool.
+    let worker_count = if debug.enabled {
+        1
+    } else {
+        procedure_def
+            .execution
+            .as_ref()
+            .map(|e| e.workers)
+            .unwrap_or(4)
+    };
 
     let strategy = procedure_def
         .execution
@@ -1581,7 +1590,22 @@ pub async fn run_yaml_procedure(
         orchestrator_execution_id,
         run_id,
         procedure_def,
+        if debug.enabled {
+            Some(debug.port)
+        } else {
+            None
+        },
     );
+
+    // Worker stderr is not surfaced on the CLI, so the "waiting for
+    // debugger" notice must come from here. The worker blocks in
+    // wait_for_client() until an IDE attaches on this port.
+    if debug.enabled {
+        crate::log::info(&format!(
+            "Debug mode: waiting for a debugger to attach on localhost:{} (VS Code: \"Python: Attach\"). Phase timeouts are disabled.",
+            debug.port
+        ));
+    }
 
     let sink = CliEventSink::new(
         event_tx.clone(),

@@ -15,10 +15,10 @@ use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::job::{JobResult, JobStatus, Outcome};
-use crate::state::OrchestratorState;
-use crate::worker::Worker;
 use crate::plugs::manager::ResourceManager;
 use crate::procedure::schema::ProcedureDefinition;
+use crate::state::OrchestratorState;
+use crate::worker::Worker;
 
 // Re-export ExecutionStrategy from schema instead of duplicating
 pub use crate::procedure::schema::ExecutionStrategy;
@@ -126,6 +126,10 @@ pub struct Orchestrator {
     pub(super) start_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) end_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) initial_unit_infos: HashMap<String, crate::unit::UnitInfo>,
+    /// Debug run: `Some(port)` → pool workers carry TP_DEBUG/TP_DEBUG_PORT
+    /// and the Rust-side phase timeout wrapper is skipped so breakpoint
+    /// pauses aren't killed.
+    pub(super) debug_port: Option<u16>,
 }
 
 impl Orchestrator {
@@ -145,6 +149,7 @@ impl Orchestrator {
             execution_id,
             run_id,
             procedure_definition,
+            None,
         )
     }
 
@@ -161,14 +166,14 @@ impl Orchestrator {
         execution_id: String,
         run_id: String,
         procedure_definition: ProcedureDefinition,
+        debug_port: Option<u16>,
     ) -> Self {
         let mut workers = Vec::new();
         for i in 0..worker_count {
-            workers.push(Worker::new_with_python(
-                i,
-                procedure_dir.clone(),
-                python_path.clone(),
-            ));
+            workers.push(
+                Worker::new_with_python(i, procedure_dir.clone(), python_path.clone())
+                    .with_debug_port(debug_port),
+            );
         }
 
         let num_workers = workers.len();
@@ -206,6 +211,7 @@ impl Orchestrator {
             start_time: None,
             end_time: None,
             initial_unit_infos: HashMap::new(),
+            debug_port,
         }
     }
 

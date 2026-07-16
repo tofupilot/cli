@@ -27,6 +27,91 @@ _original_stderr = sys.__stderr__
 
 
 # ============================================================================
+# Debug mode (debugpy)
+# ============================================================================
+# Enabled by TP_DEBUG=1 (set per-spawn on pool workers by the debug run path).
+# Contract documented in private/design/debugpy-support.md.
+_debugpy_started = False
+_debugpy_attempted = False
+
+
+def _debug_enabled() -> bool:
+    # Strict "1" match: a stray TP_DEBUG=0 / TP_DEBUG=false in the
+    # environment must NOT enable debug mode.
+    return os.environ.get("TP_DEBUG") == "1"
+
+
+def _maybe_start_debugpy():
+    """Start the debugpy DAP listener once, before the phase-serving loop.
+
+    Idempotent: safe to call more than once per process. Must be called
+    AFTER the transport port handshake so the spawning side isn't blocked
+    waiting for a port line while we block waiting for the IDE.
+    """
+    global _debugpy_started, _debugpy_attempted
+    if not _debug_enabled() or _debugpy_attempted:
+        return
+    # Guard re-entry separately from success: _debugpy_started must flip
+    # only after a debugger is actually listening, because the phase
+    # timeout is disabled off _debugpy_started. If the import or listen
+    # fails, _debugpy_started stays False so the timeout stays enforced.
+    _debugpy_attempted = True
+
+    port = 5678
+    try:
+        port = int(os.environ.get("TP_DEBUG_PORT", "5678"))
+    except ValueError:
+        pass
+
+    try:
+        import debugpy
+    except ImportError:
+        print(
+            "TP_DEBUG set but debugpy is not installed - run: uv add debugpy",
+            file=_original_stderr,
+            flush=True,
+        )
+        return
+
+    try:
+        debugpy.listen(("localhost", port))
+    except RuntimeError:
+        # A phase module already called debugpy.listen() itself.
+        print(
+            "debugpy is already listening - remove your manual "
+            "debugpy.listen() call or unset TP_DEBUG",
+            file=_original_stderr,
+            flush=True,
+        )
+        return
+    except OSError as e:
+        # Port already bound by another process, etc.
+        print(
+            f"debugpy could not listen on localhost:{port}: {e}",
+            file=_original_stderr,
+            flush=True,
+        )
+        return
+
+    print(f"waiting for debugger on localhost:{port} ...", file=_original_stderr, flush=True)
+    debugpy.wait_for_client()
+    _debugpy_started = True
+
+
+def _debug_this_thread():
+    """Enable debugpy tracing on the current (phase) thread. No-op unless
+    debug mode is on and debugpy is importable/listening."""
+    if not _debug_enabled() or not _debugpy_started:
+        return
+    try:
+        import debugpy
+
+        debugpy.debug_this_thread()
+    except Exception:
+        pass
+
+
+# ============================================================================
 # Logging (inlined from tp_logs.py)
 # ============================================================================
 
@@ -1448,6 +1533,9 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
     phase_result_container = {"error": None, "result": None}
 
     def run_phase():
+        # Phases run on this spawned thread, not the main thread, so the
+        # debugger must be told to trace it explicitly.
+        _debug_this_thread()
         try:
             is_file_path = "/" in module_name or "\\" in module_name
 
@@ -1660,7 +1748,15 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         thread = threading.Thread(target=run_phase, daemon=False)
         thread.start()
 
-        timeout_seconds = timeout_ms / 1000.0 if timeout_ms else None
+        # Disable the phase timeout only when debugpy is actually
+        # listening (not merely when TP_DEBUG is set) so a breakpoint
+        # pause isn't killed. Keying off _debugpy_started keeps this in
+        # lockstep with the Rust timeout-skip: a worker without a live
+        # debugger (import failed, or a crash-respawn without TP_DEBUG)
+        # keeps its timeout enforced on both sides.
+        timeout_seconds = None if _debugpy_started else (
+            timeout_ms / 1000.0 if timeout_ms else None
+        )
 
         start_time = time.time()
         while thread.is_alive():
@@ -1934,6 +2030,11 @@ def serve(procedure_dir: Path):
     # Print port for Rust to discover
     print(f"NDJSON_PORT:{port}", flush=True, file=original_stdout)
     print(f"NDJSON worker listening on port {port}", file=_original_stderr)
+
+    # Start the debugger listener AFTER the port handshake: the Rust side
+    # reads NDJSON_PORT before connecting, and per-job connections queue in
+    # the listen() backlog while we block in wait_for_client().
+    _maybe_start_debugpy()
 
     try:
         while True:
