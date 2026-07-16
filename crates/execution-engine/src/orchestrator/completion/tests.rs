@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod outcome_resolver_tests {
     use crate::job::{Job, JobResult, JobStatus, Outcome, PhaseResult, RuntimeType};
-    use crate::orchestrator::completion::outcome_resolver::resolve_outcome;
     use crate::measurements::types::{Measurement, MeasurementValue};
+    use crate::orchestrator::completion::outcome_resolver::resolve_outcome;
     use crate::procedure::schema::{StageScope, ValidatorOutcome, ValidatorSpec};
     use std::collections::HashSet;
     use uuid::Uuid;
@@ -76,6 +76,8 @@ mod outcome_resolver_tests {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -393,6 +395,8 @@ mod next_action_tests {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -608,10 +612,12 @@ mod next_action_tests {
 #[cfg(test)]
 mod integration_tests {
     use crate::job::{Job, JobResult, JobStatus, Outcome, PhaseResult, RuntimeType};
+    use crate::measurements::types::{Measurement, MeasurementValue};
     use crate::orchestrator::completion::next_action::determine_next_action;
     use crate::orchestrator::completion::outcome_resolver::resolve_outcome;
-    use crate::measurements::types::{Measurement, MeasurementValue};
-    use crate::procedure::schema::{PhaseDefinition, PhaseNextAction, StageScope, ThenConfig, ValidatorOutcome, ValidatorSpec};
+    use crate::procedure::schema::{
+        PhaseDefinition, PhaseNextAction, StageScope, ThenConfig, ValidatorOutcome, ValidatorSpec,
+    };
     use std::collections::HashSet;
     use uuid::Uuid;
 
@@ -685,6 +691,8 @@ mod integration_tests {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -834,7 +842,10 @@ mod integration_tests {
 
         assert_eq!(outcome, Outcome::Stop);
         assert_eq!(next_action, PhaseNextAction::Stop);
-        assert!(job_result.error.is_none(), "Cancelled UI phase must not produce an error");
+        assert!(
+            job_result.error.is_none(),
+            "Cancelled UI phase must not produce an error"
+        );
     }
 
     /// Verify the old buggy behavior doesn't regress: if a cancelled UI phase

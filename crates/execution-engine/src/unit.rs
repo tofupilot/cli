@@ -15,6 +15,12 @@ pub struct UnitInfo {
     /// Sub-units as label -> serial_number mapping
     pub sub_units: Option<HashMap<String, String>>,
     pub status: String,
+    /// Operator-entered unit metadata from the identify form
+    /// (`unit.metadata.<key>` fields in the procedure YAML). Engine-side
+    /// only — deliberately not on the station-protocol wire `UnitInfo`;
+    /// the CLI merges it into the upload's `unit_metadata`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 /// Validate a single unit field against its configuration
@@ -108,7 +114,9 @@ fn validate_sub_unit_field(
             if trimmed.len() < min {
                 return Err(format!(
                     "{} must be at least {} characters (got {})",
-                    label, min, trimmed.len()
+                    label,
+                    min,
+                    trimmed.len()
                 ));
             }
         }
@@ -118,7 +126,9 @@ fn validate_sub_unit_field(
             if trimmed.len() > max {
                 return Err(format!(
                     "{} must be at most {} characters (got {})",
-                    label, max, trimmed.len()
+                    label,
+                    max,
+                    trimmed.len()
                 ));
             }
         }
@@ -148,9 +158,9 @@ fn validate_sub_units(
     let expected_count = sub_units_config.0.len();
 
     // Check that we have sub-units
-    let sub_units_map = sub_units.as_ref().ok_or_else(|| {
-        format!("Expected {} sub-units but got none", expected_count)
-    })?;
+    let sub_units_map = sub_units
+        .as_ref()
+        .ok_or_else(|| format!("Expected {} sub-units but got none", expected_count))?;
 
     // Check count matches
     if sub_units_map.len() != expected_count {
@@ -164,9 +174,9 @@ fn validate_sub_units(
     // Validate each configured sub-unit (using key for lookup, label for error messages)
     for item in &sub_units_config.0 {
         let key = item.get_key();
-        let serial = sub_units_map.get(&key).ok_or_else(|| {
-            format!("Missing sub-unit '{}' (key: {})", item.label, key)
-        })?;
+        let serial = sub_units_map
+            .get(&key)
+            .ok_or_else(|| format!("Missing sub-unit '{}' (key: {})", item.label, key))?;
 
         validate_sub_unit_field(&item.label, serial, &item.serial_number)?;
     }
@@ -211,6 +221,19 @@ pub fn validate_unit_info(
         validate_sub_units(&unit_info.sub_units, sub_units_config)?;
     }
 
+    // Validate operator-entered metadata values against their field
+    // configs. Metadata is never required — only present values are
+    // checked (min/max length, pattern).
+    if let Some(md_config) = &config.metadata {
+        if let Some(md_values) = &unit_info.metadata {
+            for (key, field_config) in md_config {
+                if let Some(value) = md_values.get(key) {
+                    validate_unit_field(key, &Some(value.clone()), field_config)?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -238,14 +261,18 @@ mod tests {
     fn test_validate_sub_unit_field_empty_fails() {
         let result = validate_sub_unit_field("Battery", "", &None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Battery serial number is required"));
+        assert!(result
+            .unwrap_err()
+            .contains("Battery serial number is required"));
     }
 
     #[test]
     fn test_validate_sub_unit_field_whitespace_only_fails() {
         let result = validate_sub_unit_field("Motor", "   ", &None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Motor serial number is required"));
+        assert!(result
+            .unwrap_err()
+            .contains("Motor serial number is required"));
     }
 
     #[test]
@@ -332,7 +359,9 @@ mod tests {
         });
         let result = validate_sub_unit_field("Battery", "INVALID", &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("does not match required format"));
+        assert!(result
+            .unwrap_err()
+            .contains("does not match required format"));
     }
 
     #[test]
@@ -358,15 +387,32 @@ mod tests {
     }
 
     fn create_sub_units_map(pairs: Vec<(&str, &str)>) -> Option<HashMap<String, String>> {
-        Some(pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        Some(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
 
     #[test]
     fn test_validate_sub_units_success() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Controller".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Controller".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
         let sub_units = create_sub_units_map(vec![
             ("battery", "BAT-001"),
@@ -380,35 +426,64 @@ mod tests {
     #[test]
     fn test_validate_sub_units_none_when_expected() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
         let result = validate_sub_units(&None, &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Expected 2 sub-units but got none"));
+        assert!(result
+            .unwrap_err()
+            .contains("Expected 2 sub-units but got none"));
     }
 
     #[test]
     fn test_validate_sub_units_wrong_count_too_few() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Controller".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Controller".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
-        let sub_units = create_sub_units_map(vec![
-            ("battery", "BAT-001"),
-            ("motor", "MOT-002"),
-        ]);
+        let sub_units = create_sub_units_map(vec![("battery", "BAT-001"), ("motor", "MOT-002")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Expected 3 sub-units but got 2"));
+        assert!(result
+            .unwrap_err()
+            .contains("Expected 3 sub-units but got 2"));
     }
 
     #[test]
     fn test_validate_sub_units_wrong_count_too_many() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
         let sub_units = create_sub_units_map(vec![
             ("battery", "BAT-001"),
@@ -417,34 +492,49 @@ mod tests {
         ]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Expected 2 sub-units but got 3"));
+        assert!(result
+            .unwrap_err()
+            .contains("Expected 2 sub-units but got 3"));
     }
 
     #[test]
     fn test_validate_sub_units_empty_serial_fails() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
-        let sub_units = create_sub_units_map(vec![
-            ("battery", "BAT-001"),
-            ("motor", ""),
-        ]);
+        let sub_units = create_sub_units_map(vec![("battery", "BAT-001"), ("motor", "")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Motor serial number is required"));
+        assert!(result
+            .unwrap_err()
+            .contains("Motor serial number is required"));
     }
 
     #[test]
     fn test_validate_sub_units_missing_label() {
         let config = create_config_with_items(vec![
-            SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-            SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+            SubUnitItemConfig {
+                label: "Battery".to_string(),
+                key: None,
+                serial_number: None,
+            },
+            SubUnitItemConfig {
+                label: "Motor".to_string(),
+                key: None,
+                serial_number: None,
+            },
         ]);
-        let sub_units = create_sub_units_map(vec![
-            ("battery", "BAT-001"),
-            ("wronglabel", "MOT-002"),
-        ]);
+        let sub_units =
+            create_sub_units_map(vec![("battery", "BAT-001"), ("wronglabel", "MOT-002")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing sub-unit 'Motor'"));
@@ -478,10 +568,7 @@ mod tests {
                 }),
             },
         ]);
-        let sub_units = create_sub_units_map(vec![
-            ("battery", "BAT-001"),
-            ("motor", "MOT-002"),
-        ]);
+        let sub_units = create_sub_units_map(vec![("battery", "BAT-001"), ("motor", "MOT-002")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_ok());
     }
@@ -510,20 +597,18 @@ mod tests {
 
     #[test]
     fn test_validate_sub_units_min_length_per_item() {
-        let config = create_config_with_items(vec![
-            SubUnitItemConfig {
-                label: "Battery".to_string(),
-                key: None,
-                serial_number: Some(UnitFieldConfig {
-                    min_length: Some(10),
-                    max_length: None,
-                    pattern: None,
-                    default_value: None,
-                    placeholder: None,
-                    description: None,
-                }),
-            },
-        ]);
+        let config = create_config_with_items(vec![SubUnitItemConfig {
+            label: "Battery".to_string(),
+            key: None,
+            serial_number: Some(UnitFieldConfig {
+                min_length: Some(10),
+                max_length: None,
+                pattern: None,
+                default_value: None,
+                placeholder: None,
+                description: None,
+            }),
+        }]);
         let sub_units = create_sub_units_map(vec![("battery", "BAT")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_err());
@@ -546,6 +631,7 @@ mod tests {
             batch_number: None,
             sub_units: Some(sub_units_map),
             status: "tested".to_string(),
+            metadata: None,
         };
         let config = Some(crate::procedure::UnitConfig {
             auto_identify: false,
@@ -554,6 +640,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         });
         let result = validate_unit_info(&unit_info, &config);
         assert!(result.is_ok());
@@ -572,6 +659,7 @@ mod tests {
             batch_number: None,
             sub_units: Some(sub_units_map),
             status: "tested".to_string(),
+            metadata: None,
         };
         let config = Some(crate::procedure::UnitConfig {
             auto_identify: false,
@@ -580,9 +668,18 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: Some(SubUnitsConfig(vec![
-                SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-                SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+                SubUnitItemConfig {
+                    label: "Battery".to_string(),
+                    key: None,
+                    serial_number: None,
+                },
+                SubUnitItemConfig {
+                    label: "Motor".to_string(),
+                    key: None,
+                    serial_number: None,
+                },
             ])),
+            metadata: None,
         });
         let result = validate_unit_info(&unit_info, &config);
         assert!(result.is_ok());
@@ -597,6 +694,7 @@ mod tests {
             batch_number: None,
             sub_units: None,
             status: "tested".to_string(),
+            metadata: None,
         };
         let config = Some(crate::procedure::UnitConfig {
             auto_identify: false,
@@ -605,9 +703,18 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: Some(SubUnitsConfig(vec![
-                SubUnitItemConfig { label: "Battery".to_string(), key: None, serial_number: None },
-                SubUnitItemConfig { label: "Motor".to_string(), key: None, serial_number: None },
+                SubUnitItemConfig {
+                    label: "Battery".to_string(),
+                    key: None,
+                    serial_number: None,
+                },
+                SubUnitItemConfig {
+                    label: "Motor".to_string(),
+                    key: None,
+                    serial_number: None,
+                },
             ])),
+            metadata: None,
         });
         let result = validate_unit_info(&unit_info, &config);
         assert!(result.is_err());
@@ -628,10 +735,7 @@ mod tests {
                 serial_number: None,
             },
         ]);
-        let sub_units = create_sub_units_map(vec![
-            ("battery", "BAT-001"),
-            ("motor", "MOT-002"),
-        ]);
+        let sub_units = create_sub_units_map(vec![("battery", "BAT-001"), ("motor", "MOT-002")]);
         let result = validate_sub_units(&sub_units, &config);
         assert!(result.is_ok());
     }

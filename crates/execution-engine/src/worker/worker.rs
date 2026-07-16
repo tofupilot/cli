@@ -10,8 +10,8 @@ use tokio::sync::RwLock;
 
 use crate::event_sink::{EventSink, ExecutionEvent};
 use crate::job::{Job, JobResult};
-use crate::protocol;
 use crate::plugs::process::ChildProcess;
+use crate::protocol;
 use crate::transport;
 
 /// Best-effort mimetype for an attachment from its filename. The
@@ -34,11 +34,7 @@ fn guess_attachment_mimetype(name: &str) -> Option<String> {
 /// `<uuid8>_<name>` filename and return the stored path. Mirrors the naming
 /// the removed ReportManager used so the kiosk `/attachments/*` route and the
 /// CLI upload queue resolve the same basename.
-fn store_attachment_bytes(
-    dir: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> std::io::Result<PathBuf> {
+fn store_attachment_bytes(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let stored_name = format!("{}_{}", &uuid::Uuid::new_v4().to_string()[..8], name);
     let dest = dir.join(stored_name);
@@ -50,11 +46,7 @@ fn store_attachment_bytes(
 /// `<uuid8>_<name>` naming. Uses `fs::copy` (kernel-level, reflink-capable on
 /// CoW filesystems) rather than read-into-RAM-then-write, so a large file
 /// (scope capture, video) never gets buffered whole in memory.
-fn copy_attachment_file(
-    dir: &Path,
-    name: &str,
-    source: &str,
-) -> std::io::Result<PathBuf> {
+fn copy_attachment_file(dir: &Path, name: &str, source: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let stored_name = format!("{}_{}", &uuid::Uuid::new_v4().to_string()[..8], name);
     let dest = dir.join(stored_name);
@@ -64,11 +56,11 @@ fn copy_attachment_file(
 
 /// Convert protocol Measurement to internal Measurement.
 /// Returns None if value cannot be parsed.
-fn try_measurement_from_protocol(m: protocol::Measurement) -> Option<crate::measurements::Measurement> {
+fn try_measurement_from_protocol(
+    m: protocol::Measurement,
+) -> Option<crate::measurements::Measurement> {
     let value = serde_json::from_value(m.value).ok()?;
-    let aggregations = m
-        .aggregations
-        .and_then(|v| serde_json::from_value(v).ok());
+    let aggregations = m.aggregations.and_then(|v| serde_json::from_value(v).ok());
     Some(crate::measurements::Measurement {
         name: m.name,
         value,
@@ -99,7 +91,11 @@ impl Worker {
         Self::new_with_python(id, procedure_dir, None)
     }
 
-    pub fn new_with_python(id: usize, procedure_dir: PathBuf, python_path: Option<PathBuf>) -> Self {
+    pub fn new_with_python(
+        id: usize,
+        procedure_dir: PathBuf,
+        python_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             id,
             inner: Arc::new(RwLock::new(None)),
@@ -201,7 +197,11 @@ impl Worker {
             };
 
             event_sink.emit(&ExecutionEvent::UiRequest(event_data));
-            log::debug!("Sent UI request {} for Python phase {}", request_id, job.phase_name);
+            log::debug!(
+                "Sent UI request {} for Python phase {}",
+                request_id,
+                job.phase_name
+            );
 
             Some((request_id, rx))
         } else if has_ui && !requires_user_input {
@@ -223,14 +223,13 @@ impl Worker {
         };
 
         // Build unit_info for NDJSON if available
-        let ndjson_unit_info = job.initial_unit_info.as_ref().map(|ui| {
-            protocol::UnitInfo {
-                serial_number: ui.serial_number.clone(),
-                part_number: ui.part_number.clone(),
-                revision_number: ui.revision_number.clone(),
-                batch_number: ui.batch_number.clone(),
-                sub_units: ui.sub_units.clone().unwrap_or_default(),
-            }
+        let ndjson_unit_info = job.initial_unit_info.as_ref().map(|ui| protocol::UnitInfo {
+            serial_number: ui.serial_number.clone(),
+            part_number: ui.part_number.clone(),
+            revision_number: ui.revision_number.clone(),
+            batch_number: ui.batch_number.clone(),
+            sub_units: ui.sub_units.clone().unwrap_or_default(),
+            metadata: ui.metadata.clone(),
         });
 
         // Build command. The Python worker doesn't read UI fields off
@@ -308,7 +307,8 @@ impl Worker {
                     ) || result.error.is_some();
 
                     let mut ui_unit_info: Option<crate::unit::UnitInfo> = None;
-                    let mut ui_bound_measurements: Option<HashMap<String, serde_json::Value>> = None;
+                    let mut ui_bound_measurements: Option<HashMap<String, serde_json::Value>> =
+                        None;
                     // True when the UI was required but we never got a value.
                     // Forces the phase to ERROR so a silent timeout can't pass.
                     let mut ui_missing_required = false;
@@ -316,7 +316,9 @@ impl Worker {
                         match rx.try_recv() {
                             Ok(ui_values) => {
                                 log::debug!("UI already submitted for phase {}", job.phase_name);
-                                if let Some((unit_info, bound)) = extract_bound_measurements(&ui_values) {
+                                if let Some((unit_info, bound)) =
+                                    extract_bound_measurements(&ui_values)
+                                {
                                     ui_unit_info = unit_info;
                                     ui_bound_measurements = Some(bound);
                                 }
@@ -331,17 +333,28 @@ impl Worker {
                                     let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
                                     channels.remove(&request_id);
                                 } else {
-                                    log::debug!("Python phase {} finished, waiting for UI submission", job.phase_name);
+                                    log::debug!(
+                                        "Python phase {} finished, waiting for UI submission",
+                                        job.phase_name
+                                    );
                                     match rx.await {
                                         Ok(ui_values) => {
-                                            log::debug!("Received UI submission for phase {}", job.phase_name);
-                                            if let Some((unit_info, bound)) = extract_bound_measurements(&ui_values) {
+                                            log::debug!(
+                                                "Received UI submission for phase {}",
+                                                job.phase_name
+                                            );
+                                            if let Some((unit_info, bound)) =
+                                                extract_bound_measurements(&ui_values)
+                                            {
                                                 ui_unit_info = unit_info;
                                                 ui_bound_measurements = Some(bound);
                                             }
                                         }
                                         Err(_) => {
-                                            log::warn!("UI response channel closed for phase {}", job.phase_name);
+                                            log::warn!(
+                                                "UI response channel closed for phase {}",
+                                                job.phase_name
+                                            );
                                             ui_missing_required = true;
                                             let mut channels =
                                                 crate::ui::UI_RESPONSE_CHANNELS.lock().await;
@@ -351,10 +364,12 @@ impl Worker {
                                 }
                             }
                             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                                log::warn!("UI response channel closed for phase {}", job.phase_name);
+                                log::warn!(
+                                    "UI response channel closed for phase {}",
+                                    job.phase_name
+                                );
                                 ui_missing_required = true;
-                                let mut channels =
-                                    crate::ui::UI_RESPONSE_CHANNELS.lock().await;
+                                let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
                                 channels.remove(&request_id);
                             }
                         }
@@ -386,8 +401,7 @@ impl Worker {
                         // Falls back to the generic message when the channel
                         // closed for an unrelated reason (operator timeout,
                         // direct cancel from the agent stdin reader, etc.).
-                        let reason =
-                            crate::ui::channels::CANCEL_REASON.read().await.clone();
+                        let reason = crate::ui::channels::CANCEL_REASON.read().await.clone();
                         job_result.error = Some(match reason {
                             Some(r) => r,
                             None => "Required UI input was cancelled or timed out — phase cannot complete without operator response".to_string(),
@@ -419,7 +433,10 @@ impl Worker {
                             retry: None,
                             then: None,
                         };
-                        let evaluated_bound = crate::measurements::auto_evaluate_measurements(bound_measurements, &phase_config);
+                        let evaluated_bound = crate::measurements::auto_evaluate_measurements(
+                            bound_measurements,
+                            &phase_config,
+                        );
 
                         for m in evaluated_bound {
                             if !existing_names.contains(&m.name) {
@@ -458,16 +475,19 @@ impl Worker {
                     // deletes after upload. Without a dir (legacy callers),
                     // emit the original source path unchanged.
                     let emitted_path = match attachment_dir {
-                        Some(ref dir) => match copy_attachment_file(dir, &attachment_name, &source_path) {
-                            Ok(dest) => Some(dest.to_string_lossy().into_owned()),
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to copy attachment file {}: {}",
-                                    attachment_name, e
-                                );
-                                Some(source_path.clone())
+                        Some(ref dir) => {
+                            match copy_attachment_file(dir, &attachment_name, &source_path) {
+                                Ok(dest) => Some(dest.to_string_lossy().into_owned()),
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to copy attachment file {}: {}",
+                                        attachment_name,
+                                        e
+                                    );
+                                    Some(source_path.clone())
+                                }
                             }
-                        },
+                        }
                         None => Some(source_path.clone()),
                     };
 
@@ -493,14 +513,19 @@ impl Worker {
                     if let Some(ref dir) = attachment_dir {
                         match base64::engine::general_purpose::STANDARD.decode(&attach_event.data) {
                             Ok(bytes) => {
-                                match store_attachment_bytes(dir, &attach_event.attachment_name, &bytes) {
+                                match store_attachment_bytes(
+                                    dir,
+                                    &attach_event.attachment_name,
+                                    &bytes,
+                                ) {
                                     Ok(dest) => {
                                         stored_path = Some(dest.to_string_lossy().into_owned());
                                     }
                                     Err(e) => {
                                         log::warn!(
                                             "Failed to store attachment data {}: {}",
-                                            attach_event.attachment_name, e
+                                            attach_event.attachment_name,
+                                            e
                                         );
                                     }
                                 }
@@ -628,10 +653,7 @@ impl Worker {
                         // any other IO error as EOF, silencing the
                         // exact diagnostics an operator needs when AV
                         // mid-killed the python worker.
-                        log::warn!(
-                            "Worker {} stderr reader stopped: {}",
-                            worker_id, e
-                        );
+                        log::warn!("Worker {} stderr reader stopped: {}", worker_id, e);
                         break;
                     }
                 }
@@ -688,7 +710,8 @@ impl Worker {
             ));
         }
 
-        let shell_builder = crate::worker::runtime::shell::ShellCommandBuilder::new(job.shell_type.as_deref())?;
+        let shell_builder =
+            crate::worker::runtime::shell::ShellCommandBuilder::new(job.shell_type.as_deref())?;
         let shell_type = shell_builder.shell_type().to_string();
 
         logs.push(crate::log::LogEntry {
@@ -804,6 +827,8 @@ impl Worker {
             unit: None,
             input_unit_info: job.initial_unit_info.clone(),
             retry_count: job.retry_count,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         })
     }
 
@@ -852,7 +877,8 @@ impl Worker {
 
             log::debug!(
                 "Sent UI request {} for native phase {}",
-                request_id, job.phase_name
+                request_id,
+                job.phase_name
             );
 
             ui_response_rx
@@ -890,9 +916,7 @@ impl Worker {
 
                         (crate::job::PhaseResult::Continue, None)
                     }
-                    Err(_) => {
-                        (crate::job::PhaseResult::Stop, None)
-                    }
+                    Err(_) => (crate::job::PhaseResult::Stop, None),
                 }
             } else {
                 (
@@ -930,7 +954,8 @@ impl Worker {
             all_measurements = convert_bound_to_measurements(bound);
         }
 
-        let evaluated_measurements = crate::measurements::auto_evaluate_measurements(all_measurements, &phase_config);
+        let evaluated_measurements =
+            crate::measurements::auto_evaluate_measurements(all_measurements, &phase_config);
 
         let resource_metrics = resource_tracker.collect_metrics();
 
@@ -949,6 +974,8 @@ impl Worker {
             unit: unit_info,
             input_unit_info: job.initial_unit_info.clone(),
             retry_count: job.retry_count,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         })
     }
 }
@@ -992,27 +1019,30 @@ fn convert_job_result(
         then: None,
     };
 
-    let evaluated_measurements = crate::measurements::auto_evaluate_measurements(measurements, &phase_config);
+    let evaluated_measurements =
+        crate::measurements::auto_evaluate_measurements(measurements, &phase_config);
 
-    let logs = result.logs.into_iter().map(|l| {
-        crate::log::LogEntry {
+    let logs = result
+        .logs
+        .into_iter()
+        .map(|l| crate::log::LogEntry {
             timestamp: l.timestamp,
             level: l.level,
             message: l.message,
             file: l.file,
             line: l.line,
-        }
-    }).collect();
+        })
+        .collect();
 
-    let unit = result.unit_json.and_then(|json| {
-        match serde_json::from_str(&json) {
+    let unit = result
+        .unit_json
+        .and_then(|json| match serde_json::from_str(&json) {
             Ok(u) => Some(u),
             Err(e) => {
                 log::warn!("Failed to parse unit_json: {} (json: {})", e, json);
                 None
             }
-        }
-    });
+        });
 
     Ok(crate::job::JobResult {
         phase_result,
@@ -1029,7 +1059,26 @@ fn convert_job_result(
         unit,
         input_unit_info: job.initial_unit_info.clone(),
         retry_count: job.retry_count,
+        run_metadata: parse_metadata_json("run_metadata_json", result.run_metadata_json),
+        unit_metadata: parse_metadata_json("unit_metadata_json", result.unit_metadata_json),
     })
+}
+
+/// Parse a double-encoded metadata JSON object from the worker. Metadata
+/// must never crash a run — malformed JSON is logged and dropped, same
+/// failure mode as `unit_json`.
+fn parse_metadata_json(
+    label: &str,
+    json: Option<String>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    json.and_then(|j| match serde_json::from_str(&j) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            log::warn!("Failed to parse {}: {} (json: {})", label, e, j);
+            None
+        }
+    })
+    .unwrap_or_default()
 }
 
 fn extract_unit_info_from_json(
@@ -1075,15 +1124,20 @@ fn extract_unit_info_from_json(
         revision_number,
         sub_units,
         status: "tested".to_string(),
+        // Python-set unit metadata flows via the JobComplete bundle
+        // (unit_metadata_json), not the __unit__ bound payload.
+        metadata: None,
     }
 }
 
 fn extract_bound_measurements(
     ui_values: &HashMap<String, String>,
-) -> Option<(Option<crate::unit::UnitInfo>, HashMap<String, serde_json::Value>)> {
+) -> Option<(
+    Option<crate::unit::UnitInfo>,
+    HashMap<String, serde_json::Value>,
+)> {
     let bound_json = ui_values.get("__bound_measurements__")?;
-    let mut bound: HashMap<String, serde_json::Value> =
-        serde_json::from_str(bound_json).ok()?;
+    let mut bound: HashMap<String, serde_json::Value> = serde_json::from_str(bound_json).ok()?;
 
     let unit_info = if let Some(unit_value) = bound.remove("__unit__") {
         let unit_data_opt = match &unit_value {
@@ -1109,10 +1163,14 @@ fn convert_bound_to_measurements(
             let measurement_value = match value {
                 serde_json::Value::Null => crate::measurements::MeasurementValue::Null,
                 serde_json::Value::Bool(b) => crate::measurements::MeasurementValue::Boolean(b),
-                serde_json::Value::Number(n) => crate::measurements::MeasurementValue::Numeric(n.as_f64().unwrap_or(0.0)),
+                serde_json::Value::Number(n) => {
+                    crate::measurements::MeasurementValue::Numeric(n.as_f64().unwrap_or(0.0))
+                }
                 serde_json::Value::String(s) => crate::measurements::MeasurementValue::String(s),
                 serde_json::Value::Array(arr) => crate::measurements::MeasurementValue::Array(arr),
-                serde_json::Value::Object(obj) => crate::measurements::MeasurementValue::Object(obj),
+                serde_json::Value::Object(obj) => {
+                    crate::measurements::MeasurementValue::Object(obj)
+                }
             };
 
             crate::measurements::Measurement {
@@ -1154,9 +1212,40 @@ fn merge_unit_info(
             if ui_unit.batch_number.is_some() {
                 base.batch_number = ui_unit.batch_number;
             }
+            if let Some(ui_md) = ui_unit.metadata {
+                base.metadata
+                    .get_or_insert_with(Default::default)
+                    .extend(ui_md);
+            }
             base
         }
         None => ui_unit,
+    }
+}
+
+#[cfg(test)]
+mod metadata_json_tests {
+    use super::parse_metadata_json;
+
+    #[test]
+    fn valid_double_encoded_object_parses() {
+        let json = r#"{"modification":"MOD-42","cycles":3,"calibrated":true}"#;
+        let map = parse_metadata_json("run_metadata_json", Some(json.to_string()));
+        assert_eq!(map.get("modification"), Some(&serde_json::json!("MOD-42")));
+        assert_eq!(map.get("cycles"), Some(&serde_json::json!(3)));
+        assert_eq!(map.get("calibrated"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn missing_field_is_empty() {
+        let map = parse_metadata_json("run_metadata_json", None);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn malformed_json_is_empty_not_error() {
+        let map = parse_metadata_json("unit_metadata_json", Some("{not json".to_string()));
+        assert!(map.is_empty());
     }
 }
 
@@ -1167,19 +1256,37 @@ mod attachment_mimetype_tests {
     #[test]
     fn images_get_an_image_mimetype() {
         // The operator-UI keys `<img>` rendering on `image/*`.
-        assert_eq!(guess_attachment_mimetype("board.png").as_deref(), Some("image/png"));
-        assert_eq!(guess_attachment_mimetype("shot.JPG").as_deref(), Some("image/jpeg"));
-        assert_eq!(guess_attachment_mimetype("scan.webp").as_deref(), Some("image/webp"));
+        assert_eq!(
+            guess_attachment_mimetype("board.png").as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            guess_attachment_mimetype("shot.JPG").as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            guess_attachment_mimetype("scan.webp").as_deref(),
+            Some("image/webp")
+        );
     }
 
     #[test]
     fn non_images_and_unknowns_are_not_image_typed() {
-        assert_eq!(guess_attachment_mimetype("log.csv").as_deref(), Some("text/csv"));
+        assert_eq!(
+            guess_attachment_mimetype("log.csv").as_deref(),
+            Some("text/csv")
+        );
         // Unknown extension / no extension → octet-stream, never None: the
         // upload PUT must carry a real Content-Type so the server's HeadObject
         // records a usable type. Non-image essence still keeps the UI from
         // rendering a broken <img>.
-        assert_eq!(guess_attachment_mimetype("data.bin").as_deref(), Some("application/octet-stream"));
-        assert_eq!(guess_attachment_mimetype("noext").as_deref(), Some("application/octet-stream"));
+        assert_eq!(
+            guess_attachment_mimetype("data.bin").as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            guess_attachment_mimetype("noext").as_deref(),
+            Some("application/octet-stream")
+        );
     }
 }

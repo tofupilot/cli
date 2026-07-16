@@ -7,7 +7,9 @@ No external dependencies beyond the Python standard library.
 
 import sys
 import json
+import math
 import os
+import re
 import time
 import traceback
 import importlib.util
@@ -556,13 +558,135 @@ class SubUnitsDict(dict):
             raise AttributeError(f"No sub-unit named '{name}'. Cannot add new sub-units at runtime.")
 
 
-class Unit:
-    def __init__(self):
+# Mirrors the server-side metadata constraints (MetadataInputSchema):
+# keys <= 40 chars matching this charset, <= 50 keys per entity,
+# values limited to string | number | bool (strings <= 50000 chars).
+_METADATA_KEY_RE = re.compile(r"[a-zA-Z0-9_.:+-]+")
+_METADATA_MAX_KEYS = 50
+_METADATA_MAX_KEY_LEN = 40
+_METADATA_MAX_VALUE_LEN = 50000
+
+
+class Metadata(dict):
+    """Validated key/value metadata (string | number | bool values).
+
+    Validation happens at assignment so authors get a clear error at the
+    faulty line instead of a silently dropped upload field.
+    """
+
+    def __init__(self, owner: str):
+        super().__init__()
+        object.__setattr__(self, "_owner", owner)
+
+    def _validate(self, key, value):
+        owner = object.__getattribute__(self, "_owner")
+        if not isinstance(key, str):
+            raise TypeError(
+                f"{owner}.metadata keys must be strings, got {type(key).__name__}"
+            )
+        if len(key) > _METADATA_MAX_KEY_LEN:
+            raise ValueError(
+                f"{owner}.metadata key '{key[:_METADATA_MAX_KEY_LEN]}…' exceeds "
+                f"{_METADATA_MAX_KEY_LEN} characters"
+            )
+        # fullmatch, not match with $: "$" would accept a trailing newline
+        # that the server-side regex rejects at upload.
+        if not _METADATA_KEY_RE.fullmatch(key):
+            raise ValueError(
+                f"{owner}.metadata key '{key}' is invalid: only letters, digits "
+                f"and _ . : + - are allowed"
+            )
+        if not isinstance(value, (str, int, float, bool)):
+            raise TypeError(
+                f"{owner}.metadata['{key}'] must be a string, number, or bool, "
+                f"got {type(value).__name__}"
+            )
+        if isinstance(value, str) and len(value) > _METADATA_MAX_VALUE_LEN:
+            raise ValueError(
+                f"{owner}.metadata['{key}'] exceeds {_METADATA_MAX_VALUE_LEN} "
+                f"characters ({len(value)})"
+            )
+        # json.dumps would emit bare NaN/Infinity, which the Rust JSON parser
+        # rejects — dropping the whole metadata bundle. Reject at assignment.
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f"{owner}.metadata['{key}'] must be a finite number, got {value!r}"
+            )
+
+    def __setitem__(self, key, value):
+        owner = object.__getattribute__(self, "_owner")
+        self._validate(key, value)
+        if key not in self and len(self) >= _METADATA_MAX_KEYS:
+            raise ValueError(
+                f"{owner}.metadata is limited to {_METADATA_MAX_KEYS} keys"
+            )
+        super().__setitem__(key, value)
+
+    def update(self, *args, **kwargs):
+        # Validate everything first, then commit — a bulk write never
+        # applies partially.
+        owner = object.__getattribute__(self, "_owner")
+        items = dict(*args, **kwargs)
+        for k, v in items.items():
+            self._validate(k, v)
+        new_keys = sum(1 for k in items if k not in self)
+        if len(self) + new_keys > _METADATA_MAX_KEYS:
+            raise ValueError(
+                f"{owner}.metadata is limited to {_METADATA_MAX_KEYS} keys"
+            )
+        for k, v in items.items():
+            dict.__setitem__(self, k, v)
+
+    def __ior__(self, other):
+        # dict's C-level |= skips the overridden __setitem__; route it
+        # through update() so validation still runs.
+        self.update(other)
+        return self
+
+    def setdefault(self, key, default=None):
+        if key in self:
+            return self[key]
+        if default is None:
+            # None is not a valid metadata value; unlike plain dict we
+            # don't insert it — just report the key as absent.
+            return None
+        self[key] = default
+        return self[key]
+
+
+class _MetadataOwnerMixin:
+    """Guards `x.metadata = {...}` reassignment: replacing the Metadata
+    dict with a plain dict would bypass all validation, so the setter
+    re-validates by routing the new content through Metadata.update()."""
+
+    @property
+    def metadata(self):
+        return self._metadata
+
+    @metadata.setter
+    def metadata(self, value):
+        owner = object.__getattribute__(self, "_metadata")._owner
+        fresh = Metadata(owner)
+        fresh.update(dict(value))
+        object.__setattr__(self, "_metadata", fresh)
+
+
+class Unit(_MetadataOwnerMixin):
+    def __init__(self, initial_metadata=None):
+        object.__setattr__(self, "_metadata", Metadata("unit"))
         self.serial_number: Optional[str] = None
         self.batch_number: Optional[str] = None
         self.part_number: Optional[str] = None
         self.revision_number: Optional[str] = None
         self.sub_units: Optional[SubUnitsDict] = None
+        if initial_metadata:
+            # Operator-entered identify-form values, threaded in via the
+            # job command so phases can read them. Seeded WITHOUT Python
+            # validation: they were already validated at identify time,
+            # and a validation raise here would abort the phase before
+            # its own try/except with an opaque worker error.
+            for k, v in initial_metadata.items():
+                dict.__setitem__(self._metadata, k, v)
 
 
 class _AggregationsReadProxy:
@@ -743,10 +867,11 @@ class PhaseResults:
         return f"<PhaseResults({self._function_name}: {list(self._data.keys())})>"
 
 
-class Run:
-    """Read-only run information"""
+class Run(_MetadataOwnerMixin):
+    """Run information and run-level metadata"""
 
     def __init__(self, slot_id: str, job_id: str, retry_count: int, retry_limit: int):
+        object.__setattr__(self, "_metadata", Metadata("run"))
         self.slot_id = slot_id
         self.job_id = job_id
         self.retry_count = retry_count
@@ -1276,9 +1401,25 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
     # so partial results reach the orchestrator before phase end (crucial
     # for long-running phases and force-kill diagnostics). Deferred until
     # after event_queue is constructed below.
-    unit = Unit()
+    unit_info = command.get("unit_info") or {}
+    unit = Unit(initial_metadata=unit_info.get("metadata"))
+    # Snapshot the seeded (operator/identify) metadata: result dicts ship
+    # only the DELTA this phase wrote. Re-shipping the full seed from
+    # every phase would let an untouched later phase revert an earlier
+    # phase's override in the CLI's last-write-wins merge.
+    initial_unit_metadata = dict(unit.metadata)
 
-    unit_info = command.get("unit_info")
+    def _unit_metadata_delta():
+        delta = {
+            k: v
+            for k, v in unit.metadata.items()
+            if initial_unit_metadata.get(k) != v
+        }
+        return delta or None
+
+    def _run_metadata_bundle():
+        return dict(run.metadata) if run.metadata else None
+
     if unit_info:
         unit.serial_number = unit_info.get("serial_number")
         unit.part_number = unit_info.get("part_number")
@@ -1466,6 +1607,8 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                 "measurements": measurements.to_list(),
                 "logs": logs.entries,
                 "unit": unit_info,
+                "run_metadata": _run_metadata_bundle(),
+                "unit_metadata": _unit_metadata_delta(),
             }
 
             phase_result_container["result"] = result_dict
@@ -1487,6 +1630,11 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                     measurements.to_list() if "measurements" in locals() else []
                 ),
                 "logs": logs.entries if "logs" in locals() else [],
+                # Metadata set before the crash still ships (like
+                # measurements/logs) — a failed run is where diagnostic
+                # metadata matters most.
+                "run_metadata": _run_metadata_bundle(),
+                "unit_metadata": _unit_metadata_delta(),
             }
 
         except Exception as e:
@@ -1504,6 +1652,8 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                     measurements.to_list() if "measurements" in locals() else []
                 ),
                 "logs": logs.entries if "logs" in locals() else [],
+                "run_metadata": _run_metadata_bundle(),
+                "unit_metadata": _unit_metadata_delta(),
             }
 
     try:
@@ -1524,6 +1674,8 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                         "phase_result": PhaseResult.FAIL,
                         "measurements": measurements.to_list(),
                         "logs": logs.entries,
+                        "run_metadata": _run_metadata_bundle(),
+                        "unit_metadata": _unit_metadata_delta(),
                     }
                 }
                 return
@@ -1539,11 +1691,15 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
             if event is not None:
                 yield {"type": "event", "data": event}
 
-        if phase_result_container["error"]:
-            raise Exception(phase_result_container["error"])
-
+        # Yield the result dict when the phase produced one — even on the
+        # generic-exception path, where it carries the traceback plus the
+        # measurements/logs/metadata written before the crash. Raising
+        # first (the old order) sent a bare Error message and silently
+        # dropped all of that.
         if phase_result_container["result"]:
             yield {"type": "result", "data": phase_result_container["result"]}
+        elif phase_result_container["error"]:
+            raise Exception(phase_result_container["error"])
         else:
             yield {
                 "type": "result",
@@ -1553,6 +1709,8 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                     "phase_result": PhaseResult.FAIL,
                     "measurements": measurements.to_list(),
                     "logs": logs.entries,
+                    "run_metadata": _run_metadata_bundle(),
+                    "unit_metadata": _unit_metadata_delta(),
                 }
             }
 
@@ -1704,6 +1862,16 @@ def handle_connection(conn: socket.socket, procedure_dir: Path):
 
                 if "unit" in final_result and final_result["unit"] is not None:
                     job_result["unit_json"] = json.dumps(final_result["unit"])
+
+                if final_result.get("run_metadata"):
+                    job_result["run_metadata_json"] = json.dumps(
+                        final_result["run_metadata"]
+                    )
+
+                if final_result.get("unit_metadata"):
+                    job_result["unit_metadata_json"] = json.dumps(
+                        final_result["unit_metadata"]
+                    )
 
                 conn.sendall((json.dumps(job_result) + "\n").encode("utf-8"))
 

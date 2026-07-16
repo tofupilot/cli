@@ -1,7 +1,7 @@
 use crate::constants::limits;
-use crate::ui::{PythonPhaseResult, UiConfig};
 use crate::log::LogEntry;
 use crate::procedure::schema::{MeasurementSpec, StageScope};
+use crate::ui::{PythonPhaseResult, UiConfig};
 use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
@@ -208,6 +208,12 @@ pub struct JobResult {
     /// Used to distinguish intentional changes from inherited values during merge.
     pub input_unit_info: Option<crate::unit::UnitInfo>,
     pub retry_count: usize,
+    /// Run-level metadata set by the phase via `run.metadata[...]`.
+    #[serde(default)]
+    pub run_metadata: std::collections::HashMap<String, serde_json::Value>,
+    /// Unit-level metadata set by the phase via `unit.metadata[...]`.
+    #[serde(default)]
+    pub unit_metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl JobResult {
@@ -216,7 +222,7 @@ impl JobResult {
         Self {
             phase_result: PhaseResult::Continue,
             phase_outcome: Outcome::Error,
-            next_action: None,   // Will be computed in completion handler
+            next_action: None, // Will be computed in completion handler
             timeout_secs: None,
             error: Some(error_msg),
             exit_code: None,
@@ -228,6 +234,8 @@ impl JobResult {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -239,7 +247,7 @@ impl JobResult {
         Self {
             phase_result: PhaseResult::Continue,
             phase_outcome: Outcome::Timeout,
-            next_action: None,   // Will be computed in completion handler
+            next_action: None, // Will be computed in completion handler
             timeout_secs: Some(secs),
             error: None,
             exit_code: None,
@@ -251,6 +259,8 @@ impl JobResult {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -259,7 +269,7 @@ impl JobResult {
         Self {
             phase_result: PhaseResult::Skip,
             phase_outcome: Outcome::Skip,
-            next_action: None,   // Will be computed in completion handler
+            next_action: None, // Will be computed in completion handler
             timeout_secs: None,
             error: None,
             exit_code: None,
@@ -271,6 +281,8 @@ impl JobResult {
             unit: None,
             input_unit_info: None,
             retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
         }
     }
 
@@ -368,7 +380,7 @@ impl Job {
             phase_measurements,
             initial_unit_info: None, // Set by orchestrator before execution
             phase_results: HashMap::new(), // Populated by orchestrator before execution
-            dependency_id: id, // Original jobs: dependents wait on this UUID
+            dependency_id: id,       // Original jobs: dependents wait on this UUID
         }
     }
 

@@ -1,0 +1,19 @@
+name: Y41 Metadata
+version: 1.0.0
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: "MAIN-410"
+  part_number:
+    default_value: "PN-41"
+  metadata:
+    modification:
+      default_value: "MOD-1"
+      pattern: "^MOD-[0-9]+$"
+    amendment: {}
+
+main:
+  - key: set_metadata
+    name: Set Metadata
+    python: phases.set_metadata

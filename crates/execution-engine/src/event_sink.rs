@@ -58,6 +58,10 @@ pub enum ExecutionEvent {
         duration_ms: u64,
         worker_id: usize,
         error: Option<String>,
+        /// Run-level metadata set by the phase via `run.metadata[...]`.
+        run_metadata: std::collections::HashMap<String, serde_json::Value>,
+        /// Unit-level metadata set by the phase via `unit.metadata[...]`.
+        unit_metadata: std::collections::HashMap<String, serde_json::Value>,
     },
 
     /// Execution statistics snapshot

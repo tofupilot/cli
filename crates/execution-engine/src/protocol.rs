@@ -32,6 +32,11 @@ pub struct UnitInfo {
     pub batch_number: Option<String>,
     #[serde(default)]
     pub sub_units: HashMap<String, String>,
+    /// Operator-entered identify-form metadata, threaded to Python so
+    /// phases can read `unit.metadata` (internal Rust↔Python IPC only —
+    /// not the station-protocol wire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -62,6 +67,11 @@ pub struct JobResult {
     pub error: Option<String>,
     pub exit_code: Option<i32>,
     pub unit_json: Option<String>,
+    /// Run-level metadata set via `run.metadata[...]`, double-encoded JSON
+    /// object (same convention as `unit_json`).
+    pub run_metadata_json: Option<String>,
+    /// Unit-level metadata set via `unit.metadata[...]`, double-encoded JSON.
+    pub unit_metadata_json: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

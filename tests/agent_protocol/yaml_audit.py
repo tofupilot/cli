@@ -372,6 +372,15 @@ if slot_ids != {"slot_a", "slot_b"}:
     RESULTS[-1] = (RESULTS[-1][0], False, RESULTS[-1][2] + [f"expected slot_ids slot_a+slot_b, got {slot_ids}"])
     print(f"  - slot ids mismatch: {slot_ids}")
 
+events, rc = drive("/tmp/yaml_test41")
+check("Y41 run/unit metadata", events, rc, expect_pass=True)
+# Phase asserts identify-metadata read, |= / reassignment / setdefault
+# semantics internally; a PASS means all metadata assertions held.
+if not any("run_md=" in (e.get("message") or "") for e in events
+           if e.get("type") == "phase_log"):
+    RESULTS[-1] = (RESULTS[-1][0], False, RESULTS[-1][2] + ["no run_md log line"])
+    print("  - metadata log line missing")
+
 # Pre-baked UI values exercise
 events, rc = drive("/tmp/yaml_test13", ui_values={
     "all_inputs": {

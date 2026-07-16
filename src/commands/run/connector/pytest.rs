@@ -193,6 +193,7 @@ fn build_unit_config_from_kwargs(
         revision_number: field("revision_number"),
         batch_number: field("batch_number"),
         sub_units: None,
+        metadata: None,
     }
 }
 
@@ -390,6 +391,7 @@ pub async fn run_pytest(
                                     Some(reused.sub_units.clone())
                                 },
                                 status: String::new(),
+                                metadata: None,
                             };
                             let cfg = build_unit_config_from_kwargs(&unit_kwargs, auto_identify);
                             if let Err(err) =

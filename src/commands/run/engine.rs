@@ -115,6 +115,17 @@ struct RunData {
     unit_revision: Option<String>,
     unit_batch: Option<String>,
     unit_sub_units: Option<Vec<String>>,
+    /// Run-level metadata contributions in completion order, one entry
+    /// per source (identify step or phase key). A retry REPLACES its
+    /// phase's whole entry — so keys a failed attempt wrote but the
+    /// passing retry didn't rewrite don't leak into the upload. The
+    /// upload map is folded from these in order (later sources win
+    /// per key).
+    run_metadata_sources: Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
+    /// Unit-level metadata contributions, same replace-per-source
+    /// semantics. The operator identify-form entry lands first (pre-run)
+    /// so phase writes override it per key.
+    unit_metadata_sources: Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
     /// Attachments written to the report dir during the run, accumulated
     /// for the upload queue. The native engine path emits AttachmentAdded
     /// live but, unlike the framework connectors, didn't collect them for
@@ -191,6 +202,8 @@ impl CliEventSink {
                 unit_revision: None,
                 unit_batch: None,
                 unit_sub_units: None,
+                run_metadata_sources: Vec::new(),
+                unit_metadata_sources: Vec::new(),
                 attachments: Vec::new(),
             })),
             resolved_unit: Arc::new(std::sync::Mutex::new(None)),
@@ -328,6 +341,8 @@ impl EventSink for CliEventSink {
                 retry_count,
                 error,
                 slot_id,
+                run_metadata,
+                unit_metadata,
                 ..
             } => {
                 // Send to TUI
@@ -396,8 +411,18 @@ impl EventSink for CliEventSink {
                     error: error.clone(),
                 };
                 let data = self.data.clone();
+                let run_md = run_metadata.clone();
+                let unit_md = unit_metadata.clone();
+                let source_key = phase_key.clone();
                 tokio::spawn(async move {
-                    data.lock().await.phases.push(phase);
+                    // Same lock acquisition keeps phase data and metadata
+                    // atomic per event. Each phase key is one metadata
+                    // source; a retry replaces the whole entry, so keys a
+                    // failed attempt wrote don't leak into a passing run.
+                    let mut d = data.lock().await;
+                    d.phases.push(phase);
+                    upsert_metadata_source(&mut d.run_metadata_sources, &source_key, run_md);
+                    upsert_metadata_source(&mut d.unit_metadata_sources, &source_key, unit_md);
                 });
             }
 
@@ -982,6 +1007,63 @@ fn engine_outcome_to_phase(outcome: &Outcome) -> RunGetPhasesOutcome {
     }
 }
 
+/// Replace-or-append a metadata source entry in place. In-place
+/// replacement keeps the source's original position, so the identify
+/// entry stays first (phases override it) and a retried phase keeps its
+/// completion-order slot while dropping its failed attempt's keys.
+fn upsert_metadata_source(
+    sources: &mut Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
+    source: &str,
+    map: std::collections::HashMap<String, serde_json::Value>,
+) {
+    if let Some(entry) = sources.iter_mut().find(|(k, _)| k == source) {
+        entry.1 = map;
+    } else if !map.is_empty() {
+        sources.push((source.to_string(), map));
+    }
+}
+
+/// Fold metadata sources into the upload map, in order (later per-key
+/// writes win).
+fn fold_metadata_sources(
+    sources: &[(String, std::collections::HashMap<String, serde_json::Value>)],
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut merged = std::collections::HashMap::new();
+    for (_, map) in sources {
+        merged.extend(map.clone());
+    }
+    merged
+}
+
+/// Cap a merged metadata map at the server's 50-keys-per-entity limit.
+/// Per-phase validation can't see the merged total (each phase gets a
+/// fresh metadata dict), so without this cap an over-limit map would
+/// reject the entire run upload. Keys are kept in sorted order so the
+/// drop is deterministic; dropped keys are logged.
+fn cap_metadata_keys(
+    label: &str,
+    map: &std::collections::HashMap<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    const MAX_KEYS: usize = 50;
+    if map.len() <= MAX_KEYS {
+        return map.clone();
+    }
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let dropped: Vec<&str> = keys[MAX_KEYS..].iter().map(|k| k.as_str()).collect();
+    crate::log::warn(&format!(
+        "{} exceeds {} keys ({}); dropping: {}",
+        label,
+        MAX_KEYS,
+        map.len(),
+        dropped.join(", ")
+    ));
+    keys[..MAX_KEYS]
+        .iter()
+        .map(|k| ((*k).clone(), map[*k].clone()))
+        .collect()
+}
+
 fn build_measurement(
     m: &execution_engine::measurements::Measurement,
 ) -> crate::error::CliResult<RunCreateMeasurements> {
@@ -1234,6 +1316,26 @@ fn build_run_request(
         b = b.sub_units(su.clone());
     }
 
+    // Empty maps must not call the builders — the SDK would serialize
+    // `"metadata": {}` instead of omitting the field. Per-phase writes
+    // are capped at 50 keys each, but multiple phases can accumulate
+    // past the server's 50-keys-per-entity limit; cap here so one
+    // oversized map doesn't reject the whole run upload.
+    let run_md = cap_metadata_keys(
+        "run metadata",
+        &fold_metadata_sources(&data.run_metadata_sources),
+    );
+    if !run_md.is_empty() {
+        b = b.metadata(run_md);
+    }
+    let unit_md = cap_metadata_keys(
+        "unit metadata",
+        &fold_metadata_sources(&data.unit_metadata_sources),
+    );
+    if !unit_md.is_empty() {
+        b = b.unit_metadata(unit_md);
+    }
+
     if let Some(version) = super::procedure_version::read_procedure_version(procedure_dir) {
         b = b.procedure_version(version);
     }
@@ -1282,6 +1384,10 @@ fn wire_unit_to_engine(info: station_protocol::UnitInfo) -> execution_engine::un
         batch_number: info.batch_number,
         sub_units,
         status: String::new(),
+        // Wire UnitInfo carries no metadata — a "Run again" reuse
+        // uploads without operator-entered metadata (v1 limitation;
+        // the prior run already upserted it server-side).
+        metadata: None,
     }
 }
 
@@ -1320,6 +1426,16 @@ async fn apply_unit_info_to_run_data(
         let mut entries: Vec<(&String, &String)> = sub.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         d.unit_sub_units = Some(entries.into_iter().map(|(_, v)| v.clone()).collect());
+    }
+    // Operator-entered identify-form metadata lands pre-run as the
+    // first source; Python `unit.metadata[...]` writes arrive later via
+    // JobComplete and override per key (operator form < Python API).
+    if let Some(ref md) = info.metadata {
+        let map: std::collections::HashMap<String, serde_json::Value> = md
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        upsert_metadata_source(&mut d.unit_metadata_sources, "identify_unit", map);
     }
 }
 
@@ -2012,6 +2128,181 @@ fn format_validator_expression(v: &execution_engine::procedure::schema::Validato
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_run_data() -> RunData {
+        RunData {
+            phases: Vec::new(),
+            run_outcome: None,
+            run_id: None,
+            start_time: None,
+            end_time: None,
+            unit_serial: Some("SN-TEST".to_string()),
+            unit_part: None,
+            unit_revision: None,
+            unit_batch: None,
+            unit_sub_units: None,
+            run_metadata_sources: Vec::new(),
+            unit_metadata_sources: Vec::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    fn md(
+        pairs: &[(&str, serde_json::Value)],
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn build_run_request_populates_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut data = empty_run_data();
+        data.run_metadata_sources.push((
+            "phase_a".into(),
+            md(&[("modification", serde_json::json!("MOD-42"))]),
+        ));
+        data.unit_metadata_sources.push((
+            "phase_a".into(),
+            md(&[
+                ("asset_owner", serde_json::json!("lab-3")),
+                ("cycles", serde_json::json!(3)),
+                ("calibrated", serde_json::json!(true)),
+            ]),
+        ));
+
+        let req = build_run_request(&data, "proc-1", tmp.path(), None).unwrap();
+
+        let rmd = req.metadata.expect("run metadata set");
+        assert_eq!(rmd.get("modification"), Some(&serde_json::json!("MOD-42")));
+
+        let umd = req.unit_metadata.expect("unit metadata set");
+        assert_eq!(umd.get("asset_owner"), Some(&serde_json::json!("lab-3")));
+        assert_eq!(umd.get("cycles"), Some(&serde_json::json!(3)));
+        assert_eq!(umd.get("calibrated"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn retry_replaces_phase_metadata_source() {
+        // Attempt 1 writes a diagnostic key and fails; the passing retry
+        // writes nothing — the stale key must not leak into the upload.
+        let mut sources = Vec::new();
+        upsert_metadata_source(
+            &mut sources,
+            "check_voltage",
+            md(&[("error_code", serde_json::json!("E42"))]),
+        );
+        upsert_metadata_source(&mut sources, "check_voltage", md(&[]));
+        let merged = fold_metadata_sources(&sources);
+        assert!(!merged.contains_key("error_code"));
+    }
+
+    #[test]
+    fn identify_source_stays_first_and_is_overridable() {
+        let mut sources = Vec::new();
+        upsert_metadata_source(
+            &mut sources,
+            "identify_unit",
+            md(&[("modification", serde_json::json!("MOD-1"))]),
+        );
+        upsert_metadata_source(
+            &mut sources,
+            "phase_a",
+            md(&[("modification", serde_json::json!("MOD-42"))]),
+        );
+        // Re-identify replaces in place, staying before phase_a
+        upsert_metadata_source(
+            &mut sources,
+            "identify_unit",
+            md(&[("modification", serde_json::json!("MOD-2"))]),
+        );
+        let merged = fold_metadata_sources(&sources);
+        assert_eq!(
+            merged.get("modification"),
+            Some(&serde_json::json!("MOD-42"))
+        );
+    }
+
+    #[test]
+    fn build_run_request_omits_empty_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = empty_run_data();
+        let req = build_run_request(&data, "proc-1", tmp.path(), None).unwrap();
+        assert!(req.metadata.is_none());
+        assert!(req.unit_metadata.is_none());
+    }
+
+    #[test]
+    fn run_metadata_later_sources_win_per_key() {
+        let mut sources = Vec::new();
+        upsert_metadata_source(
+            &mut sources,
+            "phase_a",
+            md(&[
+                ("line", serde_json::json!("L3")),
+                ("modification", serde_json::json!("MOD-1")),
+            ]),
+        );
+        upsert_metadata_source(
+            &mut sources,
+            "phase_b",
+            md(&[("modification", serde_json::json!("MOD-42"))]),
+        );
+        let merged = fold_metadata_sources(&sources);
+        assert_eq!(
+            merged.get("modification"),
+            Some(&serde_json::json!("MOD-42"))
+        );
+        assert_eq!(merged.get("line"), Some(&serde_json::json!("L3")));
+    }
+
+    #[test]
+    fn cap_metadata_keys_under_limit_unchanged() {
+        let map: std::collections::HashMap<String, serde_json::Value> = (0..50)
+            .map(|i| (format!("k{i:02}"), serde_json::json!(i)))
+            .collect();
+        assert_eq!(cap_metadata_keys("run metadata", &map).len(), 50);
+    }
+
+    #[test]
+    fn cap_metadata_keys_drops_sorted_tail() {
+        let map: std::collections::HashMap<String, serde_json::Value> = (0..60)
+            .map(|i| (format!("k{i:02}"), serde_json::json!(i)))
+            .collect();
+        let capped = cap_metadata_keys("run metadata", &map);
+        assert_eq!(capped.len(), 50);
+        // Sorted order: k00..k49 kept, k50..k59 dropped
+        assert!(capped.contains_key("k00"));
+        assert!(capped.contains_key("k49"));
+        assert!(!capped.contains_key("k50"));
+    }
+
+    #[tokio::test]
+    async fn apply_unit_info_metadata_lands_in_unit_metadata() {
+        let data = Arc::new(Mutex::new(empty_run_data()));
+        let info = execution_engine::unit::UnitInfo {
+            serial_number: Some("SN-1".into()),
+            part_number: None,
+            revision_number: None,
+            batch_number: None,
+            sub_units: None,
+            status: "complete".into(),
+            metadata: Some(
+                [("modification".to_string(), "MOD-7".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        apply_unit_info_to_run_data(&data, &info).await;
+        let d = data.lock().await;
+        let merged = fold_metadata_sources(&d.unit_metadata_sources);
+        assert_eq!(
+            merged.get("modification"),
+            Some(&serde_json::json!("MOD-7"))
+        );
+    }
 
     fn write_v1_manifest(dir: &Path, root_directory: Option<&str>) {
         let pd = match root_directory {

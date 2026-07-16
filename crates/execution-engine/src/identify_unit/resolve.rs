@@ -36,11 +36,24 @@ pub fn resolve_response(
     let mut revision_number = None;
     let mut batch_number = None;
     let mut sub_units: HashMap<String, String> = HashMap::new();
+    let mut metadata: HashMap<String, String> = HashMap::new();
 
     for (key, raw) in values {
         if let Some(sub_key) = key.strip_prefix("sub_unit:") {
             if let Some(val) = trim(raw) {
                 sub_units.insert(sub_key.to_string(), val);
+            }
+        } else if let Some(md_key) = key.strip_prefix("metadata:") {
+            // Only keys declared in the unit config are accepted —
+            // undeclared ones are ignored like any unknown wire key.
+            let declared = cfg
+                .metadata
+                .as_ref()
+                .is_some_and(|md| md.contains_key(md_key));
+            if declared {
+                if let Some(val) = trim(raw) {
+                    metadata.insert(md_key.to_string(), val);
+                }
             }
         } else {
             match key.as_str() {
@@ -65,6 +78,11 @@ pub fn resolve_response(
             Some(sub_units)
         },
         status: "complete".to_string(),
+        metadata: if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        },
     };
 
     validate_unit_info(&unit_info, &Some(cfg.clone()))?;
@@ -97,6 +115,21 @@ pub fn auto_identify_unit_info(cfg: &UnitConfig) -> Result<UnitInfo, String> {
         }
     });
 
+    // Metadata fields with a default_value resolve like other fields;
+    // default-less fields are simply absent (metadata is never required,
+    // so auto_identify imposes no new requirements).
+    let metadata = cfg.metadata.as_ref().and_then(|md| {
+        let map: HashMap<String, String> = md
+            .iter()
+            .filter_map(|(key, f)| f.default_value.clone().map(|val| (key.clone(), val)))
+            .collect();
+        if map.is_empty() {
+            None
+        } else {
+            Some(map)
+        }
+    });
+
     let unit_info = UnitInfo {
         serial_number: cfg
             .serial_number
@@ -116,6 +149,7 @@ pub fn auto_identify_unit_info(cfg: &UnitConfig) -> Result<UnitInfo, String> {
             .and_then(|f| f.default_value.clone()),
         sub_units,
         status: "complete".to_string(),
+        metadata,
     };
 
     validate_unit_info(&unit_info, &Some(cfg.clone()))?;
@@ -135,6 +169,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         }
     }
 
@@ -157,6 +192,7 @@ mod tests {
                     serial_number: None,
                 },
             ])),
+            metadata: None,
         }
     }
 
@@ -264,6 +300,7 @@ mod tests {
                     ..Default::default()
                 }),
             }])),
+            metadata: None,
         };
         let info = auto_identify_unit_info(&cfg).unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
@@ -285,6 +322,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         };
         let err = auto_identify_unit_info(&cfg).unwrap_err();
         assert!(err.contains("serial_number.default_value"));
@@ -323,11 +361,106 @@ mod tests {
                     serial_number: None,
                 },
             ])),
+            metadata: None,
         };
         let err = auto_identify_unit_info(&cfg).unwrap_err();
         assert!(
             err.contains("sub_units.motor.serial_number.default_value"),
             "expected motor-named error, got: {err}"
         );
+    }
+
+    fn cfg_with_metadata() -> UnitConfig {
+        let mut cfg = cfg_minimal();
+        let mut md = std::collections::BTreeMap::new();
+        md.insert(
+            "modification".to_string(),
+            UnitFieldConfig {
+                pattern: Some("^MOD-[0-9]+$".to_string()),
+                ..Default::default()
+            },
+        );
+        md.insert("amendment".to_string(), UnitFieldConfig::default());
+        cfg.metadata = Some(md);
+        cfg
+    }
+
+    #[test]
+    fn resolve_response_routes_metadata_prefix() {
+        let cfg = cfg_with_metadata();
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN-1".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+        values.insert("metadata:modification".to_string(), " MOD-42 ".to_string());
+        values.insert("metadata:amendment".to_string(), "".to_string()); // blank → absent
+        values.insert("metadata:undeclared".to_string(), "x".to_string()); // ignored
+
+        let info = resolve_response(&cfg, values).unwrap();
+        let md = info.metadata.expect("metadata populated");
+        assert_eq!(md.get("modification").map(String::as_str), Some("MOD-42"));
+        assert!(!md.contains_key("amendment"));
+        assert!(!md.contains_key("undeclared"));
+    }
+
+    #[test]
+    fn resolve_response_metadata_pattern_violation_errors() {
+        let cfg = cfg_with_metadata();
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN-1".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+        values.insert("metadata:modification".to_string(), "BAD-1".to_string());
+
+        let err = resolve_response(&cfg, values).unwrap_err();
+        assert!(err.contains("modification"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_response_all_metadata_blank_is_none() {
+        let cfg = cfg_with_metadata();
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN-1".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+        values.insert("metadata:modification".to_string(), "  ".to_string());
+
+        let info = resolve_response(&cfg, values).unwrap();
+        assert!(info.metadata.is_none());
+    }
+
+    #[test]
+    fn auto_identify_resolves_metadata_defaults() {
+        let mut cfg = UnitConfig {
+            auto_identify: true,
+            serial_number: Some(UnitFieldConfig {
+                default_value: Some("SN-AUTO".to_string()),
+                ..Default::default()
+            }),
+            part_number: Some(UnitFieldConfig {
+                default_value: Some("PCB-AUTO".to_string()),
+                ..Default::default()
+            }),
+            revision_number: None,
+            batch_number: None,
+            sub_units: None,
+            metadata: None,
+        };
+        let mut md = std::collections::BTreeMap::new();
+        md.insert(
+            "modification".to_string(),
+            UnitFieldConfig {
+                default_value: Some("MOD-42".to_string()),
+                ..Default::default()
+            },
+        );
+        // No default — absent, not an error (metadata never required)
+        md.insert("amendment".to_string(), UnitFieldConfig::default());
+        cfg.metadata = Some(md);
+
+        let info = auto_identify_unit_info(&cfg).unwrap();
+        let resolved = info.metadata.expect("metadata from defaults");
+        assert_eq!(
+            resolved.get("modification").map(String::as_str),
+            Some("MOD-42")
+        );
+        assert!(!resolved.contains_key("amendment"));
     }
 }

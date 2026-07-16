@@ -65,6 +65,20 @@ pub fn build_components(cfg: &UnitConfig) -> Result<Vec<UiComponent>, String> {
     if let Some(sub_units) = cfg.sub_units.as_ref() {
         components.extend(build_sub_unit_components(sub_units));
     }
+    // Metadata fields render after the built-in fields, alphabetically
+    // (BTreeMap order), each with the `metadata:<key>` prefix convention
+    // (mirrors `sub_unit:<key>`). Always optional — metadata is never
+    // required.
+    if let Some(md) = cfg.metadata.as_ref() {
+        for (key, field_cfg) in md {
+            components.push(text_input_component(
+                &format!("metadata:{key}"),
+                key,
+                field_cfg,
+                false,
+            ));
+        }
+    }
 
     Ok(components)
 }
@@ -127,6 +141,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         }
     }
 
@@ -260,5 +275,42 @@ mod tests {
             .find(|c| c.key == "sub_unit:rf_module")
             .expect("rf_module sub-unit component");
         assert_eq!(rf.pattern.as_deref(), Some("^RF-"));
+    }
+
+    #[test]
+    fn metadata_fields_emit_prefixed_optional_components() {
+        let mut cfg = cfg_with_required_fields();
+        let mut md = std::collections::BTreeMap::new();
+        md.insert(
+            "modification".to_string(),
+            UnitFieldConfig {
+                placeholder: Some("MOD-42".to_string()),
+                pattern: Some("^MOD-[0-9]+$".to_string()),
+                ..Default::default()
+            },
+        );
+        md.insert("amendment".to_string(), UnitFieldConfig::default());
+        cfg.metadata = Some(md);
+
+        let components = build_components(&cfg).unwrap();
+        let modification = components
+            .iter()
+            .find(|c| c.key == "metadata:modification")
+            .expect("modification component");
+        assert_eq!(modification.label.as_deref(), Some("modification"));
+        assert!(!modification.required);
+        assert_eq!(modification.placeholder.as_deref(), Some("MOD-42"));
+        assert_eq!(modification.pattern.as_deref(), Some("^MOD-[0-9]+$"));
+
+        // BTreeMap: alphabetical order — amendment before modification
+        let idx_a = components
+            .iter()
+            .position(|c| c.key == "metadata:amendment")
+            .unwrap();
+        let idx_m = components
+            .iter()
+            .position(|c| c.key == "metadata:modification")
+            .unwrap();
+        assert!(idx_a < idx_m);
     }
 }

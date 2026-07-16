@@ -1,6 +1,3 @@
-
-
-
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -67,7 +64,9 @@ pub fn emit_job_complete_event(
 
     log::debug!(
         "Emitting job-complete for {}: outcome={:?}, is_retry_limit_exceeded={}",
-        job.phase_name, phase_outcome, is_retry_limit_exceeded
+        job.phase_name,
+        phase_outcome,
+        is_retry_limit_exceeded
     );
 
     event_sink.emit(&ExecutionEvent::JobComplete {
@@ -89,5 +88,7 @@ pub fn emit_job_complete_event(
         duration_ms,
         worker_id,
         error: error_message,
+        run_metadata: job_result.run_metadata.clone(),
+        unit_metadata: job_result.unit_metadata.clone(),
     });
 }

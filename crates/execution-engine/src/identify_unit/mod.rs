@@ -220,6 +220,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         }
     }
 
@@ -238,6 +239,7 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         };
         let host = FakeHost::ok(HashMap::new());
         let info = identify(&cfg, Some("default"), &host).await.unwrap();
@@ -269,7 +271,9 @@ mod tests {
     #[tokio::test]
     async fn no_ui_fails_fast_without_prompting() {
         let cfg = cfg_for_prompt();
-        let host = NoUiHost { captured: Mutex::new(None) };
+        let host = NoUiHost {
+            captured: Mutex::new(None),
+        };
         let err = identify(&cfg, Some("default"), &host).await.unwrap_err();
         assert!(matches!(err, IdentifyError::NoUi(_)));
         // The prompt was never broadcast — that's what stops the hang.
@@ -293,8 +297,11 @@ mod tests {
             revision_number: None,
             batch_number: None,
             sub_units: None,
+            metadata: None,
         };
-        let host = NoUiHost { captured: Mutex::new(None) };
+        let host = NoUiHost {
+            captured: Mutex::new(None),
+        };
         let info = identify(&cfg, Some("default"), &host).await.unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         assert!(host.captured.lock().unwrap().is_none());

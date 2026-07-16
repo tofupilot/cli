@@ -261,6 +261,35 @@ pub enum StageScope {
     TeardownAll,
 }
 
+/// Validate metadata keys against the server-side contract:
+/// `^[a-zA-Z0-9_.:+-]+$`, 1..=40 chars, max 50 keys per map.
+pub fn validate_metadata_keys<'a>(
+    keys: impl Iterator<Item = &'a str>,
+    ctx: &str,
+) -> Result<(), String> {
+    let mut count = 0usize;
+    for key in keys {
+        count += 1;
+        if key.is_empty() || key.len() > 40 {
+            return Err(format!(
+                "{ctx} key '{key}' must be between 1 and 40 characters"
+            ));
+        }
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '+' | '-'))
+        {
+            return Err(format!(
+                "{ctx} key '{key}' is invalid: only letters, digits and _ . : + - are allowed"
+            ));
+        }
+    }
+    if count > 50 {
+        return Err(format!("{ctx} is limited to 50 keys (found {count})"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
@@ -558,6 +587,13 @@ pub struct UnitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub sub_units: Option<SubUnitsConfig>,
+
+    /// Operator-prompted unit metadata fields, keyed by metadata key.
+    /// Each field renders as a text input in the identify form (alphabetical
+    /// order) and its value is upserted onto the unit at upload. Values are
+    /// always optional — blank input means the key is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::BTreeMap<String, UnitFieldConfig>>,
 }
 
 impl UnitConfig {
@@ -927,8 +963,8 @@ impl PythonSpec {
 
             // Canonicalize to resolve .. and symlinks. Strip `\\?\`
             // on Windows so the path is safe to use in spawn argv.
-            let resolved = crate::path_utils::canonicalize_for_spawn(&expanded_path)
-                .unwrap_or(expanded_path);
+            let resolved =
+                crate::path_utils::canonicalize_for_spawn(&expanded_path).unwrap_or(expanded_path);
 
             // Ensure .py extension
             if resolved.extension().map(|e| e == "py").unwrap_or(false) {
@@ -2099,6 +2135,56 @@ mod tests {
     #[test]
     fn test_ts_export() {
         assert!(true);
+    }
+
+    // ========================================================================
+    // Unit metadata tests
+    // ========================================================================
+
+    #[test]
+    fn unit_metadata_field_configs_parse() {
+        let yaml = r#"
+name: Test
+version: "1.0"
+unit:
+  serial_number:
+    pattern: "^SN-"
+  part_number: {}
+  metadata:
+    modification:
+      placeholder: "MOD-42"
+      pattern: "^MOD-[0-9]+$"
+    amendment: {}
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#;
+        let raw: ProcedureYaml = serde_yaml::from_str(yaml).unwrap();
+        let unit = raw.unit.expect("unit parsed");
+        let md = unit.metadata.expect("unit metadata parsed");
+        assert_eq!(md.len(), 2);
+        assert_eq!(
+            md.get("modification").unwrap().pattern.as_deref(),
+            Some("^MOD-[0-9]+$")
+        );
+        assert!(md.get("amendment").unwrap().pattern.is_none());
+    }
+
+    #[test]
+    fn validate_metadata_keys_rules() {
+        // valid
+        assert!(validate_metadata_keys(["mod-1", "a.b:c+d_e"].into_iter(), "metadata").is_ok());
+        // bad charset
+        assert!(validate_metadata_keys(["has space"].into_iter(), "metadata").is_err());
+        // empty
+        assert!(validate_metadata_keys([""].into_iter(), "metadata").is_err());
+        // too long
+        let long = "k".repeat(41);
+        assert!(validate_metadata_keys([long.as_str()].into_iter(), "metadata").is_err());
+        // too many
+        let many: Vec<String> = (0..51).map(|i| format!("k{i}")).collect();
+        assert!(validate_metadata_keys(many.iter().map(|s| s.as_str()), "metadata").is_err());
     }
 
     #[test]

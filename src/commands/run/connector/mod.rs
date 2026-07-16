@@ -151,6 +151,7 @@ fn build_unit_config_from_kwargs(
         revision_number: field("revision_number"),
         batch_number: field("batch_number"),
         sub_units: None,
+        metadata: None,
     }
 }
 
@@ -437,6 +438,7 @@ pub async fn run_openhtf(
                                     Some(reused.sub_units.clone())
                                 },
                                 status: String::new(),
+                                metadata: None,
                             };
                             // Mirror the YAML path's reuse-validation
                             // (engine.rs run_yaml_procedure): a stale
@@ -1916,6 +1918,7 @@ mod tests {
             batch_number: None,
             sub_units: Some(sub),
             status: "complete".to_string(),
+            metadata: None,
         };
         let wire = unit_info_to_wire(&info);
         assert_eq!(wire.serial_number.as_deref(), Some("SN"));

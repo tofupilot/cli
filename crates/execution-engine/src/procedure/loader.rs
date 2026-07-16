@@ -1,5 +1,5 @@
-use crate::procedure::schema::{ProcedureDefinition, ProcedureYaml};
 use super::error::CommandError;
+use crate::procedure::schema::{ProcedureDefinition, ProcedureYaml};
 use std::path::Path;
 use validator::Validate;
 
@@ -8,13 +8,12 @@ fn validate_file_path(path: &Path) -> Result<(), CommandError> {
         return Err(CommandError::file_not_found(path.display()));
     }
 
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .ok_or_else(|| CommandError::new(
+    let extension = path.extension().and_then(|e| e.to_str()).ok_or_else(|| {
+        CommandError::new(
             super::error::ErrorCode::InvalidFileExtension,
-            "File has no extension"
-        ))?;
+            "File has no extension",
+        )
+    })?;
 
     // Case-insensitive: the CLI's yaml-hint check accepts `.YML`/`.YAML`
     // and routes the file here, so the loader must agree.
@@ -22,7 +21,7 @@ fn validate_file_path(path: &Path) -> Result<(), CommandError> {
     if extension != "yaml" && extension != "yml" {
         return Err(CommandError::new(
             super::error::ErrorCode::InvalidFileExtension,
-            "File must be a YAML file (.yaml or .yml)"
+            "File must be a YAML file (.yaml or .yml)",
         ));
     }
 
@@ -36,8 +35,8 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     let content = std::fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read {}: {}", file_path.display(), e))?;
 
-    let raw: ProcedureYaml = serde_yaml::from_str(&content)
-        .map_err(|e| format!("Failed to parse YAML: {}", e))?;
+    let raw: ProcedureYaml =
+        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
 
     let procedure_def = ProcedureDefinition::from(raw);
 
@@ -48,6 +47,14 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     if let Some(unit) = &procedure_def.unit {
         unit.validate_auto_identify()
             .map_err(|e| format!("Validation failed: {}", e))?;
+
+        if let Some(md) = &unit.metadata {
+            crate::procedure::schema::validate_metadata_keys(
+                md.keys().map(|k| k.as_str()),
+                "unit.metadata",
+            )
+            .map_err(|e| format!("Validation failed: {}", e))?;
+        }
     }
 
     for (_, phase) in procedure_def.get_all_phases_with_stage_scope() {
@@ -70,11 +77,7 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
                         T::Radio | T::Select | T::Multiselect | T::Checklist
                     );
                     if needs_options {
-                        let empty = comp
-                            .options
-                            .as_ref()
-                            .map(|o| o.is_empty())
-                            .unwrap_or(true);
+                        let empty = comp.options.as_ref().map(|o| o.is_empty()).unwrap_or(true);
                         if empty {
                             return Err(format!(
                                 "UI component `{}` (type `{:?}`) requires a non-empty `options` list",
@@ -108,11 +111,8 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
 
     // `depends_on` must reference phase keys that exist in the procedure.
     // Silently ignoring unknown dependencies lets a typo mask broken ordering.
-    let known_keys: std::collections::HashSet<&str> = procedure_def
-        .main
-        .iter()
-        .map(|p| p.key.as_str())
-        .collect();
+    let known_keys: std::collections::HashSet<&str> =
+        procedure_def.main.iter().map(|p| p.key.as_str()).collect();
     for phase in &procedure_def.main {
         for dep in &phase.depends_on {
             if !known_keys.contains(dep.as_str()) {
@@ -131,10 +131,7 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     // directly ("depends on itself" vs "a -> a").
     for phase in &procedure_def.main {
         if phase.depends_on.iter().any(|d| d == &phase.key) {
-            return Err(format!(
-                "Phase `{}` depends on itself",
-                phase.key
-            ));
+            return Err(format!("Phase `{}` depends on itself", phase.key));
         }
     }
 
@@ -165,7 +162,10 @@ fn find_dependency_cycle(
 
     let by_key: HashMap<&str, &crate::procedure::schema::PhaseDefinition> =
         phases.iter().map(|p| (p.key.as_str(), p)).collect();
-    let mut color: HashMap<&str, Color> = phases.iter().map(|p| (p.key.as_str(), Color::White)).collect();
+    let mut color: HashMap<&str, Color> = phases
+        .iter()
+        .map(|p| (p.key.as_str(), Color::White))
+        .collect();
 
     fn dfs<'a>(
         node: &'a str,
@@ -202,7 +202,12 @@ fn find_dependency_cycle(
     }
 
     for phase in phases {
-        if color.get(phase.key.as_str()).copied().unwrap_or(Color::White) == Color::White {
+        if color
+            .get(phase.key.as_str())
+            .copied()
+            .unwrap_or(Color::White)
+            == Color::White
+        {
             let mut stack = Vec::new();
             if let Some(cycle) = dfs(phase.key.as_str(), &by_key, &mut color, &mut stack) {
                 return Some(cycle);
