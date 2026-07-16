@@ -1,0 +1,21 @@
+name: Y43 Plug Config Mismatch
+version: 1.0.0
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: SN-001
+  part_number:
+    default_value: PN-DEMO
+
+plugs:
+  - name: Power Supply
+    key: psu
+    python: instruments.power_supply:PowerSupply
+    config:
+      bogus_key: 1
+
+main:
+  - key: measure
+    name: Measure
+    python: phases.measure

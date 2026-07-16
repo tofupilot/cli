@@ -1,0 +1,37 @@
+name: Y42 Plug Config
+version: 1.0.0
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: SN-001
+  part_number:
+    default_value: PN-DEMO
+
+plugs:
+  - name: Power Supply
+    key: psu_a
+    python: instruments.power_supply:PowerSupply
+    config:
+      initial_voltage: 5.0
+  - name: Power Supply B
+    key: psu_b
+    python: instruments.power_supply:PowerSupply
+    config:
+      initial_voltage: 3.3
+
+main:
+  - key: measure
+    name: Measure
+    python: phases.measure
+    measurements:
+      - name: va
+        unit: V
+        validators:
+          - operator: "=="
+            expected_value: 5.0
+      - name: vb
+        unit: V
+        validators:
+          - operator: "=="
+            expected_value: 3.3

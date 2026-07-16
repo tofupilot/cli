@@ -306,6 +306,22 @@ check("Y26p plug state persists", events, rc, expect_pass=True)
 events, rc = drive("/tmp/yaml_test27")
 check("Y27p plug missing module", events, rc, expect_pass=False, expect_phase_error=True)
 
+# Y42: config from procedure.yaml reaches the plug __init__ as kwargs. Each
+# plug key gets its own config, so va==5.0 and vb==3.3 only hold if the
+# per-instance config was injected (no configure phase runs).
+events, rc = drive("/tmp/yaml_test42")
+check("Y42p plug config to __init__", events, rc, expect_pass=True)
+
+# Y43: a config key that does not match the plug __init__ signature raises
+# TypeError at plug init, before any phase runs — the run errors and the
+# downstream phase is skipped with the plug error as its reason.
+events, rc = drive("/tmp/yaml_test43")
+check("Y43p plug config mismatch errors", events, rc, expect_pass=False)
+sk = next((e for e in events if e.get("type") == "phase_skipped"), None)
+if not sk or not sk.get("reason"):
+    RESULTS[-1] = (RESULTS[-1][0], False, RESULTS[-1][2] + ["expected phase_skipped with reason"])
+    print("  - expected phase_skipped with reason")
+
 # ===== Y28+ framework depth =====
 events, rc = drive("/tmp/yaml_test28")
 check("Y28 phase timeout → TIMEOUT", events, rc, expect_pass=False)
