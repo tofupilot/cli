@@ -232,6 +232,8 @@ pub enum PhaseListQueryParamSample {
     Golden,
     #[serde(rename = "failing")]
     Failing,
+    #[serde(rename = "ignored")]
+    Ignored,
 }
 
 impl std::fmt::Display for PhaseListQueryParamSample {
@@ -240,6 +242,7 @@ impl std::fmt::Display for PhaseListQueryParamSample {
             Self::Production => write!(f, "production"),
             Self::Golden => write!(f, "golden"),
             Self::Failing => write!(f, "failing"),
+            Self::Ignored => write!(f, "ignored"),
         }
     }
 }
@@ -457,13 +460,15 @@ impl std::fmt::Display for Environment {
     }
 }
 
-/// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
+/// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Sample {
     #[serde(rename = "golden")]
     Golden,
     #[serde(rename = "failing")]
     Failing,
+    #[serde(rename = "ignored")]
+    Ignored,
 }
 
 impl std::fmt::Display for Sample {
@@ -471,6 +476,7 @@ impl std::fmt::Display for Sample {
         match self {
             Self::Golden => write!(f, "golden"),
             Self::Failing => write!(f, "failing"),
+            Self::Ignored => write!(f, "ignored"),
         }
     }
 }
@@ -4005,7 +4011,7 @@ pub struct RunListUnit {
     pub id: String,
     /// Unit serial number.
     pub serial_number: String,
-    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Sample>,
     /// Part information with revision details.
@@ -4051,7 +4057,7 @@ impl RunListUnitBuilder {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = Some(value.into());
         self
@@ -4710,7 +4716,7 @@ pub struct RunGetUnit {
     pub id: String,
     /// Unit serial number.
     pub serial_number: String,
-    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Sample>,
     /// Part information with revision details.
@@ -4756,7 +4762,7 @@ impl RunGetUnitBuilder {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification of the unit. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = Some(value.into());
         self
@@ -6361,7 +6367,7 @@ pub struct UnitCreateRequest {
     pub part_number: String,
     /// Hardware revision identifier for the specific version of the part. If the revision does not exist, it will be created.
     pub revision_number: String,
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub sample: NullableField<Sample>,
     /// Custom metadata to attach to the unit (max 50 keys per unit). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
@@ -6413,7 +6419,7 @@ impl UnitCreateRequestBuilder {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = NullableField::Value(value.into());
         self
@@ -7083,7 +7089,7 @@ pub struct UnitListData {
     pub serial_number: String,
     /// ISO 8601 timestamp when the unit was created.
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Sample>,
     /// User who created this unit. Null if created by a station or system.
@@ -7162,7 +7168,7 @@ impl UnitListDataBuilder {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = Some(value.into());
         self
@@ -7910,7 +7916,7 @@ pub struct UnitGetResponse {
     pub serial_number: String,
     /// ISO 8601 timestamp when the unit was created.
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, null = production unit.
+    /// Reference-sample classification. 'golden' = known-good reference, 'failing' = known-faulty reference, 'ignored' = bench-check unit excluded from analytics and alerts, null = production unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Sample>,
     /// User who created this unit.
@@ -7958,7 +7964,7 @@ pub struct UnitUpdateRequestBody {
     /// Array of upload IDs to attach to the unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics by default. Set to null to clear and treat as a production unit.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics by default. Set to null to clear and treat as a production unit.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub sample: NullableField<Sample>,
     /// Custom metadata to upsert on the unit. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
@@ -8034,7 +8040,7 @@ impl UnitUpdateRequestBodyBuilder {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics by default. Set to null to clear and treat as a production unit.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics by default. Set to null to clear and treat as a production unit.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = NullableField::Value(value.into());
         self

@@ -8,3 +8,4 @@
 | `PhaseListQueryParamSample::Production` | `production` |
 | `PhaseListQueryParamSample::Golden` | `golden` |
 | `PhaseListQueryParamSample::Failing` | `failing` |
+| `PhaseListQueryParamSample::Ignored` | `ignored` |

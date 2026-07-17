@@ -163,7 +163,7 @@ impl<'a> CreateBuilder<'a> {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = Some(NullableField::Value(value.into()));
         self
@@ -939,7 +939,7 @@ impl<'a> UpdateBuilder<'a> {
 
     /// Set the `sample` field.
     ///
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics by default. Set to null to clear and treat as a production unit.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics by default. Set to null to clear and treat as a production unit.
     pub fn sample(mut self, value: impl Into<Sample>) -> Self {
         self.sample = Some(NullableField::Value(value.into()));
         self
