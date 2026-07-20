@@ -7,6 +7,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.19]
+
+Documentation release: backfilled the changelog for 0.26.5 through 0.26.18.
+No functional changes.
+
+## [0.26.18]
+
+### Added
+
+- Debug mode for Python phases: `tofupilot run --debug` starts a debugpy
+  listener (default port 5678, override with `--debug-port`) and waits for a
+  debugger such as VS Code to attach, so you can set breakpoints, step, and
+  inspect variables in phase code. Phase timeouts are suspended while a
+  debugger is attached; if debugpy is not installed the run tells you how to
+  add it and keeps normal timeouts.
+- Per-plug `config` mapping in `procedure.yaml`: each key is passed as a
+  keyword argument to the plug class `__init__`, so instrument addresses and
+  settings live in the procedure instead of being hard-coded in Python.
+
+## [0.26.17]
+
+_Not published as a standalone release; first shipped with 0.26.18._
+
+### Added
+
+- Run and unit metadata support in the framework. Python phases can set
+  custom key-value metadata via `run.metadata[...]` and `unit.metadata[...]`;
+  values are validated at assignment and uploaded with the run.
+- The operator identify form can collect unit metadata: declare
+  `unit.metadata.<key>` fields in `procedure.yaml` and they render as text
+  inputs next to the serial number on the TUI, kiosk, web operator UI, and
+  agent `--ui-values`.
+
+## [0.26.16]
+
+_Not published as a standalone release; first shipped with 0.26.18._
+
+### Fixed
+
+- The bundled kiosk operator UI now ships with product analytics and session
+  replay enabled; release builds previously omitted the analytics key, so
+  kiosk usage was never recorded.
+
+## [0.26.15]
+
+### Fixed
+
+- `tofupilot pull` resolves the station identity first instead of the user
+  key, fixing `403 Station authentication required` on stations that had
+  also performed a user login (regression from the 0.26.9 credential split).
+
+## [0.26.14]
+
+### Added
+
+- macOS release binaries are signed and notarized with an Apple Developer
+  ID certificate, so Gatekeeper no longer blocks `tofupilot` on download.
+
+## [0.26.13]
+
+Version-only bump to ship the first Windows release with Authenticode-signed
+binaries. No code changes.
+
+## [0.26.12]
+
+### Fixed
+
+- The Linux station launcher now resolves the localized desktop folder
+  (e.g. `~/Bureau` on French systems) instead of hardcoding `~/Desktop`, so
+  the station shortcut lands where the operator can see it. Windows resolves
+  the Known Folder (OneDrive-aware) as well.
+
+## [0.26.11]
+
+### Fixed
+
+- Operator answers with a `bind:` directive now record their measurement on
+  the in-terminal TUI and the agent `--json` protocol, matching the kiosk
+  and Studio. Previously bound `radio`/`select` inputs recorded no
+  measurement, and later phases reading it crashed.
+
+## [0.26.10]
+
+### Added
+
+- Stations can opt into system Python packages for deployments: the new
+  `system_packages` station config toggle builds deployment venvs with
+  `--system-site-packages`, so natively installed instrument drivers and
+  vendor SDKs are importable from procedures.
+
+## [0.26.9]
+
+### Fixed
+
+- A user login (`tofupilot login` or `deploy`) no longer overwrites the
+  station credential: user and station identities are stored separately, so
+  the station service keeps working after a user logs in on the same
+  machine.
+
+## [0.26.8]
+
+### Fixed
+
+- `tofupilot run --kiosk` works again when launched as root in the
+  foreground (e.g. headless jigs viewed over an SSH port-forward). The kiosk
+  server stays disabled for the root station daemon, where it would be a
+  privilege-escalation risk.
+
+## [0.26.7]
+
+### Fixed
+
+- `tofupilot update` retries transient connection resets during the binary
+  download instead of aborting mid-transfer.
+
+## [0.26.6]
+
+### Fixed
+
+- `tofupilot update` retries transient network failures during the version
+  check instead of failing on a single blip.
+
+## [0.26.5]
+
+### Fixed
+
+- `attach.data` attachments on the native YAML engine are now written to
+  disk and uploaded; previously they were silently dropped.
+- Uploaded attachments are finalized after upload, so the dashboard shows
+  their size, content type, and preview instead of `Unknown`.
+
 ## [0.26.4]
 
 ### Fixed
@@ -76,7 +207,21 @@ Open-source readiness pass. No user-facing behavior changes.
 - Auto-bootstrap of a virtualenv on local-path runs and monorepo workspace
   bootstrap via `uv sync`.
 
-[Unreleased]: https://github.com/tofupilot/cli/compare/v0.22.19...HEAD
+[Unreleased]: https://github.com/tofupilot/cli/compare/v0.26.19...HEAD
+[0.26.19]: https://github.com/tofupilot/cli/compare/v0.26.18...v0.26.19
+[0.26.18]: https://github.com/tofupilot/cli/compare/v0.26.15...v0.26.18
+[0.26.15]: https://github.com/tofupilot/cli/compare/v0.26.14...v0.26.15
+[0.26.14]: https://github.com/tofupilot/cli/compare/v0.26.13...v0.26.14
+[0.26.13]: https://github.com/tofupilot/cli/compare/v0.26.12...v0.26.13
+[0.26.12]: https://github.com/tofupilot/cli/compare/v0.26.11...v0.26.12
+[0.26.11]: https://github.com/tofupilot/cli/compare/v0.26.10...v0.26.11
+[0.26.10]: https://github.com/tofupilot/cli/compare/v0.26.9...v0.26.10
+[0.26.9]: https://github.com/tofupilot/cli/compare/v0.26.8...v0.26.9
+[0.26.8]: https://github.com/tofupilot/cli/compare/v0.26.7...v0.26.8
+[0.26.7]: https://github.com/tofupilot/cli/compare/v0.26.6...v0.26.7
+[0.26.6]: https://github.com/tofupilot/cli/compare/v0.26.5...v0.26.6
+[0.26.5]: https://github.com/tofupilot/cli/compare/v0.26.4...v0.26.5
+[0.26.4]: https://github.com/tofupilot/cli/compare/v0.26.3...v0.26.4
 [0.22.19]: https://github.com/tofupilot/cli/compare/v0.22.18...v0.22.19
 [0.22.18]: https://github.com/tofupilot/cli/compare/v0.22.17...v0.22.18
 [0.22.17]: https://github.com/tofupilot/cli/compare/v0.22.16...v0.22.17
