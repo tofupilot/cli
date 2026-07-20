@@ -28,3 +28,7 @@ pub use client::TofuPilot;
 pub use config::ClientConfig;
 pub use error::{Error, Result};
 pub use hooks::{Hook, Hooks};
+
+/// Re-exported so callers can build certificates and clients without
+/// depending on a matching `reqwest` version themselves.
+pub use reqwest::{Certificate, Client as HttpClient};

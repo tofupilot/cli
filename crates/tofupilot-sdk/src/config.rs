@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::hooks::Hooks;
 
 /// Configuration for the TofuPilot API client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientConfig {
     /// Base URL for the API (e.g. `https://www.tofupilot.app/api`)
     pub base_url: String,
@@ -18,6 +18,23 @@ pub struct ClientConfig {
     pub user_agent: String,
     /// Request lifecycle hooks
     pub hooks: Hooks,
+    /// Additional root certificates, for self-hosted instances behind a private CA
+    pub root_certificates: Vec<reqwest::Certificate>,
+}
+
+// Manual impl so Debug output never carries the API key into logs.
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("user_agent", &self.user_agent)
+            .field("hooks", &self.hooks)
+            .field("root_certificates", &format_args!("{} certificate(s)", self.root_certificates.len()))
+            .finish()
+    }
 }
 
 impl ClientConfig {
@@ -30,6 +47,7 @@ impl ClientConfig {
             max_retries: 3,
             user_agent: format!("tofupilot-rust/{}", env!("CARGO_PKG_VERSION")),
             hooks: Hooks::new(),
+            root_certificates: Vec::new(),
         }
     }
 
@@ -62,5 +80,31 @@ impl ClientConfig {
     pub fn hooks(mut self, hooks: Hooks) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    /// Trust an additional root certificate, in PEM or DER form.
+    ///
+    /// System roots stay trusted; this only adds to them.
+    pub fn add_root_certificate(mut self, certificate: reqwest::Certificate) -> Self {
+        self.root_certificates.push(certificate);
+        self
+    }
+
+    /// Trust an additional root certificate read from a PEM file.
+    ///
+    /// ```no_run
+    /// # use tofupilot::ClientConfig;
+    /// let config = ClientConfig::new("api_key")
+    ///     .base_url("https://tofupilot.yourcompany.com")
+    ///     .root_certificate_from_pem_file("/path/to/ca-certificate.pem")?;
+    /// # Ok::<(), tofupilot::Error>(())
+    /// ```
+    pub fn root_certificate_from_pem_file(
+        self,
+        path: impl AsRef<std::path::Path>,
+    ) -> crate::Result<Self> {
+        let pem = std::fs::read(path)?;
+        let certificate = reqwest::Certificate::from_pem(&pem)?;
+        Ok(self.add_root_certificate(certificate))
     }
 }

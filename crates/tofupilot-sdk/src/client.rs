@@ -48,6 +48,8 @@ pub struct TofuPilot {
     pub(crate) http: reqwest::Client,
     pub(crate) http_external: reqwest::Client,
     pub(crate) config: ClientConfig,
+    /// Auth and telemetry headers, applied to every API request in execute().
+    headers: reqwest::header::HeaderMap,
 }
 
 impl TofuPilot {
@@ -58,12 +60,41 @@ impl TofuPilot {
 
     /// Create a new client with full configuration.
     pub fn with_config(config: ClientConfig) -> Self {
+        let mut builder = reqwest::Client::builder().timeout(config.timeout);
+        for certificate in &config.root_certificates {
+            builder = builder.add_root_certificate(certificate.clone());
+        }
+        let http = builder
+            .build()
+            .expect("failed to build HTTP client");
+
+        Self::with_client(config, http)
+    }
+
+    /// Create a new client from an existing `reqwest::Client`.
+    ///
+    /// For transport settings the config does not cover, such as client
+    /// certificates or a proxy. The supplied client owns its TLS setup:
+    /// `config.root_certificates` is not applied to it. Base URL, timeout,
+    /// retries, hooks, and authentication still come from the config — auth
+    /// and timeout are applied per request, so the client needs no
+    /// credentials of its own.
+    pub fn with_client(config: ClientConfig, http: reqwest::Client) -> Self {
+        // Presigned attachment URLs point at the instance's storage, which
+        // sits behind the same CA on self-hosted deployments.
+        let mut external = reqwest::Client::builder();
+        for certificate in &config.root_certificates {
+            external = external.add_root_certificate(certificate.clone());
+        }
+        let http_external = external
+            .build()
+            .expect("failed to build external HTTP client");
+
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", config.api_key))
-                .expect("invalid API key"),
-        );
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", config.api_key))
+            .expect("invalid API key");
+        auth.set_sensitive(true); // redacted from Debug output
+        headers.insert(AUTHORIZATION, auth);
         headers.insert(
             USER_AGENT,
             HeaderValue::from_str(&config.user_agent).unwrap_or_else(|_| {
@@ -81,18 +112,7 @@ impl TofuPilot {
             }),
         );
 
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(config.timeout)
-            .build()
-            .expect("failed to build HTTP client");
-
-        let http_external = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .expect("failed to build external HTTP client");
-
-        Self { http, http_external, config }
+        Self { http, http_external, config, headers }
     }
 
     /// Access the Procedures API.
@@ -182,6 +202,10 @@ impl TofuPilot {
             base_url: Arc::from(base_url),
         };
 
+        // Applied here rather than as client defaults so a caller-supplied
+        // client still authenticates.
+        let request = request.headers(self.headers.clone());
+
         let mut last_error: Option<Error> = None;
 
         for attempt in 0..=self.config.max_retries {
@@ -198,7 +222,15 @@ impl TofuPilot {
                     "request cannot be cloned (streaming body)".to_string(),
                 ))?;
 
-            let built = req.build()?;
+            let mut built = req.build()?;
+
+            // config.timeout is a fallback — a per-builder .timeout() set by a
+            // resource call takes precedence. Applied on the built request so
+            // it also covers caller-supplied clients with no timeout of their
+            // own.
+            if built.timeout().is_none() {
+                *built.timeout_mut() = Some(self.config.timeout);
+            }
 
             // Run before-request hooks
             let built = self.config.hooks.run_before(&hook_ctx, built).await;
