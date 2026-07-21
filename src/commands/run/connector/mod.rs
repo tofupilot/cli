@@ -39,6 +39,40 @@ pub use robot::{has_robot, run_robot};
 
 const OPENHTF_CONNECTOR: &str = include_str!("openhtf.py");
 
+// How often the startup-stall watcher re-checks the progress flag. Coarse
+// on purpose — this path only matters when nothing else is happening, and a
+// tighter tick would burn CPU polling an `AtomicBool` for no gain.
+const STARTUP_STALL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Resolves ONLY when `timeout` elapses without `progressed` ever being set.
+///
+/// This is the startup-stall watchdog arm of `run_openhtf`'s `select!`. The
+/// obvious `sleep(timeout)` with a select guard is wrong: a `select!` guard
+/// is evaluated once at entry (when `progressed` is always still false), so
+/// it would fire even if the connector signals readiness a moment later.
+/// Instead we poll the flag: the instant it flips true we `pending()` — park
+/// forever — so this future can never win the `select!`, and one of the real
+/// arms (child exit / signal) resolves instead. If the flag is still false at
+/// the deadline, we return, and the caller treats it as a stall.
+///
+/// `Relaxed` ordering is sufficient: the flag is a one-way latch (false→true)
+/// touched by two tasks with no other shared state riding on it.
+async fn startup_stall_elapsed(
+    progressed: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if progressed.load(std::sync::atomic::Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(STARTUP_STALL_POLL).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Detection
 // ---------------------------------------------------------------------------
@@ -312,6 +346,15 @@ pub async fn run_openhtf(
     // a single (send + enqueue) pair.
     let router =
         super::event_router::EventRouter::new(tx.clone(), agent.clone(), execution_id.to_string());
+    // Startup-stall watchdog signal. The pump flips this to `true` the
+    // moment Python proves it is making progress (`bridge_ready` after a
+    // clean import, or `test_start` when execution begins). The outer
+    // `select!` races a `PYTHON_STARTUP_STALL` timer against it: if the
+    // flag is still false when the timer fires, the interpreter is alive
+    // but wedged before ever running the test (hung import, EDR hold),
+    // and we surface a clear error instead of hanging forever.
+    let progressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progressed_pump = progressed.clone();
     let stdout_handle = tokio::spawn(async move {
         let mut stdin_writer = stdin;
         let mut phases = Vec::new();
@@ -349,7 +392,15 @@ pub async fn run_openhtf(
                 continue;
             };
             match typed {
-                PythonEvent::BridgeReady => {}
+                PythonEvent::BridgeReady => {
+                    // The connector script is executing (this is emitted from
+                    // its first line, before `import openhtf`). Clear the
+                    // startup-stall watchdog: from here any delay is framework
+                    // import / device setup / the user's test, not a process
+                    // the OS never let start, so a stall past this point is
+                    // not the watchdog's false-positive to raise.
+                    progressed_pump.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 PythonEvent::Warning { message } => {
                     eprintln!("[tofupilot-connector] {message}");
                 }
@@ -391,6 +442,12 @@ pub async fn run_openhtf(
                     auto_identify,
                     unit_kwargs,
                 } => {
+                    // Belt-and-braces: `bridge_ready` already cleared the
+                    // startup watchdog, but set it again here so the run is
+                    // never falsely killed if that earlier event is ever
+                    // dropped or fails to parse. `test_start` is unambiguous
+                    // proof the test has begun.
+                    progressed_pump.store(true, std::sync::atomic::Ordering::Relaxed);
                     let plans: Vec<PhasePlan> = names
                         .iter()
                         .enumerate()
@@ -986,10 +1043,20 @@ pub async fn run_openhtf(
     let (stderr_handle, stderr_tail) = super::python::spawn_stderr_reader_with_capture(stderr);
 
     let mut cancelled_by_signal = false;
+    let mut startup_stalled = false;
     // OpenHTF has no force/graceful distinction — both Stop and Kill
     // route to `graceful_shutdown` (SIGTERM → wait → SIGKILL via the
     // process group). Race ctrl_c, the station Stop, and the station
     // Kill: any of the three triggers the same teardown.
+    //
+    // The `startup_stall` arm is a diagnostic backstop: if the Python
+    // child neither exited nor emitted `bridge_ready`/`test_start` within
+    // `PYTHON_STARTUP_STALL`, it is alive but wedged before the test ever
+    // ran (a hung `import`, a driver opening a device at import time, or
+    // an EDR/antivirus agent holding the process). Without this, `tofupilot
+    // run` prints `run_started` and then hangs forever with no clue why.
+    // The timer is disarmed the instant the pump sets `progressed`, so a
+    // legitimately slow test never trips it.
     let exit_code = tokio::select! {
         status = child.wait() => match status {
             Ok(s) => s.code().unwrap_or(1),
@@ -1011,10 +1078,61 @@ pub async fn run_openhtf(
             ));
             super::python::graceful_shutdown(&mut child).await
         }
+        _ = startup_stall_elapsed(&progressed, crate::config::timeouts::PYTHON_STARTUP_STALL) => {
+            startup_stalled = true;
+            crate::log::error(
+                "Procedure did not start within the startup window — the Python \
+                 process is running but has not begun the test.",
+            );
+            super::python::graceful_shutdown(&mut child).await
+        }
     };
 
     let _ = stderr_handle.await;
     // `_script_guard` Drop will remove the connector script.
+
+    // Startup stall: the child was alive but never reached the test.
+    // graceful_shutdown killed it above, so the pump (parked reading a
+    // now-closed stdout) will unwind on its own — abort it anyway to be
+    // certain, drain any pending prompt channels, and surface a single
+    // clear, actionable error to every consumer via `run_crashed`
+    // (RunCrashed + synthetic RunComplete(ERROR) for the operator UI,
+    // agent-protocol RunCrashed for headless callers). Include the stderr
+    // tail: a hung `import` often prints a partial traceback or a driver
+    // banner that pinpoints the offending module.
+    if startup_stalled {
+        stdout_handle.abort();
+        super::ui_response::cancel_all().await;
+        let tail = stderr_tail.lock().await.clone();
+        let tail = tail.trim();
+        let secs = crate::config::timeouts::PYTHON_STARTUP_STALL.as_secs();
+        let mut msg = format!(
+            "The procedure did not start within {secs}s. The Python process was \
+             spawned but never began executing — most often an antivirus/EDR \
+             agent holding the freshly-spawned interpreter on a locked-down \
+             machine, or a wedged interpreter at startup. (A slow test or a slow \
+             import would NOT trip this — the connector reports readiness before \
+             importing the framework.)\n\nTry:\n  • Run the deployment's Python \
+             on its entry file directly and see if it prints anything:\n      \
+             <venv>/bin/python main.py\n  • Allowlist the deployment's venv \
+             Python in your endpoint-protection / antivirus software.\n  • Check \
+             the machine's security-software logs for a block on that process."
+        );
+        if !tail.is_empty() {
+            msg.push_str(&format!("\n\n--- last Python stderr ---\n{tail}"));
+        }
+        crate::log::error(&msg);
+        super::emit::run_crashed(
+            &crash_tx,
+            agent.as_ref(),
+            procedure_id,
+            execution_id,
+            "startup_stall",
+            &msg,
+            exit_code,
+        );
+        return exit_code;
+    }
 
     // When Python died from a signal mid-prompt, the stdout pump is
     // still parked in `resp_rx.await` waiting for a UI answer that
@@ -1075,14 +1193,33 @@ pub async fn run_openhtf(
             //     consumers.
             //   * stderr — human operators watching the terminal.
             let tail = stderr_tail.lock().await.clone();
-            crate::log::error(&format!("Procedure subprocess crashed: {tail}"));
+            let tail = tail.trim();
+            let msg = if tail.is_empty() {
+                // No stderr at all: the interpreter died without a Python
+                // traceback — a segfault in a native extension, the OS OOM
+                // killer, or an external `kill`. Say so instead of printing
+                // an empty "crashed: " line the operator can't act on.
+                format!(
+                    "The procedure crashed before finishing (exit code {exit_code}) \
+                     with no Python error output. This usually means the interpreter \
+                     was killed from outside (out-of-memory, a native-extension \
+                     segfault, or a manual kill) rather than a Python exception. \
+                     Check the machine's system logs."
+                )
+            } else {
+                format!(
+                    "The procedure crashed before finishing (exit code {exit_code}). \
+                     The Python error is below.\n\n--- Python traceback ---\n{tail}"
+                )
+            };
+            crate::log::error(&msg);
             super::emit::run_crashed(
                 &crash_tx,
                 agent.as_ref(),
                 procedure_id,
                 execution_id,
                 "subprocess_crash",
-                &tail,
+                &msg,
                 exit_code,
             );
             return exit_code;
@@ -1929,5 +2066,85 @@ mod tests {
             wire.sub_units.get("battery").map(String::as_str),
             Some("BAT-1")
         );
+    }
+
+    // ---- startup-stall watchdog -----------------------------------------
+    //
+    // These drive `startup_stall_elapsed` on tokio's paused clock
+    // (`start_paused`), so `advance`/`sleep` move virtual time deterministically
+    // and the tests are instant. The invariants under test are the two the
+    // watchdog's correctness rests on: (1) it fires exactly once the deadline
+    // passes with no progress, and (2) it NEVER fires once progress is
+    // signalled — the property that keeps a slow-but-healthy run from being
+    // false-killed.
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_watch_fires_when_no_progress_by_deadline() {
+        let progressed = Arc::new(AtomicBool::new(false));
+        let timeout = Duration::from_secs(90);
+        // Never set `progressed`: the watcher must resolve. `timeout(...)` with
+        // a budget past the deadline lets the paused clock auto-advance to
+        // whichever timer is pending, so this returns without real waiting.
+        let r = tokio::time::timeout(
+            timeout + Duration::from_secs(5),
+            startup_stall_elapsed(&progressed, timeout),
+        )
+        .await;
+        assert!(r.is_ok(), "watcher should have fired at the deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_watch_does_not_fire_before_deadline() {
+        let progressed = Arc::new(AtomicBool::new(false));
+        let timeout = Duration::from_secs(90);
+        // Give it less budget than the deadline: the watcher must still be
+        // waiting, so the outer timeout elapses first.
+        let r = tokio::time::timeout(
+            Duration::from_secs(80),
+            startup_stall_elapsed(&progressed, timeout),
+        )
+        .await;
+        assert!(r.is_err(), "watcher fired early, before the deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_watch_never_fires_once_progressed() {
+        let progressed = Arc::new(AtomicBool::new(false));
+        let timeout = Duration::from_secs(90);
+        // Progress arrives well before the deadline. Flip the flag, then run
+        // the watcher far past the deadline: it must park forever (never
+        // resolve), so the outer timeout wins. This is the anti-false-kill
+        // guarantee.
+        let flag = progressed.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            flag.store(true, Ordering::Relaxed);
+        });
+        let r = tokio::time::timeout(
+            timeout * 10,
+            startup_stall_elapsed(&progressed, timeout),
+        )
+        .await;
+        assert!(
+            r.is_err(),
+            "watcher fired after progress was signalled — would false-kill a healthy run"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_watch_parks_when_progressed_from_the_start() {
+        // Flag already true before the watcher is ever polled (the pump set it
+        // between spawn and the select entering this arm). Must never fire.
+        let progressed = Arc::new(AtomicBool::new(true));
+        let r = tokio::time::timeout(
+            Duration::from_secs(1_000),
+            startup_stall_elapsed(&progressed, Duration::from_secs(90)),
+        )
+        .await;
+        assert!(r.is_err(), "watcher fired despite progress set before first poll");
     }
 }

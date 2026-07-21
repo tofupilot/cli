@@ -15,6 +15,18 @@ import signal
 import sys
 import uuid
 
+# Emit `bridge_ready` BEFORE the heavy `import openhtf` below. This is the
+# earliest point the CLI can observe that the interpreter is alive and
+# actually executing our connector script — which is exactly what the CLI's
+# startup-stall watchdog waits for. `import openhtf` transitively pulls
+# protobuf/numpy and can take many seconds on a cold venv or a machine whose
+# antivirus/EDR is indexing the fresh process; that cost must sit INSIDE the
+# run window, not in the watchdog's pre-start window, or a slow-but-healthy
+# import would be falsely killed. Only stdlib (json/sys) is needed here, and
+# both are imported above, so this line itself cannot block. Printed raw
+# rather than via `_emit` because `_emit` is defined further down.
+print(json.dumps({"type": "bridge_ready"}), flush=True)
+
 import openhtf as htf
 
 
@@ -822,7 +834,9 @@ def main():
 
     _install_signal_handlers()
     test_file = sys.argv[1]
-    _emit({"type": Event.BRIDGE_READY})
+    # `bridge_ready` is emitted at module top, before `import openhtf`, so
+    # the CLI's startup-stall watchdog disarms before the framework import
+    # cost is incurred. Not re-emitted here.
 
     # Replace UserInput plug. Idempotent via `_patch_once`.
     try:

@@ -88,12 +88,36 @@ pub const CLI_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60)
 /// we SIGKILL it. Most user teardown runs in <1s; 5s absorbs the tail.
 pub const PYTHON_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(5);
 
+/// How long we wait for the Python connector to prove it is executing
+/// before declaring a startup stall. The connector emits `bridge_ready`
+/// from the very top of its script — BEFORE the heavy `import openhtf`
+/// — so this deadline covers only the window between spawning the
+/// interpreter and it running the first line of our code. If nothing
+/// arrives, the process is alive but never started executing: an
+/// EDR/antivirus agent holding the freshly-spawned binary on a
+/// locked-down machine, or an interpreter wedged at startup. (Slow
+/// framework/driver imports run AFTER `bridge_ready`, so they don't
+/// count against this deadline and can't be false-killed by it.)
+/// Generous enough to absorb a cold interpreter behind an on-access
+/// scanner, short enough that the operator gets a clear error instead of
+/// an infinite spinner.
+pub const PYTHON_STARTUP_STALL: Duration = Duration::from_secs(90);
+
 /// Grace window for stderr-reader join after the child exits.
 pub const STDERR_READER_JOIN: Duration = Duration::from_secs(10);
 
 /// Agent-protocol emitter flush deadline. See PROTOCOL.md — deliberately
 /// not configurable.
 pub const EMITTER_FLUSH: Duration = Duration::from_secs(5);
+
+/// Default deadline for the pre-run identify-unit prompt when the caller
+/// did not pass `--ui-timeout`. Identify legitimately waits on a human
+/// scanning a serial, so this is deliberately long — the point is not to
+/// rush the operator but to guarantee an unattended or wedged prompt
+/// eventually fails with a clear `RunCrashed` instead of parking the CLI
+/// process forever (the old `resp_rx.await` had no deadline at all). An
+/// explicit `--ui-timeout` still overrides this in both directions.
+pub const IDENTIFY_PROMPT_DEFAULT: Duration = Duration::from_secs(30 * 60);
 
 /// Best-effort stream-connect deadline during `tofupilot pull`. Keeps
 /// the pull path responsive even if the broker is unreachable.

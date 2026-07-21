@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "0.26.19"
+version = "0.26.20"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -83,3 +83,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Sys
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` enables tokio's paused clock (`start_paused`) used by the
+# startup-stall watchdog tests. Merged with the `full` feature set from the
+# main dependency above; not pulled into non-test builds.
+tokio = { version = "1", features = ["test-util"] }
