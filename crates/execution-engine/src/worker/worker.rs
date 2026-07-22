@@ -90,6 +90,96 @@ pub struct Worker {
     debug_port: Option<u16>,
 }
 
+/// Startup stage of a dispatched Python job. Bounds each socket read
+/// until user code owns the clock (see the loop in
+/// `execute_python_phase`). Kept as data, not control flow, so the
+/// stage → deadline / stage → error mapping is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobStage {
+    /// Command written, nothing heard back yet.
+    AwaitingAck,
+    /// `JobAck` (or any first event) seen; phase module importing.
+    Loading,
+    /// `ModuleLoaded` seen; the phase body is running.
+    Executing,
+}
+
+/// Marker substrings embedded in startup-stall errors. The orchestrator's
+/// worker-replacement branch matches on these — keep both sides tied to
+/// these consts so editing one can't silently detach pool replacement.
+pub const STALL_MARKER_ACK: &str = "did not acknowledge";
+pub const STALL_MARKER_IMPORT: &str = "stalled while importing";
+
+impl JobStage {
+    /// Max silence tolerated on the worker socket in this stage.
+    /// `None` = unbounded (phase timeout / operator owns it).
+    fn read_deadline(self) -> Option<std::time::Duration> {
+        use crate::constants::timeouts::{JOB_ACK_TIMEOUT_SECS, MODULE_IMPORT_TIMEOUT_SECS};
+        match self {
+            JobStage::AwaitingAck => Some(std::time::Duration::from_secs(JOB_ACK_TIMEOUT_SECS)),
+            JobStage::Loading => Some(std::time::Duration::from_secs(MODULE_IMPORT_TIMEOUT_SECS)),
+            JobStage::Executing => None,
+        }
+    }
+
+    /// Actionable operator-facing error for a stall in this stage.
+    fn stall_error(self, job: &crate::job::Job) -> String {
+        use crate::constants::timeouts::{JOB_ACK_TIMEOUT_SECS, MODULE_IMPORT_TIMEOUT_SECS};
+        match self {
+            JobStage::AwaitingAck => format!(
+                "Python worker {STALL_MARKER_ACK} phase '{}' within {}s. The worker \
+                 process is alive but not responding — on locked-down machines this is \
+                 usually endpoint-protection (EDR/antivirus) software suspending the \
+                 freshly spawned Python interpreter. Check the machine's security \
+                 software logs, and ask IT to allowlist the deployment's venv Python.",
+                job.phase_name, JOB_ACK_TIMEOUT_SECS
+            ),
+            JobStage::Loading => format!(
+                "Phase '{}' {STALL_MARKER_IMPORT} module '{}': no progress for {}s. \
+                 Module-level code is blocked — a hung import (endpoint protection \
+                 scanning the venv), a device or network connection opened at import \
+                 time, or an infinite loop at module scope. Move hardware/network \
+                 opens into the phase function, or allowlist the deployment's venv in \
+                 your endpoint-protection software.",
+                job.phase_name, job.module, MODULE_IMPORT_TIMEOUT_SECS
+            ),
+            JobStage::Executing => unreachable!("Executing stage has no read deadline"),
+        }
+    }
+}
+
+/// Outcome of one stage-bounded read off the worker socket.
+enum StageRead {
+    Event(protocol::WorkerEvent),
+    Eof,
+    Io(String),
+    /// The stage's deadline elapsed with total silence.
+    Stalled,
+}
+
+/// One read off the worker event stream, bounded by the current job
+/// stage's deadline (none in debug mode or once `Executing`). Generic
+/// over the reader so the stall behavior is testable against an
+/// in-memory duplex without a live worker process.
+async fn read_stage_event<R>(reader: &mut R, stage: JobStage, debug: bool) -> StageRead
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send,
+{
+    let deadline = if debug { None } else { stage.read_deadline() };
+    let read = match deadline {
+        Some(d) => match tokio::time::timeout(d, transport::read_json_line(reader)).await {
+            Ok(r) => r,
+            Err(_elapsed) => return StageRead::Stalled,
+        },
+        None => transport::read_json_line(reader).await,
+    };
+    match read {
+        Ok(Some(event)) => StageRead::Event(event),
+        Ok(None) => StageRead::Eof,
+        Err(e) => StageRead::Io(e),
+    }
+}
+
 /// Build the subprocess env for a worker. When `debug_port` is set the
 /// worker gets `TP_DEBUG=1` + `TP_DEBUG_PORT`, which makes tp_worker.py
 /// start a debugpy listener. Pure so the env contract is unit-testable.
@@ -303,17 +393,60 @@ impl Worker {
         // Send command as JSON line
         transport::write_json_line(&mut write_half, &command).await?;
 
+        // Startup-stage deadlines. The Python-side phase timeout is
+        // enforced from inside the worker interpreter, so it cannot fire
+        // when that interpreter is wedged before the phase body runs — a
+        // suspended process (EDR) or a blocked module-level import used
+        // to hang the run forever with no diagnostic. Each read is
+        // bounded by the current stage until user code owns the clock:
+        //   AwaitingAck  — command sent, nothing heard: pure liveness.
+        //   Loading      — acked, module importing: any streamed event
+        //                  (log line, etc.) resets the window.
+        //   Executing    — `ModuleLoaded` seen: no Rust-side deadline;
+        //                  the phase timeout / operator owns it.
+        // Debug workers skip all deadlines — a breakpoint pause is
+        // indistinguishable from a stall.
+        let mut stage = JobStage::AwaitingAck;
+
         // Read streaming events until EOF
         loop {
-            let event: Option<protocol::WorkerEvent> =
-                transport::read_json_line(&mut reader).await?;
-
-            let event = match event {
-                Some(e) => e,
-                None => break, // EOF
+            let debug = self.debug_port.is_some();
+            let event = match read_stage_event(&mut reader, stage, debug).await {
+                StageRead::Event(e) => e,
+                StageRead::Eof => break,
+                StageRead::Io(e) => return Err(e),
+                StageRead::Stalled => {
+                    // Alive-but-silent worker. Kill it so it can't
+                    // linger wedged behind the pool, then fail the
+                    // job with a stage-specific, actionable error —
+                    // this propagates as a phase ERROR and turns the
+                    // former infinite spinner into a diagnosis.
+                    self.kill_wedged().await;
+                    return Err(stage.stall_error(&job));
+                }
             };
 
+            // Any traffic proves the interpreter is executing our
+            // connector code, so an un-acked stage can advance on any
+            // first event (robust to reordering), and events streamed
+            // mid-import (module-level prints) reset the import window
+            // simply by arriving.
+            if matches!(stage, JobStage::AwaitingAck) {
+                stage = JobStage::Loading;
+            }
+
             match event {
+                protocol::WorkerEvent::JobAck(_) => {
+                    // Stage already advanced above. Surface the transition
+                    // as a phase log so the operator UI's Advanced tab
+                    // shows startup progress instead of dead air — the
+                    // exact signal Sander's stalled run was missing.
+                    self.emit_stage_log(&job, &event_sink, "Python worker acknowledged phase, importing module...");
+                }
+                protocol::WorkerEvent::ModuleLoaded(_) => {
+                    stage = JobStage::Executing;
+                    self.emit_stage_log(&job, &event_sink, "Module imported, running phase function");
+                }
                 protocol::WorkerEvent::JobComplete(result) => {
                     // Check phase result to determine if we should wait for UI
                     let phase_result = result
@@ -644,6 +777,36 @@ impl Worker {
 
     pub async fn interrupt_current_job(&mut self) -> Result<(), String> {
         self.force_shutdown().await
+    }
+
+    /// DEBUG-level startup-stage breadcrumb attached to the running
+    /// phase. Streams through the normal `PhaseLogLine` channel so every
+    /// consumer (operator-UI Advanced tab, TUI, agent protocol) shows
+    /// startup progress without a new event type.
+    fn emit_stage_log(&self, job: &Job, event_sink: &Arc<dyn EventSink>, message: &str) {
+        event_sink.emit(&ExecutionEvent::PhaseLogLine {
+            job_id: job.id.to_string(),
+            phase_key: job.phase_key.clone(),
+            slot_id: job.slot_id.clone(),
+            level: "DEBUG".to_string(),
+            message: message.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            file: None,
+            line: None,
+        });
+    }
+
+    /// Kill a worker whose interpreter is alive but wedged (startup-stage
+    /// deadline tripped). `&self` variant of `force_shutdown`: the job
+    /// loop only holds a shared ref, and interior mutability via the
+    /// inner lock is all a kill needs. Best-effort — the job error it
+    /// accompanies is the signal that matters.
+    async fn kill_wedged(&self) {
+        let mut inner = self.inner.write().await;
+        if let Some(ref mut process) = *inner {
+            let _ = process.force_kill().await;
+        }
+        inner.take();
     }
 
     pub async fn shutdown_with_timeout(&mut self, timeout_ms: u64) -> Result<(), String> {
@@ -1280,6 +1443,163 @@ mod debug_env_tests {
         assert_eq!(plain.debug_port, None);
         let dbg = plain.with_debug_port(Some(5678));
         assert_eq!(dbg.debug_port, Some(5678));
+    }
+}
+
+#[cfg(test)]
+mod stage_read_tests {
+    use super::{read_stage_event, JobStage, StageRead};
+    use tokio::io::AsyncWriteExt;
+
+    /// Duplex-backed buffered reader plus the writer that feeds it.
+    fn pipe() -> (
+        tokio::io::BufReader<tokio::io::DuplexStream>,
+        tokio::io::DuplexStream,
+    ) {
+        let (rx, tx) = tokio::io::duplex(64 * 1024);
+        (tokio::io::BufReader::new(rx), tx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_worker_stalls_at_the_ack_deadline() {
+        // The field symptom: command sent, interpreter alive but never
+        // executing. tokio's paused clock auto-advances past the 30s
+        // deadline the moment the read has nothing else to do.
+        let (mut reader, _tx) = pipe();
+        let out = read_stage_event(&mut reader, JobStage::AwaitingAck, false).await;
+        assert!(matches!(out, StageRead::Stalled));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ack_before_deadline_is_delivered_not_killed() {
+        // Anti-false-kill: a slow-but-alive worker whose ack lands
+        // inside the window must never be treated as a stall.
+        let (mut reader, mut tx) = pipe();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+            let _ = tx
+                .write_all(b"{\"type\":\"JobAck\",\"job_id\":\"j1\"}\n")
+                .await;
+        });
+        let out = read_stage_event(&mut reader, JobStage::AwaitingAck, false).await;
+        match out {
+            StageRead::Event(super::protocol::WorkerEvent::JobAck(a)) => {
+                assert_eq!(a.job_id, "j1");
+            }
+            other => panic!("expected JobAck, got {:?}", stage_read_kind(&other)),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn executing_stage_never_deadlines() {
+        // Once user code owns the clock the read must park indefinitely:
+        // race an hour of virtual time against the unbounded read and
+        // require the timer to win. If Executing ever grew a deadline,
+        // the read would resolve first and this test would catch it.
+        let (mut reader, _tx) = pipe();
+        let long = tokio::time::sleep(std::time::Duration::from_secs(3600));
+        tokio::select! {
+            _ = long => {}
+            _ = read_stage_event(&mut reader, JobStage::Executing, false) => {
+                panic!("Executing-stage read resolved without input");
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn debug_mode_disables_the_ack_deadline() {
+        // A debugger paused before the first event must not be killed.
+        let (mut reader, _tx) = pipe();
+        let long = tokio::time::sleep(std::time::Duration::from_secs(3600));
+        tokio::select! {
+            _ = long => {}
+            _ = read_stage_event(&mut reader, JobStage::AwaitingAck, true) => {
+                panic!("debug-mode read resolved without input");
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn eof_is_eof_not_a_stall() {
+        // A crashed worker closes the socket — that's the existing
+        // crash path ("stream ended without job completion"), and must
+        // stay distinguishable from alive-but-silent.
+        let (mut reader, tx) = pipe();
+        drop(tx);
+        let out = read_stage_event(&mut reader, JobStage::AwaitingAck, false).await;
+        assert!(matches!(out, StageRead::Eof));
+    }
+
+    fn stage_read_kind(r: &StageRead) -> &'static str {
+        match r {
+            StageRead::Event(_) => "Event",
+            StageRead::Eof => "Eof",
+            StageRead::Io(_) => "Io",
+            StageRead::Stalled => "Stalled",
+        }
+    }
+}
+
+#[cfg(test)]
+mod job_stage_tests {
+    use super::{JobStage, STALL_MARKER_ACK, STALL_MARKER_IMPORT};
+    use crate::constants::timeouts::{JOB_ACK_TIMEOUT_SECS, MODULE_IMPORT_TIMEOUT_SECS};
+
+    fn test_job() -> crate::job::Job {
+        crate::job::Job::new(
+            Some("default".to_string()),
+            "stall_phase".to_string(),
+            "Stall Phase".to_string(),
+            crate::procedure::schema::StageScope::Main,
+            "phases.stall".to_string(),
+            "stall".to_string(),
+            vec![],
+            vec![],
+            crate::ui::UiConfig::default(),
+            None,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+            vec![],
+        )
+    }
+
+    #[test]
+    fn awaiting_ack_is_bounded_by_ack_timeout() {
+        assert_eq!(
+            JobStage::AwaitingAck.read_deadline(),
+            Some(std::time::Duration::from_secs(JOB_ACK_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
+    fn loading_is_bounded_by_module_import_timeout() {
+        assert_eq!(
+            JobStage::Loading.read_deadline(),
+            Some(std::time::Duration::from_secs(MODULE_IMPORT_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
+    fn executing_is_unbounded() {
+        // Once user code owns the clock, the Rust side must never
+        // deadline the read — burn-in phases legitimately run for hours.
+        assert_eq!(JobStage::Executing.read_deadline(), None);
+    }
+
+    #[test]
+    fn stall_errors_name_phase_and_trigger_pool_replacement() {
+        let job = test_job();
+        let ack = JobStage::AwaitingAck.stall_error(&job);
+        let load = JobStage::Loading.stall_error(&job);
+        assert!(ack.contains("Stall Phase"));
+        assert!(load.contains("Stall Phase"));
+        assert!(load.contains("phases.stall"));
+        // The orchestrator's worker-replacement branch keys on these
+        // substrings (`execution.rs`); drifting them detaches the wedged
+        // worker's replacement and every later phase lands on a corpse.
+        assert!(ack.contains(STALL_MARKER_ACK));
+        assert!(load.contains(STALL_MARKER_IMPORT));
     }
 }
 

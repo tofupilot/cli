@@ -103,6 +103,19 @@ pub const PYTHON_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(5);
 /// an infinite spinner.
 pub const PYTHON_STARTUP_STALL: Duration = Duration::from_secs(90);
 
+/// Native-framework twin of `PYTHON_STARTUP_STALL`: max engine silence
+/// after `submit_procedure` before the run is declared stalled. The
+/// engine's first post-submit act is dispatching a job (phase_started
+/// within milliseconds on a healthy machine); if instead nothing at all
+/// is emitted — no job progress, no plug status, no UI request, no log —
+/// the scheduling loop or a pre-dispatch await is wedged and no
+/// finer-grained deadline (job-ack, module-import, phase timeout) is in
+/// a position to fire. This is the umbrella: it guarantees "the operator
+/// clicked Run and nothing happened" always terminates with a
+/// diagnostic. Disarmed on the first engine event and never re-armed, so
+/// legitimately long phases and operator prompts are untouchable.
+pub const ENGINE_DISPATCH_STALL: Duration = Duration::from_secs(90);
+
 /// Grace window for stderr-reader join after the child exits.
 pub const STDERR_READER_JOIN: Duration = Duration::from_secs(10);
 

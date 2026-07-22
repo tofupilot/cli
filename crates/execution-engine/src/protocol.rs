@@ -42,6 +42,18 @@ pub struct UnitInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum WorkerEvent {
+    /// First message on every job connection, sent by tp_worker.py right
+    /// after it parses the command — before any user code runs. Proves the
+    /// interpreter is alive and reading; its absence within
+    /// `JOB_ACK_TIMEOUT` means the process is wedged (typically an
+    /// endpoint-protection agent holding it).
+    JobAck(JobAckEvent),
+    /// Sent after the phase's module finished importing, before the phase
+    /// function is invoked. Bounds the module-import window: module-level
+    /// code that blocks forever (device open at import, EDR-stalled
+    /// import) is the one stage phase timeouts can't cover, because the
+    /// Python-side timeout loop only guards the phase call itself.
+    ModuleLoaded(ModuleLoadedEvent),
     JobComplete(JobResult),
     Error(ErrorEvent),
     AttachFile(AttachFileEvent),
@@ -96,6 +108,16 @@ pub struct LogEntry {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ErrorEvent {
     pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JobAckEvent {
+    pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ModuleLoadedEvent {
+    pub job_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

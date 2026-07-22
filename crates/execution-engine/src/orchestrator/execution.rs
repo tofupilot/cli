@@ -619,9 +619,16 @@ impl Orchestrator {
 
             // Check if worker crashed (IPC error) and needs replacement
             if let Err(ref error_msg) = result {
+                // Startup-stage stalls killed the wedged worker process,
+                // so they need the same pool replacement as an IPC crash —
+                // otherwise a retry or the next scheduled phase lands on
+                // a dead worker. Markers are shared consts with the error
+                // formatter in worker.rs.
                 if error_msg.contains("IPC error")
                     || error_msg.contains("Connection closed")
                     || error_msg.contains("Broken pipe")
+                    || error_msg.contains(crate::worker::worker::STALL_MARKER_ACK)
+                    || error_msg.contains(crate::worker::worker::STALL_MARKER_IMPORT)
                 {
                     // Check if orchestrator is still active before attempting replacement
                     {

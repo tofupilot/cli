@@ -57,7 +57,7 @@ const STARTUP_STALL_POLL: std::time::Duration = std::time::Duration::from_millis
 ///
 /// `Relaxed` ordering is sufficient: the flag is a one-way latch (false→true)
 /// touched by two tasks with no other shared state riding on it.
-async fn startup_stall_elapsed(
+pub(crate) async fn startup_stall_elapsed(
     progressed: &std::sync::atomic::AtomicBool,
     timeout: std::time::Duration,
 ) {

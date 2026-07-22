@@ -1604,6 +1604,11 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
 
             func = getattr(module, function_name)
 
+            # Module-level code is done. Tell the Rust side so it can
+            # drop the module-import deadline — from here on the phase
+            # body owns the clock (phase timeout, if configured).
+            event_queue.put({"type": "ModuleLoaded", "job_id": job_id})
+
             sig = inspect.signature(func)
             kwargs = {}
             phase_instance = Phase()
@@ -1870,6 +1875,14 @@ def handle_connection(conn: socket.socket, procedure_dir: Path):
         line, _ = buf.split(b"\n", 1)
         command = json.loads(line.decode("utf-8"))
 
+        # Acknowledge the job BEFORE any user code can run. This is the
+        # liveness handshake the Rust side times: no ack within its
+        # deadline means this interpreter is wedged (e.g. suspended by an
+        # endpoint-protection agent), which phase timeouts cannot catch
+        # because they are enforced from this same process.
+        ack = {"type": "JobAck", "job_id": command.get("job_id", "")}
+        conn.sendall((json.dumps(ack) + "\n").encode("utf-8"))
+
         # Parse phase_results: values are JSON strings that need deserialization
         phase_results_raw = command.get("phase_results", {})
         phase_results = {}
@@ -1900,6 +1913,12 @@ def handle_connection(conn: socket.socket, procedure_dir: Path):
                             "job_id": event["job_id"],
                             "data": event["data"],
                             "attachment_name": event["attachment_name"],
+                        }
+                        conn.sendall((json.dumps(msg) + "\n").encode("utf-8"))
+                    elif event["type"] == "ModuleLoaded":
+                        msg = {
+                            "type": "ModuleLoaded",
+                            "job_id": event["job_id"],
                         }
                         conn.sendall((json.dumps(msg) + "\n").encode("utf-8"))
                     elif event["type"] == "ui_update":

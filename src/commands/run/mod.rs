@@ -20,6 +20,7 @@ pub(crate) mod outcomes;
 pub(crate) mod procedure_version;
 pub(crate) mod python;
 pub(crate) mod queue;
+pub(crate) mod run_log;
 pub(crate) mod time_fmt;
 mod tui;
 pub(crate) mod ui_response;
@@ -1018,6 +1019,17 @@ pub async fn start(
                 }
             }
         });
+    }
+
+    // Per-run event log on disk. Every StationEvent appended to
+    // ~/.tofupilot/logs/run-<execution_id>.log — the artifact support
+    // asks for on "it hung / it failed" reports. Best-effort: None
+    // (unwritable home) never blocks the run.
+    let run_log_path = run_log::spawn_writer(&execution_id, event_tx.subscribe());
+    if let Some(ref p) = run_log_path {
+        if !json_mode {
+            crate::log::info(&format!("Run log: {}", p.display()));
+        }
     }
 
     // TUI

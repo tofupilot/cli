@@ -29,7 +29,7 @@ async fn plug_rpc(port: u16, request: &PlugRequest) -> Result<PlugResponse, Stri
     let mut reader = BufReader::new(read_half);
 
     transport::write_json_line(&mut write_half, request).await?;
-    transport::read_json_line::<PlugResponse>(&mut reader)
+    transport::read_json_line::<PlugResponse, _>(&mut reader)
         .await?
         .ok_or_else(|| "Plug closed connection without response".to_string())
 }

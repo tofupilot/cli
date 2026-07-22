@@ -169,6 +169,14 @@ struct CliEventSink {
     /// UIs can resolve relative component image paths against the
     /// deployment's stored files.
     deployment_id: Option<String>,
+    /// Flipped on the first post-submit sign of life from the engine
+    /// (job dispatched, plug status, UI request, log line…). The
+    /// dispatch-stall watchdog in `run_yaml_procedure` races this flag:
+    /// if the engine accepted the procedure but nothing at all happens,
+    /// the run is killed with a diagnostic instead of spinning forever.
+    /// `Plan` / `UnitIdentified` don't count — both fire at or before
+    /// submit, ahead of the window the watchdog guards.
+    progressed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CliEventSink {
@@ -207,12 +215,22 @@ impl CliEventSink {
                 attachments: Vec::new(),
             })),
             resolved_unit: Arc::new(std::sync::Mutex::new(None)),
+            progressed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
 
 impl EventSink for CliEventSink {
     fn emit(&self, event: &ExecutionEvent) {
+        // Feed the dispatch-stall watchdog. Everything except the
+        // submit-time events counts as progress — the watchdog only
+        // exists to catch "engine accepted the procedure, then silence".
+        match event {
+            ExecutionEvent::Plan { .. } | ExecutionEvent::UnitIdentified { .. } => {}
+            _ => self
+                .progressed
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+        }
         match event {
             ExecutionEvent::Plan {
                 phases,
@@ -1617,6 +1635,7 @@ pub async fn run_yaml_procedure(
         super::deployment_id::lookup_deployment_id(procedure_id),
     );
     let run_data = sink.data.clone();
+    let engine_progressed = sink.progressed.clone();
     let event_sink: Arc<dyn EventSink> = Arc::new(sink);
     orchestrator.set_event_sink(event_sink.clone());
 
@@ -1828,6 +1847,46 @@ pub async fn run_yaml_procedure(
                 // Resolves when execution completes naturally (or after a
                 // graceful shutdown_requested flip lets the loop drain).
                 res = &mut exec_fut => break res,
+
+                // Dispatch-stall watchdog: the engine accepted the
+                // procedure but emitted nothing at all. The arm resolves
+                // only if `engine_progressed` is still false when the
+                // window elapses (the helper polls the flag and pends
+                // forever once it flips — same mechanism as the OpenHTF
+                // connector's startup watchdog). Debug runs are exempt:
+                // a debugger paused before the first event is
+                // indistinguishable from a stall.
+                _ = super::connector::startup_stall_elapsed(
+                    &engine_progressed,
+                    crate::config::timeouts::ENGINE_DISPATCH_STALL,
+                ), if !debug.enabled => {
+                    let secs = crate::config::timeouts::ENGINE_DISPATCH_STALL.as_secs();
+                    if let Err(e) = Orchestrator::force_kill_immediate(
+                        state_arc.clone(),
+                        workers_arc.clone(),
+                        resource_arc.clone(),
+                        None,
+                        event_sink_for_kill.clone(),
+                    ).await {
+                        crate::log::warn(&format!("force_kill_immediate failed: {e}"));
+                    }
+                    // Await the unblocked execute_all so worker teardown
+                    // completes, then override its result with the stall
+                    // diagnosis — whatever it returns after a force-kill
+                    // is a symptom, not the cause.
+                    let _ = (&mut exec_fut).await;
+                    let log_hint = super::run_log::log_path(execution_id)
+                        .map(|p| format!(" Full event log: {}", p.display()))
+                        .unwrap_or_default();
+                    break Err(format!(
+                        "The engine did not start executing within {secs}s of \
+                         submitting the procedure: no phase was dispatched and no \
+                         event was emitted. The run was terminated. This usually \
+                         means the machine's endpoint-protection (EDR/antivirus) \
+                         software is holding the Python worker processes — check \
+                         its logs and allowlist the deployment's venv Python.{log_hint}"
+                    ));
+                }
 
                 // Stop: flip the shared flag, keep awaiting `execute_all`
                 // so teardown phases run and plugs close cleanly. Don't

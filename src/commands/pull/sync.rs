@@ -581,7 +581,7 @@ async fn run_installer(dir: &Path) -> crate::error::CliResult<()> {
         }
         install_args.push(std::ffi::OsStr::new("-r"));
         install_args.push(lockfile.as_os_str());
-        run_subprocess(&uv, &install_args, &dir, "uv pip install (deps)")?;
+        run_subprocess_hardened(&uv, &install_args, &dir, "uv pip install (deps)", &python)?;
 
         // Workspace member wheels. uv-workspace builds emit one wheel
         // per non-procedure member into `vendor/` — shared packages
@@ -720,6 +720,75 @@ pub(crate) fn run_subprocess(
     Ok(())
 }
 
+/// Like `run_subprocess`, but retries once after a short pause and, when
+/// the step still fails, probes whether the venv's Python is actually
+/// executable and appends an actionable diagnosis when it isn't.
+///
+/// Rationale (field report, Windows station behind EDR): `uv pip install`
+/// died with "Failed to query Python interpreter … Access is denied
+/// (os error 5)" on a freshly provisioned venv. Two distinct causes share
+/// that symptom: an on-access scanner still holding the just-written
+/// python.exe (transient — the retry wins), or AppLocker/WDAC/EDR policy
+/// blocking unsigned binaries under the user profile (permanent — no
+/// retry can win, admin rights don't bypass it, and the raw uv error
+/// sends the operator chasing filesystem permissions). The probe tells
+/// the two apart and names the fix for IT.
+fn run_subprocess_hardened(
+    program: &Path,
+    args: &[&std::ffi::OsStr],
+    cwd: &Path,
+    label: &str,
+    venv_python: &Path,
+) -> crate::error::CliResult<()> {
+    let first = match run_subprocess(program, args, cwd, label) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    crate::log::warn(&format!(
+        "{label} failed, retrying once in 5s (transient antivirus scans on a fresh venv are common)"
+    ));
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let second = match run_subprocess(program, args, cwd, label) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let _ = first;
+    if python_exec_blocked(venv_python) {
+        return Err(format!(
+            "{second}\n\nThe venv's Python interpreter at {} exists but cannot be \
+             executed (access denied). This is endpoint-protection policy \
+             (AppLocker / WDAC / EDR) blocking freshly provisioned binaries under \
+             the user profile — filesystem permissions are NOT the cause, and \
+             running as administrator does not bypass it. Ask IT to allowlist \
+             this directory tree for execution:\n  {}\n(and uv's Python cache, \
+             typically %APPDATA%\\uv or ~/.local/share/uv)",
+            venv_python.display(),
+            cwd.display(),
+        )
+        .into());
+    }
+    Err(second)
+}
+
+/// True when the interpreter exists on disk but spawning it fails with
+/// a permission error — the EDR/AppLocker signature. A missing file or
+/// a successful spawn both return false (those are different failures
+/// with different fixes).
+fn python_exec_blocked(python: &Path) -> bool {
+    if !python.exists() {
+        return false;
+    }
+    match std::process::Command::new(python)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(_) => false,
+        Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5),
+    }
+}
+
 /// Install every `.whl` in `vendor/`. `--no-deps` because the pylock
 /// pass already pinned the closure; we just need these specific wheels
 /// in site-packages. `no_index` blocks any PyPI fallback for standalone
@@ -759,7 +828,7 @@ fn install_vendor_wheels(
     for whl in &wheels {
         args.push(whl.as_os_str());
     }
-    run_subprocess(uv, &args, cwd, "uv pip install (workspace members)")
+    run_subprocess_hardened(uv, &args, cwd, "uv pip install (workspace members)", python)
 }
 
 #[cfg(test)]
@@ -795,5 +864,41 @@ mod tests {
         // pass through untouched rather than emit `.12`.
         assert_eq!(minor_version(".12"), ".12");
         assert_eq!(minor_version("3."), "3.");
+    }
+
+    mod exec_blocked {
+        use super::super::python_exec_blocked;
+
+        #[test]
+        fn missing_interpreter_is_not_blocked() {
+            // A missing file is a different failure (bad provisioning)
+            // with a different fix — must not claim EDR.
+            let dir = std::env::temp_dir().join("tp-exec-blocked-missing");
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(!python_exec_blocked(&dir.join("python")));
+        }
+
+        #[test]
+        fn runnable_interpreter_is_not_blocked() {
+            // Whatever interpreter runs this test suite is executable.
+            let exe = std::env::current_exe().expect("test exe");
+            assert!(!python_exec_blocked(&exe));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn exec_denied_interpreter_is_blocked() {
+            // A present-but-not-executable file spawns with EACCES —
+            // the same permission-denied signature AppLocker/WDAC/EDR
+            // produce on Windows (os error 5).
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join("tp-exec-blocked-denied");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join("python");
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(python_exec_blocked(&path));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

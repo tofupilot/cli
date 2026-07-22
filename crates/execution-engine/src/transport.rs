@@ -4,7 +4,7 @@
 //! Read: read one line, deserialize.
 
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 pub async fn write_json_line<T: Serialize>(
@@ -24,8 +24,10 @@ pub async fn write_json_line<T: Serialize>(
     Ok(())
 }
 
-pub async fn read_json_line<T: DeserializeOwned>(
-    reader: &mut BufReader<tokio::io::ReadHalf<TcpStream>>,
+// Generic over the buffered reader (not pinned to `TcpStream`) so
+// protocol consumers can be tested against in-memory duplex pipes.
+pub async fn read_json_line<T: DeserializeOwned, R: AsyncBufRead + Unpin>(
+    reader: &mut R,
 ) -> Result<Option<T>, String> {
     let mut line = String::new();
     let n = reader
