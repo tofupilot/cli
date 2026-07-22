@@ -40,6 +40,9 @@ station-protocol = { path = "../station-protocol" }
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` enables tokio's paused clock (`start_paused`) for the
+# port-handshake deadline tests. Dev-only; not in release builds.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = []

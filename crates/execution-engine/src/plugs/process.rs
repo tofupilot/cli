@@ -19,6 +19,58 @@ async fn drain_stderr(stderr: ChildStderr) -> String {
     String::from_utf8_lossy(&buf).trim().to_string()
 }
 
+/// Deadline for the child's `NDJSON_PORT:` startup handshake.
+///
+/// A healthy worker prints the port line within a second of exec — it is
+/// the first thing `tp_worker.py` writes, before any framework import or
+/// phase work. If the line hasn't arrived by this deadline the child is
+/// alive but not executing (an endpoint-protection agent holding the
+/// freshly-provisioned interpreter, or a startup environment flooding
+/// stderr into the un-drained pipe). Without a deadline this was the
+/// only un-timed read in the engine: `initialize()` blocked forever and
+/// the operator saw an infinite spinner with no diagnostic. Mirrors the
+/// CLI's `PYTHON_STARTUP_STALL` (apps/cli config/timeouts.rs) — this
+/// crate can't see that constant, so the value is duplicated on purpose.
+const PORT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Outcome of waiting for the child's `NDJSON_PORT:<port>` line.
+#[derive(Debug)]
+pub(crate) enum PortHandshake {
+    Port(u16),
+    /// Deadline elapsed with the pipe still open — the child is alive
+    /// but never produced its first line of output.
+    TimedOut,
+    /// The stream ended (child exited) or produced a non-port line;
+    /// carries whatever the line was (empty string on clean EOF).
+    BadLine(String),
+    /// Read failed outright.
+    Io(std::io::Error),
+}
+
+/// Read one line and classify it. Extracted from `ChildProcess::spawn`
+/// so the deadline semantics are unit-testable without spawning real
+/// processes: EOF and garbage classify as `BadLine` (crash — the caller
+/// surfaces stderr), while an open-but-silent pipe becomes `TimedOut`
+/// instead of blocking forever.
+pub(crate) async fn read_port_handshake<R>(reader: &mut R, deadline: Duration) -> PortHandshake
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    match tokio::time::timeout(deadline, reader.read_line(&mut line)).await {
+        Err(_) => PortHandshake::TimedOut,
+        Ok(Err(e)) => PortHandshake::Io(e),
+        Ok(Ok(_)) => match line
+            .trim()
+            .strip_prefix("NDJSON_PORT:")
+            .and_then(|s| s.parse::<u16>().ok())
+        {
+            Some(port) => PortHandshake::Port(port),
+            None => PortHandshake::BadLine(line.trim().to_string()),
+        },
+    }
+}
+
 #[cfg(unix)]
 use nix::sys::signal::{self, Signal};
 #[cfg(unix)]
@@ -116,33 +168,42 @@ impl ChildProcess {
         let mut stderr = process.inner().stderr.take();
 
         let mut stdout_reader = BufReader::new(stdout);
-        let mut port_line = String::new();
-        let read_result = stdout_reader.read_line(&mut port_line).await;
-
-        let parsed_port = port_line
-            .trim()
-            .strip_prefix("NDJSON_PORT:")
-            .and_then(|s| s.parse::<u16>().ok());
-
-        match (read_result, parsed_port) {
-            (Ok(_), Some(port)) => {
+        match read_port_handshake(&mut stdout_reader, PORT_HANDSHAKE_TIMEOUT).await {
+            PortHandshake::Port(port) => {
                 if let (Some(stderr_handle), Some(handler)) = (stderr.take(), stderr_handler) {
                     handler(stderr_handle);
                 }
                 Ok(Self { port, process })
             }
-            (read_result, _) => {
+            failure => {
+                // Drain stderr BEFORE killing: on the timeout path the
+                // child is still alive, and if it's wedged writing into
+                // the full stderr pipe (nobody read it during the
+                // handshake), this drain both captures the diagnostic
+                // and is the only way to see what flooded. The 500ms/8KB
+                // cap keeps a silent child from stalling the error path.
                 let stderr_text = match stderr.take() {
                     Some(s) => drain_stderr(s).await,
                     None => String::new(),
                 };
                 kill_on_err(process);
-                let prefix = match read_result {
-                    Err(e) => format!("Failed to read port from process: {}", e),
-                    Ok(_) => format!(
-                        "Invalid port line from process: {:?}\nPython worker may have crashed during startup.",
-                        port_line.trim()
+                let prefix = match failure {
+                    PortHandshake::TimedOut => format!(
+                        "Python process started but produced no output for {}s and never \
+                         reported its startup handshake. The interpreter is being prevented \
+                         from executing — on managed machines this is usually \
+                         endpoint-protection/antivirus software holding the freshly-installed \
+                         Python. Try running it by hand to confirm:\n    {} -c \"print('ok')\"\n\
+                         If that hangs too, allowlist the interpreter in your security software.",
+                        PORT_HANDSHAKE_TIMEOUT.as_secs(),
+                        python_path,
                     ),
+                    PortHandshake::Io(e) => format!("Failed to read port from process: {}", e),
+                    PortHandshake::BadLine(line) => format!(
+                        "Invalid port line from process: {:?}\nPython worker may have crashed during startup.",
+                        line
+                    ),
+                    PortHandshake::Port(_) => unreachable!("success handled above"),
                 };
                 if stderr_text.is_empty() {
                     Err(format!("{prefix}\n(no stderr captured)"))
@@ -264,6 +325,83 @@ impl ChildProcess {
             self.process.wait()
         ).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    // These drive `read_port_handshake` over in-memory duplex pipes on
+    // tokio's paused clock, so the 90s-class deadlines elapse in virtual
+    // time and the tests are instant. The invariant under test: a child
+    // that crashes or prints garbage classifies as `BadLine` (diagnosable
+    // crash), while a child that stays alive without ever writing — the
+    // shape that used to hang `initialize()` forever — becomes `TimedOut`.
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_parses_port_line() {
+        let (mut client, server) = tokio::io::duplex(256);
+        client.write_all(b"NDJSON_PORT:4321\n").await.unwrap();
+        let mut reader = BufReader::new(server);
+        match read_port_handshake(&mut reader, Duration::from_secs(90)).await {
+            PortHandshake::Port(4321) => {}
+            other => panic!("expected Port(4321), got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_classifies_clean_eof_as_bad_line() {
+        let (client, server) = tokio::io::duplex(256);
+        drop(client); // child exited without writing anything
+        let mut reader = BufReader::new(server);
+        match read_port_handshake(&mut reader, Duration::from_secs(90)).await {
+            PortHandshake::BadLine(line) => assert_eq!(line, ""),
+            other => panic!("expected BadLine(\"\"), got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_classifies_garbage_as_bad_line() {
+        let (mut client, server) = tokio::io::duplex(256);
+        client.write_all(b"Traceback (most recent call last):\n").await.unwrap();
+        let mut reader = BufReader::new(server);
+        match read_port_handshake(&mut reader, Duration::from_secs(90)).await {
+            PortHandshake::BadLine(line) => assert!(line.starts_with("Traceback")),
+            other => panic!("expected BadLine(traceback), got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_times_out_on_alive_but_silent_child() {
+        // Writer stays alive (held, not dropped) but never writes — the
+        // exact shape of the field hang. Must resolve as TimedOut, not
+        // block forever.
+        let (_client, server) = tokio::io::duplex(256);
+        let mut reader = BufReader::new(server);
+        match read_port_handshake(&mut reader, Duration::from_secs(90)).await {
+            PortHandshake::TimedOut => {}
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_accepts_slow_but_in_time_port_line() {
+        // Port arrives late but inside the deadline: must succeed, never
+        // false-timeout a slow-starting interpreter.
+        let (mut client, server) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            client.write_all(b"NDJSON_PORT:9\n").await.unwrap();
+            // Keep the writer alive so EOF doesn't race the read.
+            std::future::pending::<()>().await;
+        });
+        let mut reader = BufReader::new(server);
+        match read_port_handshake(&mut reader, Duration::from_secs(90)).await {
+            PortHandshake::Port(9) => {}
+            other => panic!("expected Port(9), got {other:?}"),
+        }
     }
 }
 
