@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The station daemon starts local-first: the kiosk operator UI, the boot
+  pull, and locally-triggered runs no longer wait for the dashboard
+  realtime link. The broker connect runs in a background supervisor that
+  retries with backoff ("Station keeps running local-only meanwhile");
+  when it comes up, the dashboard link attaches transparently — remote
+  commands, telemetry, and live streaming start flowing, and runs started
+  after that point stream live. A station on a network that never allows
+  realtime is fully operable at the bench, with results uploaded over
+  HTTP as always.
 - A deployment run no longer freezes forever when the realtime server is
   unreachable (missing DNS record for the realtime domain, firewalled
   WebSockets). The realtime WebSocket handshake is now bounded inside the

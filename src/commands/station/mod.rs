@@ -171,6 +171,11 @@ fn show_banner(station_name: &str, org_slug: &str) {
     log::success(&format!("{station_name} ({org_slug})"));
 }
 
+/// Late-bound dashboard publisher for background tasks (queue drain,
+/// update failures): empty until the broker supervisor delivers a
+/// client, filled with a cheap `PublishHandle` clone at that moment.
+type SharedPublisher = std::sync::Arc<tokio::sync::RwLock<Option<client::PublishHandle>>>;
+
 /// Exit codes for run. Picked from sysexits.h so a supervisor
 /// can distinguish them from clap usage errors (~2) and normal CLI errors (1).
 const EXIT_REVOKED: i32 = 75; // EX_TEMPFAIL -- credentials revoked, reauth needed
@@ -221,134 +226,10 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // bus.send returned NoReceivers so progress events were silently
     // swallowed.)
 
-    // Retry the broker connect indefinitely instead of exiting. A Pi
-    // boots before WiFi/DHCP fully settle, an upstream outage drops
-    // the broker, etc. — the station should ride those out and
-    // self-heal rather than dying. Backoff: 5s, doubling to 60s.
-    // SIGINT bails out cleanly. Ok(None) (server doesn't support
-    // streaming) is a config problem, not transient — exit.
-    let mut client = {
-        let mut delay = std::time::Duration::from_secs(5);
-        let max_delay = std::time::Duration::from_secs(60);
-        loop {
-            match client::StreamClient::connect(creds).await {
-                Ok(Some(c)) => break c,
-                Ok(None) => {
-                    log::error("Streaming not configured on this server.");
-                    return 1;
-                }
-                Err(e) => {
-                    if !json_mode {
-                        log::warn(&format!(
-                            "Broker connect failed ({e}); retrying in {}s...",
-                            delay.as_secs()
-                        ));
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = tokio::signal::ctrl_c() => {
-                            if !json_mode { eprintln!(); log::info("Aborted."); }
-                            return 130;
-                        }
-                    }
-                    delay = std::cmp::min(delay * 2, max_delay);
-                }
-            }
-        }
-    };
-
-    if let Err(e) = client
-        .publish(&collect_hardware_event(installation_id))
-        .await
-    {
-        log::warn(&format!("Failed to publish hardware event: {e}"));
-    }
-
-    // Cold-start auth probe. If the station was revoked while offline (e.g.
-    // someone redeemed a setup token on another machine during the downtime)
-    // we exit now instead of entering a long station-loop session with a dead key.
-    if auth_probe(creds).await == AuthProbeOutcome::Unauthorized {
-        if !json_mode {
-            log::warn("Logged out: revoked");
-        }
-        clear_local_credentials();
-        client.disconnect().await;
-        return EXIT_REVOKED;
-    }
-
-    // Report the outcome of any update that preceded this process (we may have
-    // been re-exec'd by apply_staged / run_update; the marker lets us publish
-    // a matching UpdateApplied event now that the new binary is live).
-    publish_pending_update_outcome(&client, installation_id).await;
-
-    // Boot-time update check: synchronously fetch + stage + apply so a station
-    // restart picks up the latest release immediately, instead of waiting up
-    // to STATION_UPDATE_CHECK_INTERVAL (4h) for the first tick. If apply_staged
-    // re-execs we never return; otherwise we fall through to the regular boot.
-    // Kiosk isn't bound yet so no detach is needed -- pass `None`.
-    if update::auto_update_enabled() {
-        if let Err(e) = update::background_check().await {
-            log::warn(&format!("Boot update check failed: {e}"));
-        }
-        try_apply_staged_update(&client, installation_id, json_mode, None).await;
-    }
-
-    let config_events = config::sync_config(creds, installation_id).await;
-    for event in config_events {
-        let _ = client.publish(&event).await;
-    }
-
-    // Boot pull. Use the station's existing StreamClient as the publisher
-    // so we don't open a second WebSocket against the same station identity.
-    // See `pull::run` doc — opening a second client steals Centrifugo's
-    // server-side subs and disconnecting it leaves the station-mode WS
-    // unsubscribed, dropping subsequent live `Pull` commands.
-    {
-        let publisher = client.clone_for_health();
-        // Boot pull runs before the local-WS server is created (its
-        // construction depends on `whoami` which we just fetched above).
-        // No kiosk tab can be connected yet, so there's no loopback
-        // consumer to miss; pass `None` for the local-WS bridge.
-        crate::commands::pull::run_with(json_mode, Some(&publisher), None).await;
-    }
-
-    // Station mode is operator-driven. Each completed run leaves the
-    // outcome screen up; the next cycle is gated on an explicit
-    // `StationCommand::Run` (operator clicks "Run again" / "New run"
-    // / picks a different procedure). We don't auto-restart because
-    // the outcome screen carries information the operator needs to
-    // see — flashing past it to the next identify prompt makes the
-    // PASS/FAIL invisible.
-    if !json_mode {
-        log::info("Waiting for first procedure pick...");
-    } else {
-        println!("{}", serde_json::json!({"type": "connected"}));
-    }
-
-    let mut health_interval =
-        tokio::time::interval(crate::config::timeouts::STATION_HEALTH_INTERVAL);
-    health_interval.tick().await;
-
-    // Cheap periodic auth probe. Catches the case where this installation was
-    // replaced server-side while the Centrifugo signal was missed (station
-    // offline, broker down, etc.). 5 min -> ~12 calls/hour per station.
-    let mut auth_probe_interval =
-        tokio::time::interval(crate::config::timeouts::STATION_AUTH_PROBE_INTERVAL);
-    auth_probe_interval.tick().await;
-
-    // Periodic background update check so always-on stations pick up new
-    // releases without a restart. The actual swap still happens between
-    // runs (see `apply_staged` after each run completes); this tick only
-    // stages the new binary in the background.
-    let mut update_check_interval =
-        tokio::time::interval(crate::config::timeouts::STATION_UPDATE_CHECK_INTERVAL);
-    // If the loop stalls (long teardown, blocking call), don't fire a
-    // burst of catch-up ticks back-to-back — one is enough.
-    update_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    update_check_interval.tick().await;
-
-    let mut connected = true;
-
+    // Local-first: the kiosk operator UI binds before any network step.
+    // On a fully offline network the HTTP boot chores below each burn
+    // their own timeout — the operator still gets a working local UI
+    // immediately (the procedure list comes from the local DB).
     // Long-lived local-WS server: bound at station startup if
     // `kiosk_ui` is on, kept alive for every run. Each run plugs
     // its own broadcast in via `attach_run`; the listener stays so
@@ -477,6 +358,142 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
         None
     };
 
+    // Cold-start auth probe (plain HTTP — no broker needed). If the station
+    // was revoked while offline (e.g. someone redeemed a setup token on
+    // another machine during the downtime) we exit now instead of entering
+    // a long station-loop session with a dead key.
+    if auth_probe(creds).await == AuthProbeOutcome::Unauthorized {
+        if !json_mode {
+            log::warn("Logged out: revoked");
+        }
+        clear_local_credentials();
+        return EXIT_REVOKED;
+    }
+
+    // Boot-time update check: synchronously fetch + stage + apply so a station
+    // restart picks up the latest release immediately, instead of waiting up
+    // to STATION_UPDATE_CHECK_INTERVAL (4h) for the first tick. If apply_staged
+    // re-execs we never return; otherwise we fall through to the regular boot.
+    // The kiosk is already bound (local-first), so a boot-time apply must
+    // detach it before re-exec — otherwise every applied update leaks an
+    // orphaned browser window. Runs before the broker exists, so update
+    // lifecycle events have no publisher; the pending-update marker is
+    // published on broker connect instead.
+    if update::auto_update_enabled() {
+        if let Err(e) = update::background_check().await {
+            log::warn(&format!("Boot update check failed: {e}"));
+        }
+        try_apply_staged_update(None, installation_id, json_mode, local_ws_server.as_ref()).await;
+    }
+
+    // Config sync is plain HTTP; its ConfigApplied events are held and
+    // published once the broker is up so the dashboard still sees them.
+    let mut boot_config_events = config::sync_config(creds, installation_id).await;
+
+    // Boot pull (plain HTTP). Runs before the broker so a station on a
+    // realtime-less network still refreshes its deployments; without a
+    // publisher the dashboard just doesn't see pull progress. No kiosk tab
+    // can be connected yet either — pass `None` for the local-WS bridge.
+    crate::commands::pull::run_with(json_mode, None, local_ws_server.as_ref()).await;
+    // Pull may have changed the deployment set — refresh the kiosk list
+    // that was seeded before the pull ran.
+    refresh_idle_procedures(local_ws_server.as_ref()).await;
+
+    // Local-first: the broker connect runs in a background supervisor and
+    // the station loop starts immediately — the kiosk and local operator
+    // UI never wait on the dashboard link (realtime is a bonus surface on
+    // every station). The supervisor retries indefinitely with backoff: a
+    // Pi boots before WiFi/DHCP settle, an upstream outage drops the
+    // broker, a locked-down factory network may never allow it — the
+    // station rides all of those out, serving local operators meanwhile.
+    // Each attempt is bounded (REALTIME_CONNECT inside the connect
+    // primitive), so the loop always cycles. Ok(None) (server doesn't
+    // support streaming) is permanent, not transient — the supervisor
+    // says so once and stops trying; the station stays local-only.
+    let (broker_tx, mut broker_rx) = tokio::sync::mpsc::channel::<client::StreamClient>(1);
+    {
+        let creds = creds.clone();
+        tokio::spawn(async move {
+            let mut delay = std::time::Duration::from_secs(5);
+            let max_delay = std::time::Duration::from_secs(60);
+            loop {
+                match client::StreamClient::connect(&creds).await {
+                    Ok(Some(c)) => {
+                        let _ = broker_tx.send(c).await;
+                        return;
+                    }
+                    Ok(None) => {
+                        log::warn(
+                            "Streaming not configured on this server — station runs \
+                             local-only (no dashboard live view, no remote commands).",
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        if !json_mode {
+                            log::warn(&format!(
+                                "Broker connect failed ({e}); retrying in {}s. \
+                                 Station keeps running local-only meanwhile.",
+                                delay.as_secs()
+                            ));
+                        }
+                        tokio::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, max_delay);
+                    }
+                }
+            }
+        });
+    }
+
+    // Station mode is operator-driven. Each completed run leaves the
+    // outcome screen up; the next cycle is gated on an explicit
+    // `StationCommand::Run` (operator clicks "Run again" / "New run"
+    // / picks a different procedure). We don't auto-restart because
+    // the outcome screen carries information the operator needs to
+    // see — flashing past it to the next identify prompt makes the
+    // PASS/FAIL invisible.
+    if !json_mode {
+        log::info("Waiting for first procedure pick...");
+    }
+
+    let mut health_interval =
+        tokio::time::interval(crate::config::timeouts::STATION_HEALTH_INTERVAL);
+    health_interval.tick().await;
+
+    // Cheap periodic auth probe. Catches the case where this installation was
+    // replaced server-side while the Centrifugo signal was missed (station
+    // offline, broker down, etc.). 5 min -> ~12 calls/hour per station.
+    let mut auth_probe_interval =
+        tokio::time::interval(crate::config::timeouts::STATION_AUTH_PROBE_INTERVAL);
+    auth_probe_interval.tick().await;
+
+    // Periodic background update check so always-on stations pick up new
+    // releases without a restart. The actual swap still happens between
+    // runs (see `apply_staged` after each run completes); this tick only
+    // stages the new binary in the background.
+    let mut update_check_interval =
+        tokio::time::interval(crate::config::timeouts::STATION_UPDATE_CHECK_INTERVAL);
+    // If the loop stalls (long teardown, blocking call), don't fire a
+    // burst of catch-up ticks back-to-back — one is enough.
+    update_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    update_check_interval.tick().await;
+
+    let mut connected = false;
+
+    // Broker client, delivered by the background supervisor once the
+    // handshake succeeds — possibly never, on a realtime-less network.
+    // The station loop below runs either way; every dashboard publish is
+    // gated on this being Some. Background tasks that outlive loop
+    // iterations (queue drain) go through `shared_publisher`, filled at
+    // the same moment.
+    let mut client: Option<client::StreamClient> = None;
+    // Set when the supervisor exits without delivering a client
+    // (streaming disabled server-side): recv() on the closed channel is
+    // instantly Ready(None), and the biased loop would busy-spin on that
+    // arm forever without this latch.
+    let mut broker_gone = false;
+    let shared_publisher: SharedPublisher = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
     // Continuous queue-drain loop. Wakes every 5s, picks up any
     // `next_retry_at`-due entries, emits progress events on a local
     // broadcast bridged into BOTH the centrifugo channel AND the
@@ -484,14 +501,20 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // activity even when no live run is happening.
     {
         let drain_creds = creds.clone();
-        let publisher = client.clone_for_health();
+        // Late-bound: the broker may not be up yet (or ever). The bridge
+        // reads the shared slot per event — local-WS leg always works,
+        // the Centrifugo leg starts flowing the moment the supervisor
+        // fills the slot.
+        let publisher = shared_publisher.clone();
         let local_ws_for_drain = local_ws_server.clone();
         tokio::spawn(async move {
             let (bus, _) = tokio::sync::broadcast::channel::<station_protocol::StationEvent>(64);
             let mut rx = bus.subscribe();
             let bridge = tokio::spawn(async move {
                 while let Ok(ev) = rx.recv().await {
-                    let _ = publisher.publish(&ev).await;
+                    if let Some(ref p) = *publisher.read().await {
+                        let _ = p.publish(&ev).await;
+                    }
                     if let Some(ref server) = local_ws_for_drain {
                         server.publish_event(ev).await;
                     }
@@ -510,8 +533,12 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // runs by `try_apply_staged_update`.
     if update::auto_update_enabled() {
         let from = update::VERSION.to_string();
-        let publisher = client.clone_for_health();
-        match update::run_update_with_publisher(Some(&publisher)).await {
+        // The broker is typically not up yet at this point (its
+        // supervisor connects in the background); update lifecycle
+        // events go through the shared slot when available and are
+        // otherwise log-only — the staged/pending markers keep the
+        // dashboard consistent via the on-connect pending publish.
+        match update::run_update_with_publisher(None).await {
             Ok(_) => {}
             Err(e) if e.is_fetch() => {
                 // Version endpoint unreachable: no upgrade was attempted.
@@ -525,14 +552,16 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 let target = update::staged_version();
                 let to_display = target.as_deref().unwrap_or("unknown");
                 log::error(&format!("Update failed: v{from} -> v{to_display} ({e})"));
-                let _ = client
-                    .publish(&StationEvent::UpdateFailed {
-                        installation_id: installation_id.to_string(),
-                        from_version: from,
-                        to_version: target,
-                        error: e.to_string(),
-                    })
-                    .await;
+                if let Some(ref p) = *shared_publisher.read().await {
+                    let _ = p
+                        .publish(&StationEvent::UpdateFailed {
+                            installation_id: installation_id.to_string(),
+                            from_version: from,
+                            to_version: target,
+                            error: e.to_string(),
+                        })
+                        .await;
+                }
             }
         }
     }
@@ -583,6 +612,28 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     {
         let idle = idle_procedures();
         if idle.len() == 1 {
+            // A run's publisher is chosen at spawn, so an auto-started
+            // run would never stream live if we spawn before the broker
+            // arrives — even on a healthy network where the handshake
+            // takes milliseconds. Give the supervisor a short, bounded
+            // head start; on a dead network this costs at most 2s, once,
+            // and only on single-deployment stations.
+            if client.is_none() {
+                if let Ok(Some(c)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), broker_rx.recv()).await
+                {
+                    attach_broker(
+                        &c,
+                        installation_id,
+                        &mut boot_config_events,
+                        &shared_publisher,
+                        json_mode,
+                    )
+                    .await;
+                    connected = true;
+                    client = Some(c);
+                }
+            }
             let only = idle[0].id.clone();
             if !json_mode {
                 log::info(&format!("Auto-starting only deployment: {}", idle[0].name,));
@@ -594,7 +645,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 None,
                 json_mode,
                 creds,
-                &client,
+                client.as_ref(),
                 local_ws_server.as_ref(),
             )
             .await;
@@ -659,10 +710,36 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 // procedure. Picks up any deployment swap from above.
                 refresh_idle_procedures(local_ws_server.as_ref()).await;
             }
+            // Attach an already-delivered broker client BEFORE processing
+            // any command (the select! is biased, so written order is
+            // poll order): a Run click racing the attach must see the
+            // live publisher if the connection has landed — otherwise
+            // that run spawns offline with the client sitting unread in
+            // the channel.
+            new_client = broker_rx.recv(), if client.is_none() && !broker_gone => {
+                match new_client {
+                    Some(c) => {
+                        attach_broker(
+                            &c,
+                            installation_id,
+                            &mut boot_config_events,
+                            &shared_publisher,
+                            json_mode,
+                        )
+                        .await;
+                        connected = true;
+                        client = Some(c);
+                    }
+                    // Channel closed without a client: the supervisor gave
+                    // up permanently (streaming disabled). Latch the arm
+                    // off — the station stays local-only for its lifetime.
+                    None => broker_gone = true,
+                }
+            }
             local_cmd = local_station_cmd_rx.recv() => {
                 if let Some(cmd) = local_cmd {
                     match handle_command(
-                        cmd, &client, creds, installation_id, json_mode,
+                        cmd, client.as_ref(), creds, installation_id, json_mode,
                         &mut active_run,
                         &mut prior_run_teardowns,
                         &mut last_procedure_id,
@@ -678,11 +755,21 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                     }
                 }
             }
-            msg = client.recv() => {
+            // Total future: pends when no broker client exists yet, so
+            // the arm needs no precondition. (A `, if` guard is NOT
+            // enough here — select! still *evaluates* the expression of
+            // a disabled branch, it just never polls it, so an unwrap
+            // would panic on the very first idle poll.)
+            msg = async {
+                match client.as_mut() {
+                    Some(c) => c.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 match msg {
                     Some(client::StreamMsg::Command(cmd)) => {
                         match handle_command(
-                            cmd, &client, creds, installation_id, json_mode,
+                            cmd, client.as_ref(), creds, installation_id, json_mode,
                             &mut active_run,
                             &mut prior_run_teardowns,
                             &mut last_procedure_id,
@@ -713,7 +800,9 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                         if !connected {
                             connected = true;
                             if !json_mode { log::success("Reconnected."); }
-                            let _ = client.publish(&collect_hardware_event(installation_id)).await;
+                            if let Some(ref c) = client {
+                                let _ = c.publish(&collect_hardware_event(installation_id)).await;
+                            }
                         }
                     }
                     Some(client::StreamMsg::Disconnected) => {
@@ -741,7 +830,11 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                     })
                     .await
                     {
-                        Ok(event) => { let _ = client.publish(&event).await; }
+                        Ok(event) => {
+                            if let Some(ref c) = client {
+                                let _ = c.publish(&event).await;
+                            }
+                        }
                         Err(e) => log::warn(&format!("telemetry task panicked: {e}")),
                     }
                 }
@@ -774,7 +867,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 // (Cache-Control no-cache) lets the SPA reload cleanly.
                 if active_run.is_none() && outcome_grace_elapsed(last_run_ended_at) {
                     try_apply_staged_update(
-                        &client,
+                        client.as_ref(),
                         installation_id,
                         json_mode,
                         local_ws_server.as_ref(),
@@ -842,7 +935,9 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // Bound the disconnect: centrifuge-client awaits a clean WS close
     // which can stall if the server is unreachable. 2s is generous for
     // a healthy close; past that the connection is gone anyway.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.disconnect()).await;
+    if let Some(client) = client {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client.disconnect()).await;
+    }
     exit_code
 }
 
@@ -934,7 +1029,7 @@ fn outcome_grace_elapsed(last_run_ended_at: Option<std::time::Instant>) -> bool 
     last_run_ended_at.is_none_or(|t| t.elapsed() >= OUTCOME_GRACE)
 }
 async fn try_apply_staged_update(
-    client: &client::StreamClient,
+    client: Option<&client::StreamClient>,
     installation_id: &str,
     json_mode: bool,
     local_ws_server: Option<&std::sync::Arc<crate::local_ws::Server>>,
@@ -947,13 +1042,15 @@ async fn try_apply_staged_update(
     if !json_mode {
         log::info(&format!("Update: applying v{from} -> v{to}"));
     }
-    let _ = client
-        .publish(&StationEvent::UpdateStarted {
-            installation_id: installation_id.to_string(),
-            from_version: from.clone(),
-            to_version: to.clone(),
-        })
-        .await;
+    if let Some(c) = client {
+        let _ = c
+            .publish(&StationEvent::UpdateStarted {
+                installation_id: installation_id.to_string(),
+                from_version: from.clone(),
+                to_version: to.clone(),
+            })
+            .await;
+    }
     // Kill the kiosk window before reexec. `apply_staged` ends in
     // `execvp`, which wipes the heap in-place — `KioskHandle::drop`
     // never runs, so without this the orphaned browser piles up a
@@ -963,14 +1060,16 @@ async fn try_apply_staged_update(
         server.detach_kiosk().await;
     }
     if let Err(e) = update::apply_staged() {
-        let _ = client
-            .publish(&StationEvent::UpdateFailed {
-                installation_id: installation_id.to_string(),
-                from_version: from.clone(),
-                to_version: Some(to.clone()),
-                error: e.to_string(),
-            })
-            .await;
+        if let Some(c) = client {
+            let _ = c
+                .publish(&StationEvent::UpdateFailed {
+                    installation_id: installation_id.to_string(),
+                    from_version: from.clone(),
+                    to_version: Some(to.clone()),
+                    error: e.to_string(),
+                })
+                .await;
+        }
         log::error(&format!("Update failed: v{from} -> v{to} ({e})"));
         // Don't exit. A failed apply (current_exe missing, FS error,
         // permission denied) shouldn't kill a running station — operator
@@ -996,13 +1095,40 @@ async fn try_apply_staged_update(
 
 /// Handle one inbound StationCommand. Returns `Continue` unless the command
 /// terminates the session (e.g. server-initiated Logout).
+/// Chores deferred from boot until the broker link is up: identity
+/// announcement, pending-update outcome, and the held ConfigApplied
+/// events. Also fills the late-bound shared publisher and emits the
+/// `connected` signal (whose wire meaning is "broker link up").
+/// Callers still own setting `connected = true` / `client = Some(..)`.
+async fn attach_broker(
+    c: &client::StreamClient,
+    installation_id: &str,
+    boot_config_events: &mut Vec<StationEvent>,
+    shared_publisher: &SharedPublisher,
+    json_mode: bool,
+) {
+    if let Err(e) = c.publish(&collect_hardware_event(installation_id)).await {
+        log::warn(&format!("Failed to publish hardware event: {e}"));
+    }
+    publish_pending_update_outcome(c, installation_id).await;
+    for event in boot_config_events.drain(..) {
+        let _ = c.publish(&event).await;
+    }
+    *shared_publisher.write().await = Some(c.clone_for_health());
+    if json_mode {
+        println!("{}", serde_json::json!({"type": "connected"}));
+    } else {
+        log::success("Dashboard link up.");
+    }
+}
+
 // Single caller (the station event loop); the args are independent
 // state pieces it owns. Param bag would just dispatch through one more
 // indirection.
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     cmd: StationCommand,
-    client: &client::StreamClient,
+    client: Option<&client::StreamClient>,
     creds: &Credentials,
     installation_id: &str,
     json_mode: bool,
@@ -1090,7 +1216,9 @@ async fn handle_command(
                     let _ = db.set_config(&key, &value);
                 }
             }
-            let _ = client.publish(&event).await;
+            if let Some(c) = client {
+                let _ = c.publish(&event).await;
+            }
             if let Some(server) = local_ws_server {
                 server.publish_event(event).await;
             }
@@ -1115,8 +1243,9 @@ async fn handle_command(
                 // Idle: normal blocking pull. Reuse the station's
                 // existing StreamClient — see boot-pull comment above
                 // for why a second client would break live Pull delivery.
-                let publisher = client.clone_for_health();
-                crate::commands::pull::run_with(json_mode, Some(&publisher), local_ws_server).await;
+                let publisher = client.map(|c| c.clone_for_health());
+                crate::commands::pull::run_with(json_mode, publisher.as_ref(), local_ws_server)
+                    .await;
                 // Pull may have added/removed deployments — push the
                 // refreshed list to the kiosk hello frame so a tab
                 // opening next sees the new options without a refresh.
@@ -1267,12 +1396,14 @@ async fn handle_command(
             // the centrifugo publisher so the queue's progress events
             // reach the same channel as live run events.
             let creds_clone = creds.clone();
-            let publisher = client.clone_for_health();
+            let publisher = client.map(|c| c.clone_for_health());
             tokio::spawn(async move {
                 let (bus, mut rx) = tokio::sync::broadcast::channel::<StationEvent>(16);
                 let bridge = tokio::spawn(async move {
                     while let Ok(ev) = rx.recv().await {
-                        let _ = publisher.publish(&ev).await;
+                        if let Some(ref p) = publisher {
+                            let _ = p.publish(&ev).await;
+                        }
                     }
                 });
                 crate::commands::run::queue::retry_one(&creds_clone, Some(&bus), &queue_id).await;
@@ -1331,7 +1462,7 @@ async fn handle_command(
             // attachments that stalls the tokio worker. Bridge
             // through `spawn_blocking` so the runtime stays
             // responsive.
-            let publisher = client.clone_for_health();
+            let publisher = client.map(|c| c.clone_for_health());
             tokio::spawn(async move {
                 let (bus, mut rx) = tokio::sync::broadcast::channel::<StationEvent>(4);
                 let bus_clone = bus.clone();
@@ -1342,7 +1473,9 @@ async fn handle_command(
                 .await;
                 drop(bus);
                 while let Ok(ev) = rx.recv().await {
-                    let _ = publisher.publish(&ev).await;
+                    if let Some(ref p) = publisher {
+                        let _ = p.publish(&ev).await;
+                    }
                 }
             });
         }
@@ -1407,7 +1540,7 @@ async fn try_start_run(
     operated_by: Option<String>,
     json_mode: bool,
     creds: &Credentials,
-    client: &client::StreamClient,
+    client: Option<&client::StreamClient>,
     local_ws_server: Option<&std::sync::Arc<crate::local_ws::Server>>,
 ) -> Option<crate::commands::run::RunHandle> {
     // No procedure to run on — every caller must pick one explicitly.
@@ -1420,9 +1553,13 @@ async fn try_start_run(
         _ => return None,
     };
 
-    let publisher = crate::commands::run::EventPublisher::Managed {
-        publish: client.clone_for_health(),
-    };
+    // Broker up -> managed publisher on the daemon's connection; broker
+    // absent (realtime-less network, boot window) -> run offline. The
+    // local kiosk gets its events via the local-WS attach either way,
+    // and the result still uploads over the HTTP queue.
+    let publisher = client.map(|c| crate::commands::run::EventPublisher::Managed {
+        publish: c.clone_for_health(),
+    });
 
     let proc_dir = match crate::commands::run::resolve_procedure_dir(proc_id) {
         Ok(d) => d,
@@ -1460,7 +1597,7 @@ async fn try_start_run(
             true,
             json_mode,
             Some(creds),
-            Some(publisher),
+            publisher,
             // Station runs never enable debug mode.
             crate::commands::run::RunOptions::default(),
             tui_presence_identity,
