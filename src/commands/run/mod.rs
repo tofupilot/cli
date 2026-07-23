@@ -714,6 +714,36 @@ pub async fn start(
     // "lagged N events" warning; the station publisher drops and moves on.
     // Raise here if empirically needed; no hard ceiling.
     let (event_tx, _) = broadcast::channel::<StationEvent>(128);
+
+    // Stamp the version of the binary actually executing this run — not
+    // what a separate `tofupilot --version` invocation would say. A stale
+    // daemon or shadowed binary is indistinguishable from up-to-date in a
+    // support screenshot without this line. Printed in every mode
+    // (stderr), mirrored in the run log's meta header.
+    crate::log::info(&format!(
+        "tofupilot {} ({}-{})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+
+    // Per-run event log on disk. Every StationEvent appended to
+    // ~/.tofupilot/logs/run-<execution_id>.log — the artifact support
+    // asks for on "it hung / it failed" reports. Wired first thing after
+    // the broadcast exists, before any await that can park the setup
+    // (publisher bridge, agent init): a run that wedges during its own
+    // setup must still leave a log behind. Failure to create the file
+    // never blocks the run, but says so instead of staying silent.
+    // Announced in json mode too — stderr, so the stdout NDJSON stream
+    // stays clean.
+    let run_log_path = run_log::spawn_writer(&execution_id, event_tx.subscribe());
+    match run_log_path {
+        Some(ref p) => crate::log::info(&format!("Run log: {}", p.display())),
+        None => crate::log::warn(
+            "Could not create the run log under ~/.tofupilot/logs — the run continues unlogged.",
+        ),
+    }
+
     // Dedicated channel for presence events arriving on the status
     // channel from other participants. Kept separate from `event_tx`
     // so the managed publisher doesn't re-publish incoming presence
@@ -928,8 +958,27 @@ pub async fn start(
     let has_publisher = publisher.is_some();
     let active_publisher: ActivePublisher = match publisher {
         Some(EventPublisher::Standalone { ref creds }) => {
-            let bridge = station::bridge::StreamBridge::new(creds, event_tx.subscribe()).await;
-            ActivePublisher::Standalone(bridge)
+            // The realtime channel is keyed on the station's installation
+            // id (`station:<id>:status`) — the server can't mint a token
+            // for a user key (403 station_auth_required, by design). Don't
+            // attempt a connection that is guaranteed to fail: linked
+            // local `--upload` runs carry user credentials and simply
+            // never have a dashboard live view. Say so quietly instead of
+            // warning about a phantom auth problem.
+            if creds.installation_id.is_none() {
+                crate::log::info("realtime on dashboard: station-only, skipped for user run");
+                ActivePublisher::Standalone(None)
+            } else {
+                // Non-blocking: the bridge connects to Centrifugo in a
+                // background task. The dashboard live view is a bonus
+                // surface — the run, the local operator UI, and the HTTP
+                // upload never wait on it. The subscription is taken here,
+                // before the connect resolves, so events emitted in the
+                // meantime are buffered and drain to the dashboard once
+                // the link is up.
+                let bridge = station::bridge::StreamBridge::new(creds, event_tx.subscribe());
+                ActivePublisher::Standalone(Some(bridge))
+            }
         }
         Some(EventPublisher::Managed { publish }) => {
             let mut rx = event_tx.subscribe();
@@ -1020,17 +1069,6 @@ pub async fn start(
                 }
             }
         });
-    }
-
-    // Per-run event log on disk. Every StationEvent appended to
-    // ~/.tofupilot/logs/run-<execution_id>.log — the artifact support
-    // asks for on "it hung / it failed" reports. Best-effort: None
-    // (unwritable home) never blocks the run.
-    let run_log_path = run_log::spawn_writer(&execution_id, event_tx.subscribe());
-    if let Some(ref p) = run_log_path {
-        if !json_mode {
-            crate::log::info(&format!("Run log: {}", p.display()));
-        }
     }
 
     // TUI

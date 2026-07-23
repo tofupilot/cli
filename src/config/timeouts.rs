@@ -29,6 +29,23 @@ pub const AUTH_PROBE: Duration = Duration::from_secs(5);
 pub const WHOAMI_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ---------------------------------------------------------------------------
+// Realtime (Centrifugo bridge)
+// ---------------------------------------------------------------------------
+
+/// Deadline on the realtime WebSocket handshake, enforced inside the
+/// shared primitive (`StreamClient::connect`) so no caller can await it
+/// forever. The underlying client resolves `connect()` only on handshake
+/// success and retries a dead transport internally, so an unreachable
+/// endpoint (missing DNS record for the realtime domain, firewalled
+/// WebSockets on a locked-down factory network) used to park callers
+/// indefinitely. Bounded, the two call-site policies both work: a
+/// standalone run's bridge warns once and continues offline; the station
+/// daemon's boot loop retries with its own backoff. The bridge reuses this
+/// value as its total budget (config fetch + handshake); mid-life drops
+/// are separate — the client auto-reconnects those with backoff.
+pub const REALTIME_CONNECT: Duration = Duration::from_secs(10);
+
+// ---------------------------------------------------------------------------
 // Update checker
 // ---------------------------------------------------------------------------
 

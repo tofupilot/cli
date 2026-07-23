@@ -42,7 +42,7 @@ pub fn spawn_writer(
     }
     prune_old_logs(&dir);
     let path = dir.join(format!("run-{execution_id}.log"));
-    let file = match std::fs::OpenOptions::new()
+    let mut file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
@@ -50,6 +50,22 @@ pub fn spawn_writer(
         Ok(f) => f,
         Err(_) => return None,
     };
+    // Meta header, first line of every log: which binary actually wrote
+    // this file. Support reads logs from machines where `tofupilot
+    // --version` may describe a different binary than the one that ran
+    // (stale daemon, shadowed PATH) — the log must be self-identifying.
+    // Same one-JSON-object-per-line shape as the events, keyed `meta`.
+    let header = format!(
+        "{{\"logged_at\":\"{}\",\"meta\":{{\"cli_version\":\"{}\",\"execution_id\":\"{execution_id}\",\"os\":\"{}\",\"arch\":\"{}\"}}}}\n",
+        chrono::Utc::now().to_rfc3339(),
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    if file.write_all(header.as_bytes()).is_err() {
+        return None;
+    }
+    let _ = file.flush();
     let mut rx = rx;
     tokio::spawn(async move {
         let mut file = std::io::BufWriter::new(file);

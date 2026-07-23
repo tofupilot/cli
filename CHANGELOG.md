@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Every run now stamps the version of the binary actually executing it:
+  a `tofupilot <version> (<os>-<arch>)` line on the terminal at run start
+  (all modes), and a `meta` header as the first line of the per-run log.
+  A stale daemon or shadowed binary is no longer indistinguishable from
+  an up-to-date one in support screenshots and log files.
+
+### Fixed
+
+- A deployment run no longer freezes forever when the realtime server is
+  unreachable (missing DNS record for the realtime domain, firewalled
+  WebSockets). The realtime WebSocket handshake is now bounded inside the
+  shared connect primitive, so no caller can await it forever: the station
+  daemon's boot retry loop actually cycles instead of hanging before the
+  operator UI starts, and a run's dashboard link connects in a background
+  task — the run, the local operator UI, and the result upload start
+  immediately in every case. When the link cannot be established within
+  10 seconds, a warning explains what to check and the run simply stays
+  offline; events emitted while the link comes up are buffered and drain
+  to the dashboard once connected. Mid-run drops were already self-healing
+  (the client auto-reconnects with backoff) and are unchanged.
+- Linked local `--upload` runs (user credentials) no longer attempt the
+  station-only realtime connection: the dashboard live view is keyed on a
+  station identity the server cannot mint for a user key, so the CLI now
+  prints `realtime on dashboard: station-only, skipped for user run`
+  instead of failing the connection and warning about a phantom auth
+  problem.
+- Deployment runs resolve the station identity first. A leftover user
+  login (`tofupilot login`) on the same machine silently disabled realtime
+  streaming for every deployment run: the streaming route is station-only
+  and rejected the user key with a 403 that was swallowed. Same shadowing
+  class as the `pull` fix in 0.26.15. Every realtime setup failure is now
+  reported on stderr instead of being silent.
+- The per-run log (`~/.tofupilot/logs/run-<id>.log`) is created at the very
+  start of the run setup, before any network step, so a run that wedges
+  during setup still leaves a log. The path is now announced in `--json`
+  mode too (on stderr), and a log-creation failure warns instead of staying
+  silent.
+
 ## [0.26.19]
 
 Documentation release: backfilled the changelog for 0.26.5 through 0.26.18.

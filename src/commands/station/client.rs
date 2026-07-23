@@ -49,7 +49,23 @@ pub struct PublishHandle {
 }
 
 impl StreamClient {
+    /// Connect to the realtime broker. The WebSocket handshake is bounded
+    /// by [`crate::config::timeouts::REALTIME_CONNECT`] — the underlying
+    /// client only resolves `connect()` on handshake success and retries a
+    /// dead transport internally, so without this bound every caller
+    /// (per-run bridge, station-daemon boot loop) could await forever on
+    /// an unreachable endpoint. A timeout comes back as `Err`, which each
+    /// caller handles with its own policy (warn-and-continue vs retry).
     pub async fn connect(creds: &Credentials) -> crate::error::CliResult<Option<Self>> {
+        Self::connect_with_timeout(creds, crate::config::timeouts::REALTIME_CONNECT).await
+    }
+
+    /// [`Self::connect`] with an injectable handshake deadline, split out
+    /// so tests don't have to wait the production timeout.
+    pub(crate) async fn connect_with_timeout(
+        creds: &Credentials,
+        handshake_deadline: std::time::Duration,
+    ) -> crate::error::CliResult<Option<Self>> {
         let http = crate::http::client();
 
         let config = match fetch_streaming_config(http, creds).await? {
@@ -85,10 +101,22 @@ impl StreamClient {
 
         let events = client.events().map_err(|e| format!("Events: {e}"))?;
 
-        client
-            .connect()
-            .await
-            .map_err(|e| format!("Connect: {e}"))?;
+        // On timeout the Err return below drops `client`, which closes the
+        // actor's command channel and ends its internal retry loop — no
+        // background connect leaks past an Err.
+        match tokio::time::timeout(handshake_deadline, client.connect()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("Connect: {e}").into()),
+            Err(_) => {
+                return Err(format!(
+                    "Connect: no answer from the realtime endpoint within {}s \
+                     (check DNS for the realtime domain and that WebSockets \
+                     are allowed)",
+                    handshake_deadline.as_secs()
+                )
+                .into())
+            }
+        }
 
         let commands_channel = config.channels.commands.clone();
         let status_channel_clone = config.channels.status.clone();

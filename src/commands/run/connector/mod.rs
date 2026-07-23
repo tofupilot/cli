@@ -2124,11 +2124,8 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             flag.store(true, Ordering::Relaxed);
         });
-        let r = tokio::time::timeout(
-            timeout * 10,
-            startup_stall_elapsed(&progressed, timeout),
-        )
-        .await;
+        let r =
+            tokio::time::timeout(timeout * 10, startup_stall_elapsed(&progressed, timeout)).await;
         assert!(
             r.is_err(),
             "watcher fired after progress was signalled — would false-kill a healthy run"
@@ -2145,6 +2142,9 @@ mod tests {
             startup_stall_elapsed(&progressed, Duration::from_secs(90)),
         )
         .await;
-        assert!(r.is_err(), "watcher fired despite progress set before first poll");
+        assert!(
+            r.is_err(),
+            "watcher fired despite progress set before first poll"
+        );
     }
 }

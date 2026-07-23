@@ -463,13 +463,31 @@ async fn main() {
             // linked local run with `--upload` does, since it syncs to the
             // dashboard — require them so the failure is a clear login
             // prompt rather than a silent no-op publisher.
+            //
+            // Identity follows the run source. A deployment run is an act
+            // of the *station* (the streaming config route and its
+            // Centrifugo channel are keyed on the station identity, and a
+            // user key gets 403 `station_auth_required`), so it resolves
+            // station-first — otherwise a leftover user `credentials.json`
+            // from a `tofupilot login` on the same machine silently
+            // disables realtime for every deployment run. Same class of
+            // shadowing `pull` fixed in 0.26.15. A linked local `--upload`
+            // run is an act of the *user* and keeps user-first resolution.
             let creds = match &source {
                 commands::run::RunSource::LocalPath { upload: false, .. } => {
                     commands::auth::credentials::load()
                 }
-                commands::run::RunSource::LocalPath { upload: true, .. }
-                | commands::run::RunSource::Deployment(_) => {
+                commands::run::RunSource::LocalPath { upload: true, .. } => {
                     match commands::auth::credentials::require() {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            log::error(&e.to_string());
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                commands::run::RunSource::Deployment(_) => {
+                    match commands::auth::credentials::require_station_first() {
                         Ok(c) => Some(c),
                         Err(e) => {
                             log::error(&e.to_string());

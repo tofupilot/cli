@@ -260,7 +260,10 @@ mod tests {
         let result = host.prompt(req(request_id)).await;
         responder.await.unwrap();
         let values = result.expect("prompt should resolve with the response");
-        assert_eq!(values.get("serial_number").map(String::as_str), Some("SN-42"));
+        assert_eq!(
+            values.get("serial_number").map(String::as_str),
+            Some("SN-42")
+        );
     }
 
     #[tokio::test]
