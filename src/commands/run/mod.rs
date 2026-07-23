@@ -512,7 +512,7 @@ async fn synthetic_fail_handle(
                     // Synthetic-fail: the run never started, so there is
                     // no procedure dir to serve images from.
                     None,
-                    "station",
+                    crate::local_ws::HostMode::Station,
                 )
                 .await,
         )
@@ -679,7 +679,8 @@ pub async fn start(
     // UiResponse/Stop/Kill — same posture as any local `tofupilot`
     // process). This is the headless-root + SSH-forward operator workflow.
     // The *daemon* still refuses root, gated separately in `station::start`
-    // and backstopped by `Server::start(allow_root: false)`.
+    // and backstopped by `Server::start(HostMode::Station)`, whose root
+    // policy is derived from the mode (`HostMode::allows_root_bind`).
     let kiosk_enabled = resolve_ui_pref("kiosk_ui", kiosk_override, false);
 
     // Both modes own stdout: TUI draws ratatui frames, agent-protocol
@@ -797,7 +798,7 @@ pub async fn start(
                     procedure_id.to_string(),
                     "CLI".to_string(),
                     identity,
-                    true,
+                    crate::local_ws::HostMode::Local,
                 )
                 .await
                 {
@@ -840,9 +841,9 @@ pub async fn start(
                     procedures,
                     Some(package_dir.clone()),
                     if local_ws_server.is_some() {
-                        "station"
+                        crate::local_ws::HostMode::Station
                     } else {
-                        "local"
+                        crate::local_ws::HostMode::Local
                     },
                 )
                 .await;

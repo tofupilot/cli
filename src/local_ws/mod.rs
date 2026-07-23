@@ -233,6 +233,11 @@ const OUTBOUND_CHAN_CAP: usize = 256;
 /// stall in the writer doesn't cascade into a broadcast lag.
 const FORWARD_CHAN_CAP: usize = 256;
 
+/// Grace period between the graceful cancel and the forced kill when a
+/// foreground run is closed from the operator UI. Mirrors the station
+/// daemon's own `Exit` ladder so the two hosts behave the same.
+const EXIT_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[derive(Clone, serde::Serialize)]
 pub struct ProcedureRef {
     pub id: String,
@@ -274,6 +279,42 @@ struct HydrationSnapshot {
     lagged: bool,
 }
 
+/// Which host this server belongs to. `Local` is a foreground
+/// `tofupilot run --kiosk` — one process, one run, no supervisor.
+/// `Station` is the long-lived daemon that outlives its runs.
+///
+/// Threaded from `Server::start` rather than defaulted, because every
+/// consumer of it (root-bind policy, the SPA's exit confirmation copy)
+/// is wrong in a way nobody notices if the value doesn't match the
+/// actual host. Serializes to the `"local"` / `"station"` strings the
+/// SPA's `HelloPayload.mode` union expects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostMode {
+    Local,
+    Station,
+}
+
+impl HostMode {
+    /// Whether this host may bind the local-UI listener as root. The
+    /// danger is not root itself — it's binding the *station command*
+    /// channel (Run, Exit, Reboot, ...) unauthenticated on loopback,
+    /// where any local user reaching 127.0.0.1 could drive root. Only
+    /// the station daemon installs that sink (`set_station_cmd_sink`);
+    /// a foreground `run --kiosk` leaves it `None`, so its station
+    /// commands are dropped and the residual surface is just the
+    /// current run's UiResponse/Stop/Kill/Exit — the same posture as
+    /// the rest of the CLI (any local `tofupilot` process already has
+    /// full access). This unblocks the legitimate headless-root +
+    /// SSH-forward operator workflow.
+    ///
+    /// Derived from the mode rather than passed alongside it: the two
+    /// can then never disagree.
+    fn allows_root_bind(self) -> bool {
+        matches!(self, HostMode::Local)
+    }
+}
+
 /// Hello payload sent as the first WS frame on connect, before any
 /// stamped events. Folding bootstrap data into the socket gives the
 /// SPA a single bootstrap path and guarantees the payload is
@@ -287,11 +328,12 @@ struct HelloPayload {
     #[serde(rename = "stationName")]
     station_name: String,
     procedures: Vec<ProcedureRef>,
-    /// `"local"` for `tofupilot run --kiosk` (single-procedure
-    /// session), `"station"` for the long-lived station daemon
-    /// (procedure list comes from the deployments dir). Used by the
-    /// SPA to gate UI affordances that depend on the host model.
-    mode: &'static str,
+    /// Host model, set at `Server::start` and re-asserted by each
+    /// `attach_run`. Used by the SPA to gate UI affordances that
+    /// depend on it — notably the Close-CLI confirmation copy, which
+    /// promises different things for a supervised daemon and for a
+    /// foreground run.
+    mode: HostMode,
     /// Identity envelope for analytics (PostHog identify in the SPA).
     /// Sourced from the cached `WhoamiCache`. Optional everywhere so
     /// the kiosk still works pre-login or when whoami refresh has
@@ -443,21 +485,16 @@ impl Server {
         station_id: String,
         station_name: String,
         identity: HelloIdentity,
-        // Whether the caller may bind this server as root. The danger is
-        // not root itself — it's binding the *station command* channel
-        // (Run, Exit, Reboot, ...) unauthenticated on loopback, where any
-        // local user reaching 127.0.0.1 could drive root. Only the station
-        // daemon installs that sink (`set_station_cmd_sink`); a standalone
-        // foreground `run --kiosk` leaves it `None`, so its station
-        // commands are dropped and the residual surface is just the
-        // current run's UiResponse/Stop/Kill — the same posture as the
-        // rest of the CLI (any local `tofupilot` process already has full
-        // access). So the daemon passes `false` (refuse root); the
-        // foreground run passes `true`. This unblocks the legitimate
-        // headless-root + SSH-forward operator workflow.
-        allow_root: bool,
+        // Which host is starting this server. Drives both the root-bind
+        // policy (see `HostMode::allows_root_bind`) and the `mode` the
+        // hello frame advertises to the SPA. Previously the root policy
+        // was a separate `allow_root: bool` and the hello frame was
+        // hardcoded to `"station"` here, corrected later by
+        // `attach_run` — so a foreground run served `"station"` to any
+        // tab that connected before its run attached.
+        mode: HostMode,
     ) -> std::io::Result<Self> {
-        if !allow_root && crate::commands::config::is_root_system() {
+        if !mode.allows_root_bind() && crate::commands::config::is_root_system() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "local operator UI is disabled for the root station service \
@@ -607,7 +644,7 @@ impl Server {
             station_id,
             station_name,
             procedures: Vec::new(),
-            mode: "station",
+            mode,
             auth_type: identity.auth_type,
             organization_slug: identity.organization_slug,
             organization_name: identity.organization_name,
@@ -936,7 +973,7 @@ impl Server {
         // the caller has no on-disk procedure (synthetic-fail handles)
         // — the route then 404s and the SPA shows its image fallback.
         procedure_dir: Option<PathBuf>,
-        mode: &'static str,
+        mode: HostMode,
     ) -> RunAttachment {
         // Swap the inbound sinks so frames arriving on existing WS
         // connections route to this run.
@@ -1239,6 +1276,39 @@ async fn connection(socket: WebSocket, state: AppState) {
     let _ = writer.await;
 }
 
+/// Where an inbound `StationCommand` is dispatched. Extracted from
+/// `handle_text` so the matrix is assertable without standing up an
+/// `AppState` — the routing rules are the only real logic in this
+/// module's inbound path, and they were previously untested.
+#[derive(Debug, PartialEq, Eq)]
+enum CommandRoute {
+    /// Active run's operator-UI response sink.
+    RunUi,
+    /// Active run's cancel token, graceful.
+    Cancel,
+    /// Active run's cancel token, forced.
+    Kill,
+    /// Station daemon's command loop.
+    Station,
+    /// Foreground `run --kiosk`: no daemon to exit, so closing the CLI
+    /// means ending the one run this process owns. Notably the only way
+    /// out before `RunStarted`, where the UI renders no Stop button.
+    LocalExit,
+    /// Nothing to attach to. Logged, never silent.
+    Drop,
+}
+
+fn route_command(cmd: &StationCommand, has_station_sink: bool) -> CommandRoute {
+    match cmd {
+        StationCommand::UiResponse { .. } => CommandRoute::RunUi,
+        StationCommand::Stop { .. } => CommandRoute::Cancel,
+        StationCommand::Kill { .. } => CommandRoute::Kill,
+        StationCommand::Exit {} if !has_station_sink => CommandRoute::LocalExit,
+        _ if has_station_sink => CommandRoute::Station,
+        _ => CommandRoute::Drop,
+    }
+}
+
 async fn handle_text(
     text: &str,
     state: &AppState,
@@ -1308,34 +1378,58 @@ async fn handle_text(
         return;
     }
     if let Ok(cmd) = serde_json::from_str::<StationCommand>(text) {
-        // Routing matrix:
-        //   * `UiResponse`            → active run's `ui_response_tx`
-        //   * `Stop` / `Kill`         → active run's `cancel_token`
-        //   * everything else         → station mode's command sink
-        //                               (or dropped in standalone mode,
-        //                               where station-level commands
-        //                               like `Run` / `Exit` have nothing
-        //                               to attach to).
-        match &cmd {
-            StationCommand::UiResponse { .. } => {
+        let station_sink = state.station_cmd_tx.lock().await.clone();
+        match route_command(&cmd, station_sink.is_some()) {
+            CommandRoute::RunUi => {
                 let tx = state.ui_response_tx.lock().await.clone();
                 let _ = tx.send(cmd).await;
             }
-            StationCommand::Stop { .. } => {
-                state.cancel_token.lock().await.cancel();
-            }
-            StationCommand::Kill { .. } => {
-                state.cancel_token.lock().await.kill();
-            }
-            _ => {
-                let station_sink = state.station_cmd_tx.lock().await.clone();
+            CommandRoute::Cancel => state.cancel_token.lock().await.cancel(),
+            CommandRoute::Kill => state.cancel_token.lock().await.kill(),
+            CommandRoute::Station => {
+                // `is_some()` above proves the sink is there.
                 if let Some(tx) = station_sink {
                     let _ = tx.send(cmd).await;
                 }
-                // Standalone `run --kiosk`: silently drop. There's no
-                // station_cmd consumer; the previous fallback to
-                // `ui_cmd_tx` only worked because the bridge translated
-                // Stop/Kill there, which we've now removed.
+            }
+            CommandRoute::LocalExit => {
+                // Logged on both rungs, mirroring the station daemon's
+                // Exit handler. Without these, an operator reporting
+                // "I clicked and nothing happened" is indistinguishable
+                // between three very different causes: the frame never
+                // arrived, it arrived and the run is ignoring the
+                // cancel, or it arrived before `attach_run` and hit the
+                // placeholder token. The whole point of this branch is
+                // that a control which can't be falsified from the
+                // outside stays broken for months.
+                crate::log::info(
+                    "Operator requested exit; aborting active run and stopping the CLI...",
+                );
+                state.cancel_token.lock().await.cancel();
+                let token = state.cancel_token.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(EXIT_GRACE_PERIOD).await;
+                    // Fires unconditionally: the usual case is that the
+                    // run already wound down and took the process with
+                    // it, so this line is never reached. If it is, the
+                    // kill is either a no-op (run already finished, CLI
+                    // still flushing uploads) or a real escalation.
+                    crate::log::warn(&format!(
+                        "Exit grace period ({}s) elapsed; escalating to force-kill. \
+                         Any teardown still in progress is abandoned.",
+                        EXIT_GRACE_PERIOD.as_secs()
+                    ));
+                    token.lock().await.kill();
+                });
+            }
+            // Warn instead of dropping in silence: an inert control
+            // with no log line is unfalsifiable from the outside,
+            // which is how the dead Exit button survived for months.
+            CommandRoute::Drop => {
+                crate::log::warn(&format!(
+                    "local-ui: dropped station command {cmd:?} — no station sink \
+                     (foreground `tofupilot run`, not the station daemon)"
+                ));
             }
         }
         return;
@@ -1604,6 +1698,111 @@ const PLACEHOLDER_HTML: &str = include_str!("placeholder.html");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ui_response() -> StationCommand {
+        StationCommand::UiResponse {
+            request_id: "r1".into(),
+            values: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Run-scoped commands never reach the station sink, in either
+    /// host mode: they belong to the run, not to the process.
+    #[test]
+    fn run_scoped_commands_ignore_host_mode() {
+        for has_sink in [true, false] {
+            assert_eq!(route_command(&ui_response(), has_sink), CommandRoute::RunUi);
+            assert_eq!(
+                route_command(&StationCommand::Stop { reason: None }, has_sink),
+                CommandRoute::Cancel
+            );
+            assert_eq!(
+                route_command(&StationCommand::Kill { reason: None }, has_sink),
+                CommandRoute::Kill
+            );
+        }
+    }
+
+    /// The regression this module's `Exit` handling exists for: with no
+    /// station sink (foreground `tofupilot run`), Exit must end the run
+    /// rather than fall through to the drop arm. It was silently dropped
+    /// here, leaving "Close CLI" inert for every local run.
+    #[test]
+    fn exit_ends_the_run_when_there_is_no_station() {
+        assert_eq!(
+            route_command(&StationCommand::Exit {}, false),
+            CommandRoute::LocalExit
+        );
+    }
+
+    /// With a daemon present, Exit is the daemon's business — it owns
+    /// the process lifetime and applies its own teardown ladder.
+    #[test]
+    fn exit_goes_to_the_daemon_when_one_is_attached() {
+        assert_eq!(
+            route_command(&StationCommand::Exit {}, true),
+            CommandRoute::Station
+        );
+    }
+
+    /// Station-level commands other than Exit have nothing to attach to
+    /// in a foreground run. They must land on the logged Drop arm, not
+    /// vanish.
+    #[test]
+    fn other_station_commands_drop_loudly_without_a_sink() {
+        let station_only = [
+            StationCommand::Pull {},
+            StationCommand::Run {
+                procedure_id: None,
+                reuse_unit: None,
+                operated_by: None,
+            },
+            StationCommand::ConfigUpdate {
+                key: "kiosk_ui".into(),
+                value: "true".into(),
+            },
+        ];
+        for cmd in &station_only {
+            assert_eq!(route_command(cmd, false), CommandRoute::Drop);
+            assert_eq!(route_command(cmd, true), CommandRoute::Station);
+        }
+    }
+
+    /// The SPA's exit frame is `{"type":"exit"}`. Pin the wire shape:
+    /// a rename on either side would otherwise fail the parse and land
+    /// in the "unparseable frame" warning instead of the routing matrix.
+    #[test]
+    fn exit_frame_deserializes_from_the_spa_payload() {
+        let cmd: StationCommand = serde_json::from_str(r#"{"type":"exit"}"#)
+            .expect("SPA exit frame must parse as StationCommand");
+        assert_eq!(route_command(&cmd, false), CommandRoute::LocalExit);
+    }
+
+    /// The SPA types `HelloPayload.mode` as the union
+    /// `'local' | 'station'` and branches the Close-CLI confirmation
+    /// copy on it. A rename on this side would match neither arm of
+    /// that union and silently fall through to the station wording.
+    #[test]
+    fn host_mode_serializes_to_the_spa_union() {
+        assert_eq!(
+            serde_json::to_string(&HostMode::Local).unwrap(),
+            r#""local""#
+        );
+        assert_eq!(
+            serde_json::to_string(&HostMode::Station).unwrap(),
+            r#""station""#
+        );
+    }
+
+    /// Root-bind policy is derived from the host mode, so the two can
+    /// never disagree. Only the daemon exposes the unauthenticated
+    /// station-command channel on loopback, so only the daemon is
+    /// refused under root.
+    #[test]
+    fn only_the_foreground_run_may_bind_as_root() {
+        assert!(HostMode::Local.allows_root_bind());
+        assert!(!HostMode::Station.allows_root_bind());
+    }
 
     #[test]
     fn image_extension_whitelist() {

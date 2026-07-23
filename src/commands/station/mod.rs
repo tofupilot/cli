@@ -433,7 +433,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
             installation_id.to_string(),
             station_name,
             identity,
-            false,
+            crate::local_ws::HostMode::Station,
         )
         .await
         {
