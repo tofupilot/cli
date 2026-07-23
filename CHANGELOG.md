@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.23]
+
 ### Added
 
 - Every run now stamps the version of the binary actually executing it:
