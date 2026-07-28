@@ -597,8 +597,8 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
                         header: "ID",
                         path: "id",
                         format: "",
-                        width: 8,
-                        truncate: true,
+                        width: 0,
+                        truncate: false,
                     },
                     display::Column {
                         header: "Outcome",

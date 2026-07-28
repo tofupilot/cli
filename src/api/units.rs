@@ -45,7 +45,7 @@ pub struct CreateArgs {
     /// Hardware revision identifier for the specific version of the part. If the revision does not exist, it will be created.
     #[arg(long)]
     pub revision_number: String,
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics aggregates (FPY, Cpk, throughput) by default. Omit or null for regular production units.
     #[arg(long)]
     pub sample: Option<String>,
     /// Custom metadata to attach to the unit (max 50 keys per unit). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. (JSON string)
@@ -186,7 +186,7 @@ pub struct UpdateArgs {
     /// Array of upload IDs to attach to the unit.
     #[arg(long, num_args = 1..)]
     pub attachments: Option<Vec<String>>,
-    /// Reference-sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit. Both are excluded from production analytics by default. Set to null to clear and treat as a production unit.
+    /// Sample classification. 'golden' marks a known-good reference unit; 'failing' marks a known-faulty reference unit; 'ignored' marks a bench-check unit excluded from analytics and alerts. All are excluded from production analytics by default. Set to null to clear and treat as a production unit.
     #[arg(long)]
     pub sample: Option<String>,
     /// Custom metadata to upsert on the unit. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key. (JSON string)
@@ -495,8 +495,8 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
                         header: "ID",
                         path: "id",
                         format: "",
-                        width: 8,
-                        truncate: true,
+                        width: 0,
+                        truncate: false,
                     },
                     display::Column {
                         header: "Serial",

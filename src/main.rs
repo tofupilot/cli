@@ -486,11 +486,21 @@ async fn main() {
                         }
                     }
                 }
-                commands::run::RunSource::Deployment(_) => {
+                commands::run::RunSource::Deployment(id) => {
                     match commands::auth::credentials::require_station_first() {
                         Ok(c) => Some(c),
                         Err(e) => {
                             log::error(&e.to_string());
+                            // Bare `tofupilot run` lands here (no path means
+                            // "pick a pulled deployment"), so a logged-out
+                            // first-time user hits a login wall without
+                            // learning that a local run needs no account.
+                            // Only for the no-ID form: someone who typed
+                            // `--deployment <id>` asked for a deployment, and
+                            // pointing them at a local path is a non-sequitur.
+                            if id.is_none() {
+                                getting_started();
+                            }
                             std::process::exit(1);
                         }
                     }
@@ -663,16 +673,27 @@ async fn main() {
                 }
                 _ => {
                     eprintln!("TofuPilot v{VERSION}");
-                    eprintln!();
-                    eprintln!("Get started:");
-                    eprintln!("  tofupilot login              Authenticate this CLI");
-                    eprintln!("  tofupilot run [path]         Run a procedure locally");
-                    eprintln!();
-                    eprintln!("Run `tofupilot --help` for the full command list.");
+                    getting_started();
                 }
             }
         }
     }
+}
+
+/// Onboarding block for a caller with no credentials at all. Shared by bare
+/// `tofupilot` and by a logged-out bare `tofupilot run` — the same audience,
+/// since a station or a script never reaches either branch.
+///
+/// "no account needed" is the load-bearing half: printed under `Not logged
+/// in`, a bare command menu otherwise reads as "log in, *then* run", which is
+/// the misreading this block exists to prevent.
+fn getting_started() {
+    eprintln!();
+    eprintln!("Get started:");
+    eprintln!("  tofupilot login              Authenticate this CLI");
+    eprintln!("  tofupilot run [path]         Run a procedure locally (no account needed)");
+    eprintln!();
+    eprintln!("Run `tofupilot --help` for the full command list.");
 }
 
 fn get_sdk() -> crate::error::CliResult<TofuPilot> {

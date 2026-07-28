@@ -185,11 +185,12 @@ struct ResolvedSource {
     /// linked procedure's display label so the post-run hint can nudge the
     /// user toward `--upload`.
     link_hint: Option<String>,
-    /// Explicit file passed on the command line (`tofupilot run ./my-test.yml`).
-    /// When it has a YAML extension, framework detection treats it as the
-    /// procedure file regardless of its name — the local-path equivalent of
-    /// a manifest `entry_point`.
-    yaml_hint: Option<PathBuf>,
+    /// Explicit file passed on the command line (`tofupilot run ./my-test.yml`,
+    /// `tofupilot run ./stage1_entry.py`). A YAML extension makes it the
+    /// procedure file regardless of its name; any other file becomes the
+    /// entry point in place of `main.py` — the local-path equivalent of a
+    /// manifest `entry_point`.
+    entry_hint: Option<PathBuf>,
 }
 
 /// True when `rel` ends in a YAML extension (`.yaml`/`.yml`,
@@ -348,10 +349,30 @@ struct PrepareFail {
 /// declared `EntrySurface`. The pytest sentinel `main.py` no longer
 /// wins because pytest's surface is `PackageDir`, not `MainPy`.
 fn resolve_entry_file(
+    entry_hint: Option<&Path>,
     manifest_entry: Option<&str>,
     framework: &Framework,
     package_dir: &Path,
 ) -> Result<PathBuf, PrepareFail> {
+    // An explicit file named on the command line wins over everything:
+    // the user pointed at the file to run. Only meaningful for
+    // `MainPy`-surface frameworks — a YAML hint already became the
+    // framework itself in `prepare_run`, and pytest/robot scan the
+    // package dir, so a file hint there would silently not be the run
+    // target; warn instead of pretending.
+    if let Some(hint) = entry_hint {
+        match framework.entry_surface() {
+            EntrySurface::MainPy => return Ok(hint.to_path_buf()),
+            EntrySurface::PackageDir => {
+                if !matches!(framework, Framework::Yaml(_)) {
+                    crate::log::warn(&format!(
+                        "{} is ignored: this framework runs the whole directory.",
+                        hint.display(),
+                    ));
+                }
+            }
+        }
+    }
     if let Some(rel) = manifest_entry {
         return Ok(if rel == "." {
             package_dir.to_path_buf()
@@ -364,7 +385,7 @@ fn resolve_entry_file(
             kind: "load_error",
             message: format!(
                 "No procedure found in {}. Expected a procedure.yaml or a Python entry point \
-                 (main.py).",
+                 (main.py), or name the file directly: tofupilot run ./my_test.py",
                 package_dir.display(),
             ),
         }),
@@ -375,9 +396,11 @@ fn resolve_entry_file(
 async fn prepare_run(
     deployment_dir: &Path,
     bootstrap_enabled: bool,
-    // Explicit YAML file from the command line (`tofupilot run ./my-test.yml`).
-    // Wins over on-disk detection the same way a manifest `entry_point` does.
-    yaml_hint: Option<&Path>,
+    // Explicit file from the command line (`tofupilot run ./my-test.yml`,
+    // `tofupilot run ./stage1_entry.py`). Wins over on-disk detection the
+    // same way a manifest `entry_point` does: YAML → the procedure file,
+    // anything else → the Python entry point.
+    entry_hint: Option<&Path>,
 ) -> Result<Prepared, PrepareFail> {
     let layout = engine::deployment_layout(deployment_dir).map_err(|e| PrepareFail {
         kind: "load_error",
@@ -389,14 +412,15 @@ async fn prepare_run(
         manifest_present,
     } = layout;
 
-    let framework = match yaml_hint {
+    let framework = match entry_hint {
         Some(hint) if hint.to_str().is_some_and(has_yaml_extension) => {
             Framework::Yaml(hint.to_path_buf())
         }
         _ => Framework::detect(&package_dir, entry_point.as_deref()),
     };
 
-    let entry_file = resolve_entry_file(entry_point.as_deref(), &framework, &package_dir)?;
+    let entry_file =
+        resolve_entry_file(entry_hint, entry_point.as_deref(), &framework, &package_dir)?;
 
     // Station-mode (`manifest_present`) keeps the installer-managed
     // venv at `<package_dir>/venv`: `deployment_python` is the single
@@ -591,9 +615,9 @@ pub async fn start(
     // deployments) ignore this flag; their venvs are owned by the
     // deployer's installer. False corresponds to `--no-bootstrap`.
     bootstrap_enabled: bool,
-    // Explicit YAML procedure file from the command line; None for
+    // Explicit procedure or entry file from the command line; None for
     // directory runs and deployments (the manifest covers those).
-    yaml_hint: Option<PathBuf>,
+    entry_hint: Option<PathBuf>,
 ) -> RunHandle {
     // Per-run identity, minted up-front so even synthetic-fail handles
     // (no entry point, no venv) carry a stable id consumers can correlate
@@ -626,7 +650,7 @@ pub async fn start(
     // entry file, and Python subprocess cwd all live there. For
     // single-package bundles `root_directory` is null and the
     // package dir collapses to the deployment root.
-    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, yaml_hint.as_deref()).await
+    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, entry_hint.as_deref()).await
     {
         Ok(p) => p,
         Err(fail) => {
@@ -1397,7 +1421,7 @@ pub async fn run_cmd(
         // UI runs forward an `operated_by` email.
         None,
         bootstrap_enabled,
-        resolved.yaml_hint,
+        resolved.entry_hint,
     )
     .await;
     let code = handle.join().await;
@@ -1625,7 +1649,7 @@ impl ConsoleLevel {
 fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, i32> {
     match source {
         RunSource::LocalPath { path, upload } => {
-            let (dir, yaml_hint) = classify_local_path(&path)?;
+            let (dir, entry_hint) = classify_local_path(&path)?;
 
             // A linked local dir carries a `tofupilot.json` binding it to a
             // remote procedure. `--upload` activates that link, uploading
@@ -1658,7 +1682,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                     dir,
                     upload: true,
                     link_hint: None,
-                    yaml_hint,
+                    entry_hint,
                 });
             }
 
@@ -1679,7 +1703,7 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                 dir,
                 upload: false,
                 link_hint,
-                yaml_hint,
+                entry_hint,
             })
         }
         RunSource::Deployment(id_arg) => {
@@ -1690,13 +1714,13 @@ fn resolve_source(source: RunSource, json_mode: bool) -> Result<ResolvedSource, 
                 dir,
                 upload: true,
                 link_hint: None,
-                yaml_hint: None,
+                entry_hint: None,
             })
         }
     }
 }
 
-/// Resolve a local path to a (procedure_dir, yaml_hint) pair.
+/// Resolve a local path to a (procedure_dir, entry_hint) pair.
 /// - file: parent dir is the procedure dir.
 /// - directory: path is the procedure dir.
 fn classify_local_path(path: &Path) -> Result<(PathBuf, Option<PathBuf>), i32> {
@@ -2273,5 +2297,63 @@ mod prepare_run_tests {
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.python_path, python);
+    }
+
+    /// An explicit `.py` file on the command line becomes the entry
+    /// point, even when a `main.py` is also present — the user named
+    /// the file to run.
+    #[test]
+    fn entry_file_honors_explicit_py_hint_over_main_py() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        fs::write(pkg.join("main.py"), b"print('main')\n").unwrap();
+        let hint = pkg.join("stage1_entry.py");
+        fs::write(&hint, b"print('stage1')\n").unwrap();
+
+        let entry = resolve_entry_file(Some(&hint), None, &Framework::Openhtf, pkg)
+            .expect("explicit entry should resolve");
+        assert_eq!(entry, hint);
+    }
+
+    /// An explicit `.py` file works without any `main.py` in the dir —
+    /// the fallback lookup (and its error) is skipped entirely.
+    #[test]
+    fn entry_file_honors_explicit_py_hint_without_main_py() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        let hint = pkg.join("stage2_entry.py");
+        fs::write(&hint, b"print('stage2')\n").unwrap();
+
+        let entry = resolve_entry_file(Some(&hint), None, &Framework::Plain, pkg)
+            .expect("explicit entry should resolve");
+        assert_eq!(entry, hint);
+    }
+
+    /// The explicit file wins over a manifest `entry_point` — command
+    /// line beats stored config, matching every other CLI convention.
+    #[test]
+    fn entry_file_prefers_explicit_hint_over_manifest_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        let hint = pkg.join("stage3_entry.py");
+        fs::write(&hint, b"print('stage3')\n").unwrap();
+
+        let entry = resolve_entry_file(Some(&hint), Some("other.py"), &Framework::Openhtf, pkg)
+            .expect("explicit entry should resolve");
+        assert_eq!(entry, hint);
+    }
+
+    /// A YAML hint already selected `Framework::Yaml` in `prepare_run`;
+    /// the entry surface stays the package dir, unchanged.
+    #[test]
+    fn entry_file_keeps_package_dir_for_yaml_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+        let yaml = pkg.join("my-test.yaml");
+        fs::write(&yaml, b"name: test\n").unwrap();
+
+        let entry = resolve_entry_file(Some(&yaml), None, &Framework::Yaml(yaml.clone()), pkg)
+            .expect("yaml entry should resolve");
+        assert_eq!(entry, pkg);
     }
 }
