@@ -143,11 +143,7 @@ impl StreamClient {
     }
 
     pub async fn publish(&self, event: &StationEvent) -> crate::error::CliResult<()> {
-        let data = serde_json::to_vec(event).map_err(|e| format!("Serialize: {e}"))?;
-        self.client
-            .publish(&self.status_channel, data)
-            .await
-            .map_err(|e| format!("Publish: {e}").into())
+        publish_bounded(&self.client, &self.status_channel, event).await
     }
 
     /// Receive the next message (command, connected, or disconnected).
@@ -163,11 +159,110 @@ impl StreamClient {
 
 impl PublishHandle {
     pub async fn publish(&self, event: &StationEvent) -> crate::error::CliResult<()> {
-        let data = serde_json::to_vec(event).map_err(|e| format!("Serialize: {e}"))?;
-        self.client
-            .publish(&self.status_channel, data)
-            .await
-            .map_err(|e| format!("Publish: {e}").into())
+        publish_bounded(&self.client, &self.status_channel, event).await
+    }
+}
+
+/// Publish an event, never letting an oversized frame reach the broker.
+///
+/// Centrifugo caps inbound client frames at `message_size_limit` (65536
+/// by default). Over that it closes the connection with code 1009, which
+/// the client SDK treats as terminal (`reconnect: false`) and the station
+/// daemon's broker supervisor -- a one-shot at boot -- never re-establishes.
+/// One oversized event therefore takes the station offline on the dashboard
+/// for the rest of the process's life, while runs keep succeeding locally
+/// and uploading over HTTP. Silent, permanent, and easy to mistake for a
+/// flaky dashboard.
+///
+/// So an event over budget is degraded (see `StationEvent::shrink_to_fit`:
+/// the prompt keeps its inputs and loses its inline image, the log line
+/// keeps its context and loses its tail) and only dropped when even that
+/// can't fit. Both paths are logged: a publish that silently does nothing
+/// is how this class of bug stays invisible.
+///
+/// Every publish in the CLI funnels through here -- `StreamClient::publish`
+/// and `PublishHandle::publish` are the only callers of the broker
+/// client's `publish`, so this is the single chokepoint for the guarantee.
+async fn publish_bounded(
+    client: &Client,
+    channel: &str,
+    event: &StationEvent,
+) -> crate::error::CliResult<()> {
+    let data = serde_json::to_vec(event).map_err(|e| format!("Serialize: {e}"))?;
+
+    let data = if data.len() <= station_protocol::MAX_EVENT_BYTES {
+        data
+    } else {
+        let kind = station_event_kind(event);
+        match event.shrink_to_fit(station_protocol::MAX_EVENT_BYTES) {
+            Some(degraded) => {
+                let shrunk =
+                    serde_json::to_vec(&degraded).map_err(|e| format!("Serialize: {e}"))?;
+                if oversize_first_report(kind, "degraded") {
+                    crate::log::warn(&format!(
+                        "Event '{kind}' was {} bytes, over the {} byte realtime limit; \
+                         published a degraded copy ({} bytes). The station's local \
+                         operator UI still shows the full content. Further '{kind}' \
+                         degraded-copy reports are suppressed for this process.",
+                        data.len(),
+                        station_protocol::MAX_EVENT_BYTES,
+                        shrunk.len(),
+                    ));
+                }
+                shrunk
+            }
+            None => {
+                if oversize_first_report(kind, "dropped") {
+                    crate::log::error(&format!(
+                        "Event '{kind}' was {} bytes and could not be reduced under the \
+                         {} byte realtime limit; dropped instead of publishing it, which \
+                         would have disconnected this station from the dashboard. Further \
+                         '{kind}' drop reports are suppressed for this process.",
+                        data.len(),
+                        station_protocol::MAX_EVENT_BYTES,
+                    ));
+                }
+                return Ok(());
+            }
+        }
+    };
+
+    client
+        .publish(channel, data)
+        .await
+        .map_err(|e| format!("Publish: {e}").into())
+}
+
+/// Once-per-kind-and-outcome-per-process gate for the oversize log lines
+/// above. A chatty test can produce hundreds of oversized `phase_log`s in
+/// one run; repeating the warning for each would flood stderr (and, in TUI
+/// mode, scribble over the interface) without adding information. Keyed by
+/// outcome as well as kind: a DROP loses content the dashboard never gets,
+/// so it must be reported even when an earlier event of the same kind was
+/// merely degraded. Returns true only the first time a pair is reported.
+fn oversize_first_report(kind: &'static str, outcome: &'static str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    type Seen = std::collections::BTreeSet<(&'static str, &'static str)>;
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert((kind, outcome)))
+        .unwrap_or(false)
+}
+
+/// Discriminant name for the oversize log lines above, so an operator can
+/// tell which event was degraded without dumping its (huge) body.
+fn station_event_kind(event: &StationEvent) -> &'static str {
+    match event {
+        StationEvent::UiRequest { .. } => "ui_request",
+        StationEvent::UiUpdate { .. } => "ui_update",
+        StationEvent::IdentifyRequest { .. } => "identify_request",
+        StationEvent::PhaseLog { .. } => "phase_log",
+        StationEvent::PlugLog { .. } => "plug_log",
+        StationEvent::PhaseComplete { .. } => "phase_complete",
+        StationEvent::MeasurementUpdate { .. } => "measurement_update",
+        StationEvent::RunCrashed { .. } => "run_crashed",
+        _ => "event",
     }
 }
 

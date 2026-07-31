@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// Budget-driven degradation for events too large for the Centrifugo
+/// frame limit. See `shrink.rs` for the failure mode it prevents.
+mod shrink;
+pub use shrink::MAX_EVENT_BYTES;
+
 // ---------------------------------------------------------------------------
 // Station events (CLI -> Dashboard via Centrifugo)
 // ---------------------------------------------------------------------------
