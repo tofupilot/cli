@@ -47,6 +47,40 @@ const UV_VERSION: &str = "0.11.8";
 /// air-gapped mirrors; the layout is `{base}/{UV_VERSION}/uv-{target}.{ext}`.
 const UV_BASE_URL: &str = "https://dl.tofupilot.sh/uv";
 
+/// Default mirror for CPython interpreter downloads
+/// (python-build-standalone). Same rationale as `UV_BASE_URL`: uv
+/// fetches interpreters from github.com/objects.githubusercontent.com,
+/// which are unreachable from China and rarely whitelisted on
+/// firewalled factory networks — station bootstrap must not depend on
+/// them. The "Mirror python-build-standalone to R2" step in
+/// release-cli.yml populates `python/{tag}/{asset}` with exactly the
+/// builds this uv version's embedded metadata references, so the
+/// mirror is complete for every interpreter uv can ask for.
+const PYTHON_MIRROR_URL: &str = "https://dl.tofupilot.sh/python";
+
+/// The env pair to inject on uv invocations that may download a
+/// CPython interpreter (`uv venv --python`, `uv sync`). Returns
+/// `None` when the mirror should not be forced:
+/// - the operator already set `UV_PYTHON_INSTALL_MIRROR` (uv reads it
+///   from the inherited environment; we never override it), or
+/// - `TOFUPILOT_PYTHON_MIRROR=off` (explicit opt-out back to upstream
+///   GitHub, e.g. a build our mirror doesn't carry).
+///
+/// `TOFUPILOT_PYTHON_MIRROR` with any other non-empty value replaces
+/// the default base URL, for self-hosted or air-gapped mirrors —
+/// same shape as `TOFUPILOT_UV_BASE`.
+pub(crate) fn python_mirror_env() -> Option<(&'static str, String)> {
+    if std::env::var("UV_PYTHON_INSTALL_MIRROR").is_ok_and(|v| !v.trim().is_empty()) {
+        return None;
+    }
+    let base = match std::env::var("TOFUPILOT_PYTHON_MIRROR") {
+        Ok(v) if v.trim() == "off" => return None,
+        Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
+        _ => PYTHON_MIRROR_URL.to_string(),
+    };
+    Some(("UV_PYTHON_INSTALL_MIRROR", base))
+}
+
 /// Resolve a usable `uv` executable. Returns the path to invoke;
 /// callers should pass it to `Command::new` instead of a bare "uv".
 ///

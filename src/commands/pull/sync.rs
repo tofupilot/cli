@@ -697,12 +697,19 @@ pub(crate) fn run_subprocess(
     cwd: &Path,
     label: &str,
 ) -> crate::error::CliResult<()> {
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Spawn {label}: {e}"))?;
+        .stdout(std::process::Stdio::piped());
+    // Every caller here runs uv. `uv venv --python X.Y` downloads the
+    // interpreter on first use; point it at the TofuPilot mirror so
+    // station bootstrap works without github.com (see
+    // uv_bootstrap::python_mirror_env for the override/opt-out rules).
+    if let Some((k, v)) = crate::commands::uv_bootstrap::python_mirror_env() {
+        command.env(k, v);
+    }
+    let mut child = command.spawn().map_err(|e| format!("Spawn {label}: {e}"))?;
     let drain = child.stdout.take().map(|mut out| {
         std::thread::spawn(move || {
             let _ = std::io::copy(&mut out, &mut std::io::stderr());

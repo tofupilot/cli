@@ -252,6 +252,12 @@ async fn run_uv(
         for (k, v) in &env {
             command.env(k, v);
         }
+        // `uv sync` / `uv venv` may download the CPython interpreter;
+        // route that through the TofuPilot mirror instead of github.com
+        // (see uv_bootstrap::python_mirror_env for override/opt-out).
+        if let Some((k, v)) = crate::commands::uv_bootstrap::python_mirror_env() {
+            command.env(k, v);
+        }
         command.stdout(std::process::Stdio::piped());
         let mut child = command.spawn().map_err(|e| format!("Spawn {label}: {e}"))?;
         let drain = child.stdout.take().map(|mut out| {

@@ -38,7 +38,7 @@ pub struct DeployArgs {
 /// packing, before the upload reads the whole tarball into memory, so a
 /// runaway directory fails fast with a clear message instead of OOMing or
 /// getting a 403 from the size-bound presigned URL.
-const MAX_SOURCE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_SOURCE_SIZE_BYTES: u64 = 95 * 1024 * 1024;
 
 const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     ".git",
