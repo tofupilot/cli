@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.25]
+
+### Fixed
+
+- The operator UI keeps the keyboard alive between phases. Until now only a
+  phase whose first component was a text input kept focus, so an acknowledge
+  prompt, a switch, a radio group or a bare "press Continue" step dropped
+  focus and had to be clicked — once per phase, with the operator's hands on a
+  barcode scanner. Enter, including the trailing Enter a scanner sends, now
+  acknowledges every prompt shape; Cmd/Ctrl+Enter submits from anywhere,
+  including inside a textarea where plain Enter must stay a newline; and a held
+  Enter no longer carries over to skip the next prompt. The ⏎ hint on the
+  Continue button is shown only when plain Enter really submits from the
+  focused element.
+
+## [0.26.24]
+
+### Added
+
+- `tofupilot run ./procedure1_entrypoint.py` runs the file you name. A project
+  whose procedures share one codebase (`procedure1_entrypoint.py`,
+  `procedure2_entrypoint.py`, …) could already set a per-procedure entry point
+  for deployments, but local runs always fell back to `main.py` — a procedure
+  could not be validated locally without renaming files or keeping separate
+  checkouts. The named file now wins over on-disk detection for openhtf and
+  plain-Python procedures; for pytest and robot, where a single file cannot be
+  the run target, the CLI warns instead of silently ignoring the argument. This
+  is local expressiveness, not remote lookup: the run executes the file you
+  name and does not read the procedure's stored entry point.
+- A logged-out `tofupilot run` now shows the onboarding block with the local
+  run annotated "(no account needed)", instead of a bare "Not logged in" that
+  read as "log in first". Only for the no-ID form — `run --deployment <id>`
+  still gets the plain message.
+- An explicit red `STOP` button in the operator UI. Aborting a running sequence
+  used to be a small grey ghost icon at the edge of the progress bar, which
+  read as decoration; it is now a labeled solid-red button (the test-bench
+  idiom), morphing to `KILL` after a stop and to a spinner while killing, all
+  states at a fixed width so the bottom bar never reflows. `KILL` stays
+  disabled for 500 ms after a `STOP` press so a touchscreen double-tap cannot
+  escalate a graceful stop into a SIGKILL, and if the run has not terminated
+  5 s after a kill was sent (command lost on a dropped WebSocket) the control
+  re-arms so it can be re-sent. The state also resets between runs, including
+  a CLI restart mid-run.
+- Python interpreters and deployment artifacts are served from TofuPilot
+  domains, so a firewalled station network no longer needs `github.com`,
+  `objects.githubusercontent.com` or the R2 endpoint host on its whitelist —
+  `*.tofupilot.app` + `tofupilot.sh` + `dl.tofupilot.sh` is enough (plus PyPI
+  unless you ship standalone bundles). The CLI points uv at the CPython mirror
+  on `dl.tofupilot.sh/python` for station pull venvs and local `tofupilot run`
+  bootstraps; an operator-set `UV_PYTHON_INSTALL_MIRROR` is respected,
+  `TOFUPILOT_PYTHON_MIRROR=<base>` targets an air-gapped mirror and `=off`
+  reverts to upstream GitHub. Older CLIs on firewalled stations can get the
+  same effect by setting the uv variable system-wide.
+
+### Changed
+
+- `ls` tables print full IDs. Every table truncated the ID column to 8
+  characters while `get`, `update`, `rm` and `link` all need the full UUID —
+  so the ID could not be copy-pasted from the CLI's own output.
+- The source upload cap is 95 MB (was 100 MB). Uploads now traverse the
+  Cloudflare edge, whose body limit is exactly 100 MB, so a cap at the limit
+  failed with an opaque HTML error; oversized packs now get a readable message.
+
+### Fixed
+
+- An oversized event no longer takes a station offline on the dashboard. Any
+  event serializing past the realtime frame limit (64 KB) closed the WebSocket
+  with a code the client treats as terminal, and the station daemon's broker
+  connect was a one-shot at boot — so a single large event muted the station's
+  live link for the rest of the CLI process, while runs kept passing locally
+  and uploading over HTTP (the failure read as "the dashboard keeps losing my
+  station"). Reproduced with a 362 KB PNG passed as an `image_url` data URI: a
+  483 KB prompt event, 7.4× the limit. Oversized events are now degraded to
+  fit before publishing — inline images and measurement blobs are replaced by
+  a short explanation (the kiosk still shows the full picture), long text is
+  truncated on character boundaries with a `[N KB truncated for live
+  streaming]` marker, and phase log lists drop from the middle so the setup
+  head and failure tail survive. What the event exists to deliver — the prompt
+  the operator must answer, the phase outcome — always lands. An event that
+  cannot be reduced is dropped rather than published: a missing event beats a
+  dead station. Full data reaches the server over HTTP upload either way.
+
 ## [0.26.23]
 
 ### Added
