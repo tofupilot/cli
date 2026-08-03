@@ -123,7 +123,9 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
             #[cfg(target_os = "linux")]
             let no_open = {
                 if !no_open {
-                    eprintln!("  (auto-open is disabled on Linux so the token stays out of process argv)");
+                    eprintln!(
+                        "  (auto-open is disabled on Linux so the token stays out of process argv)"
+                    );
                 }
                 true
             };

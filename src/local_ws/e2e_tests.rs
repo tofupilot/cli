@@ -78,7 +78,11 @@ fn seed_project(root: &std::path::Path) {
         "name: Demo\nversion: 1.0.0\nmain:\n  - name: Check\n    python: phases.main.check\n",
     )
     .unwrap();
-    std::fs::write(root.join("phases/main.py"), "def check():\n    return True\n").unwrap();
+    std::fs::write(
+        root.join("phases/main.py"),
+        "def check():\n    return True\n",
+    )
+    .unwrap();
     std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
 }
 
@@ -124,7 +128,10 @@ async fn rpc_cors_allow_list_pins_the_origin() {
             )
             .header("origin", origin)
             .header("access-control-request-method", "POST")
-            .header("access-control-request-headers", "authorization,content-type")
+            .header(
+                "access-control-request-headers",
+                "authorization,content-type",
+            )
             .send()
             .await
             .expect("preflight");
@@ -233,12 +240,7 @@ async fn rpc_refuses_escapes_dotfiles_and_symlink_laundering() {
     .await;
     assert_eq!(escape["result"], "error");
 
-    let (_, dotfile) = rpc(
-        &server,
-        Some(&token),
-        r#"{"op":"read_file","path":".env"}"#,
-    )
-    .await;
+    let (_, dotfile) = rpc(&server, Some(&token), r#"{"op":"read_file","path":".env"}"#).await;
     assert_eq!(dotfile["result"], "error");
     assert_eq!(dotfile["code"], "forbidden");
 
@@ -282,7 +284,12 @@ async fn ws_token_and_origin_gating() {
     );
     // Foreign origin, valid token: upgraded.
     assert_eq!(
-        ws_upgrade_status(port, &format!("/ws?token={token}"), "https://www.tofupilot.app").await,
+        ws_upgrade_status(
+            port,
+            &format!("/ws?token={token}"),
+            "https://www.tofupilot.app"
+        )
+        .await,
         101
     );
     // Allow-listed loopback origin still works with no token (kiosk).

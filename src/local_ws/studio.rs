@@ -723,7 +723,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = &dir.path().canonicalize().unwrap();
 
-        let w = write_file(root, "plugs/multimeter.py", "class Multimeter:\n    pass\n", None).await;
+        let w = write_file(
+            root,
+            "plugs/multimeter.py",
+            "class Multimeter:\n    pass\n",
+            None,
+        )
+        .await;
         assert!(matches!(w, StudioResponse::Written { .. }), "got {w:?}");
         assert!(root.join("plugs/multimeter.py").is_file());
 
@@ -744,7 +750,9 @@ mod tests {
         // Handlers require a canonical root (enable_studio guarantees
         // it in production); tempdirs sit behind /var symlinks on macOS.
         let root = &dir.path().canonicalize().unwrap();
-        tokio::fs::write(root.join("ok.py"), "x = 1\n").await.unwrap();
+        tokio::fs::write(root.join("ok.py"), "x = 1\n")
+            .await
+            .unwrap();
 
         // Traversal collapses inside the root and 404s (no such file).
         let r = read_file(root, "../../etc/passwd").await;
@@ -777,7 +785,9 @@ mod tests {
         let root = &dir.path().canonicalize().unwrap();
         tokio::fs::create_dir(root.join("venv")).await.unwrap();
         tokio::fs::create_dir(root.join("phases")).await.unwrap();
-        tokio::fs::write(root.join(".env"), "SECRET=1").await.unwrap();
+        tokio::fs::write(root.join(".env"), "SECRET=1")
+            .await
+            .unwrap();
         tokio::fs::write(root.join("procedure.yaml"), "name: A\n")
             .await
             .unwrap();
