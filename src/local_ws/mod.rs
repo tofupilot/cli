@@ -31,19 +31,32 @@
 // browser tab survives across runs and `attach_run` on the next run
 // reuses the same socket.
 //
-// Loopback bind, Origin header allow-listed to the server's own
-// host:port.
+// Loopback bind. Two ways onto the WS:
+//   * Origin header allow-listed to the server's own host:port
+//     (kiosk tabs), or
+//   * a valid `?token=` carrying the per-process session token
+//     (dashboard Studio pages on a foreign Origin), honored only
+//     while the studio surface is enabled.
 //
 // Threat model: localhost-only bind + Origin allow-list defends
 // against (a) cross-Origin browser CSRF from a hostile page on a
 // different local port, (b) curl/python clients without an Origin
-// header. It does NOT defend against (a) other local processes that
-// can craft Origin headers (any process with `tofupilot` already
-// gets full access on this machine — same posture as the rest of
-// the CLI), or (b) malicious browser extensions, which can rewrite
-// headers via webRequest. LAN-mode (binding to 0.0.0.0) is
-// deliberately not exposed — that path needs token auth which is
-// out of scope here.
+// header. The token path is the stronger credential: possession is
+// full kiosk-equivalent access (StationCommand frames — run control,
+// UI responses) AND, via `/studio/rpc`, scoped file read/write under
+// the studio root. The token only leaves the process in the URL
+// `tofupilot studio` prints. Neither path defends against (a) other
+// local processes that can craft Origin headers (any process with
+// `tofupilot` already gets full access on this machine — same posture
+// as the rest of the CLI), or (b) malicious browser extensions, which
+// can rewrite headers via webRequest. LAN-mode (binding to 0.0.0.0)
+// stays unexposed; if it ever lands it must require the token path
+// exclusively.
+
+pub mod studio;
+
+#[cfg(test)]
+mod e2e_tests;
 
 use std::env;
 use std::net::SocketAddr;
@@ -361,6 +374,12 @@ struct HelloPayload {
     user_email: Option<String>,
     #[serde(rename = "userName", skip_serializing_if = "Option::is_none")]
     user_name: Option<String>,
+    /// Feature capabilities of this server, advertised so remote hosts
+    /// (dashboard Studio) can gate UI on what the daemon supports
+    /// instead of hanging on unanswered requests. Empty on kiosk-only
+    /// servers; `enable_studio` appends `"studio-rpc-v1"`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    capabilities: Vec<String>,
 }
 
 /// Identity bundle threaded into `Server::start`. Mirrors the subset
@@ -379,6 +398,24 @@ pub struct HelloIdentity {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub user_name: Option<String>,
+}
+
+/// Single mapping from the whoami cache — station mode, `run --kiosk`,
+/// and `tofupilot studio` all build their hello identity through this,
+/// so a new identity field can't be wired into some hosts and missed
+/// in others.
+impl From<&crate::commands::db::WhoamiCache> for HelloIdentity {
+    fn from(w: &crate::commands::db::WhoamiCache) -> Self {
+        HelloIdentity {
+            auth_type: Some(w.auth_type.clone()),
+            organization_slug: Some(w.organization_slug.clone()),
+            organization_name: Some(w.organization_name.clone()),
+            station_id: w.station_id.clone(),
+            user_id: w.user_id.clone(),
+            user_email: w.user_email.clone(),
+            user_name: w.user_name.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -447,6 +484,32 @@ struct AppState {
     /// images locally; the remote dashboard uses `/api/attachments/:id`
     /// instead. Cleared on `attach_run` so a stale run's dir can't leak.
     attachment_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Per-process session token. Generated once at `Server::start`;
+    /// never logged. Two consumers: the `/studio/rpc` bearer check and
+    /// the `/ws?token=` upgrade path that lets a token-bearing page on
+    /// a non-allow-listed Origin (the dashboard Studio route) connect.
+    /// Possession is NOT read-only: a token-authenticated WS client is
+    /// kiosk-equivalent (can send StationCommand frames — run control,
+    /// UI responses), and the same token unlocks scoped file writes on
+    /// `/studio/rpc`. It only ever leaves the process via the URL
+    /// printed to the operator's terminal by `tofupilot studio`.
+    session_token: Arc<String>,
+    /// Studio surface configuration. `None` (surface off, requests
+    /// 403) unless `tofupilot studio` enabled it with a project root.
+    studio: Arc<Mutex<Option<studio::StudioConfig>>>,
+}
+
+/// How the server picks its port.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PortChoice {
+    /// Stable well-known port (kiosk / station daemon). The bind
+    /// doubles as the single-instance gate: EADDRINUSE is fatal and
+    /// the error guidance tells the operator to stop the daemon.
+    Stable,
+    /// OS-assigned ephemeral port (`tofupilot studio` sessions). Never
+    /// collides with a running daemon or a second studio session; the
+    /// pairing URL carries the actual port explicitly.
+    Ephemeral,
 }
 
 /// Long-lived local WS server. One per CLI process. Bind once at
@@ -493,6 +556,7 @@ impl Server {
         // `attach_run` — so a foreground run served `"station"` to any
         // tab that connected before its run attached.
         mode: HostMode,
+        port_choice: PortChoice,
     ) -> std::io::Result<Self> {
         if !mode.allows_root_bind() && crate::commands::config::is_root_system() {
             return Err(std::io::Error::new(
@@ -529,21 +593,36 @@ impl Server {
         // `TOFUPILOT_LOCAL_UI_PORT=<u16>` overrides the default port
         // (e.g. for dev side-by-side instances). The override is
         // also enforced — no fallback, same single-instance guarantee.
-        let preferred_port: u16 = env::var("TOFUPILOT_LOCAL_UI_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(crate::commands::service::DEFAULT_LOCAL_PORT);
+        let preferred_port: u16 = match port_choice {
+            PortChoice::Stable => env::var("TOFUPILOT_LOCAL_UI_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(crate::commands::service::DEFAULT_LOCAL_PORT),
+            // Port 0 = kernel-assigned ephemeral. Coexists with a
+            // running daemon on the stable port and allows several
+            // studio sessions side by side. The env override is
+            // deliberately ignored here: honoring it would let a
+            // studio session squat the daemon's fixed port and take
+            // the station down on its next restart.
+            PortChoice::Ephemeral => 0,
+        };
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", preferred_port))
             .await
             .map_err(|e| {
                 match e.kind() {
-                    std::io::ErrorKind::AddrInUse => {
+                    std::io::ErrorKind::AddrInUse if port_choice == PortChoice::Stable => {
                         crate::log::error(&format!(
                             "Port {preferred_port} on 127.0.0.1 is already in use. \
                              Another tofupilot daemon is likely running on this host. \
                              Stop it with `tofupilot service stop` (or \
                              `systemctl --user stop tofupilot` on Linux), \
                              or run `tofupilot service status` to see what's holding the port."
+                        ));
+                    }
+                    std::io::ErrorKind::AddrInUse => {
+                        crate::log::error(&format!(
+                            "Port {preferred_port} on 127.0.0.1 is already in use. \
+                             Unset TOFUPILOT_LOCAL_UI_PORT (or pick a free port) and retry."
                         ));
                     }
                     std::io::ErrorKind::PermissionDenied => {
@@ -652,7 +731,14 @@ impl Server {
             user_id: identity.user_id,
             user_email: identity.user_email,
             user_name: identity.user_name,
+            capabilities: Vec::new(),
         }));
+
+        // Random session token (UUIDv4 → 122 random bits), hex-encoded.
+        // Generated even when studio never gets enabled — a token that
+        // gates nothing is harmless, and generating unconditionally
+        // keeps `enable_studio` free of state ordering.
+        let session_token = Arc::new(uuid::Uuid::new_v4().simple().to_string());
 
         let state = AppState {
             ui_response_tx: Arc::new(Mutex::new(placeholder_tx)),
@@ -667,12 +753,89 @@ impl Server {
             dev_dir,
             procedure_dir: Arc::new(Mutex::new(None)),
             attachment_dir: Arc::new(Mutex::new(None)),
+            session_token,
+            studio: Arc::new(Mutex::new(None)),
         };
+
+        /// Origins allowed to call `/studio/rpc`: the dashboard this
+        /// CLI is pointed at, plus the dev dashboard on :3000.
+        fn studio_allowed_origins() -> Vec<axum::http::HeaderValue> {
+            /// Reduce a base URL to its `scheme://host[:port]` origin.
+            /// The Origin header never carries a path, so a configured
+            /// base that has one would otherwise never match.
+            fn origin_of(base: &str) -> Option<String> {
+                let (scheme, rest) = base.split_once("://")?;
+                let host = rest.split('/').next()?;
+                (!host.is_empty()).then(|| format!("{scheme}://{host}"))
+            }
+            fn push(origins: &mut Vec<axum::http::HeaderValue>, value: &str) {
+                if let Ok(header) = axum::http::HeaderValue::from_str(value) {
+                    if !origins.contains(&header) {
+                        origins.push(header);
+                    }
+                }
+            }
+
+            let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+            // The dashboard the operator is logged into, resolved the
+            // same way `tofupilot studio` builds the pairing URL
+            // (see commands/studio.rs) so the printed link and the
+            // allow-list cannot disagree. `base()` already strips
+            // trailing slashes.
+            if let Some(credentials) = crate::commands::auth::credentials::load() {
+                if let Some(origin) = origin_of(credentials.base()) {
+                    push(&mut origins, &origin);
+                }
+            }
+            // The default dashboard, so a session started before login
+            // still pairs against the production host.
+            if let Some(origin) = origin_of(crate::commands::auth::config::DEFAULT_BASE_URL) {
+                push(&mut origins, &origin);
+            }
+            // Dev dashboards: `pnpm dev` serves the web app on :3000.
+            // Unconditional so a release binary pointed at a local
+            // dashboard pairs without extra configuration.
+            push(&mut origins, "http://localhost:3000");
+            push(&mut origins, "http://127.0.0.1:3000");
+            // Escape hatch for preview deployments (comma-separated).
+            if let Ok(extra) = std::env::var("TOFUPILOT_STUDIO_ALLOWED_ORIGINS") {
+                for candidate in extra.split(',') {
+                    if let Some(origin) = origin_of(candidate.trim()) {
+                        push(&mut origins, &origin);
+                    }
+                }
+            }
+            origins
+        }
+
+        // CORS for the studio RPC route only. The dashboard page runs
+        // on a different origin (the configured dashboard base, or
+        // localhost:3000 in dev) and fetches this loopback endpoint
+        // directly, so the browser needs CORS + (Chrome) Private
+        // Network Access approval on the preflight.
+        //
+        // The origin is ALLOW-LISTED, not `Any`. The bearer session
+        // token is still the real boundary for a local caller, but
+        // 127.0.0.1 is only reachable through the operator's own
+        // browser: with `Any`, a token that leaks (URL pasted into a
+        // chat, a screenshot, shell history) becomes remotely
+        // exploitable file read/write from any page the operator
+        // visits. Pinning the origin removes that class outright — a
+        // hostile page cannot even send the request.
+        let studio_cors = tower_http::cors::CorsLayer::new()
+            .allow_origin(studio_allowed_origins())
+            .allow_methods([axum::http::Method::POST, axum::http::Method::OPTIONS])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+            .allow_private_network(true);
 
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .route("/files/*path", get(files_handler))
             .route("/attachments/*path", get(attachments_handler))
+            .route(
+                "/studio/rpc",
+                axum::routing::post(studio::rpc_handler).layer(studio_cors),
+            )
             .fallback(static_handler)
             .with_state(state.clone());
 
@@ -723,6 +886,37 @@ impl Server {
     /// pointing a browser at `boot_url`.
     pub fn is_alive(&self) -> bool {
         self.alive.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Per-process session token. Print-once secret for `tofupilot
+    /// studio`; never log it.
+    pub fn session_token(&self) -> &str {
+        &self.state.session_token
+    }
+
+    /// Bound loopback port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Turn on the Studio RPC surface for `root` and advertise the
+    /// capability in the hello frame. Only `tofupilot studio` calls
+    /// this; every other process keeps the surface off (all
+    /// `/studio/rpc` requests 403). The hello capability is advisory
+    /// today (the Studio page detects support via the RPC probe and
+    /// the typed `Unsupported` error); it exists so remote hosts can
+    /// gate UI without a probe once capability sets grow.
+    pub async fn enable_studio(&self, root: PathBuf) -> std::io::Result<()> {
+        // Canonicalize once here; every RPC path check builds on this
+        // root being canonical (see `StudioConfig::root`).
+        let root = tokio::fs::canonicalize(root).await?;
+        *self.state.studio.lock().await = Some(studio::StudioConfig { root });
+        let mut hello = self.state.hello.lock().await;
+        let cap = "studio-rpc-v1".to_string();
+        if !hello.capabilities.contains(&cap) {
+            hello.capabilities.push(cap);
+        }
+        Ok(())
     }
 
     /// Set the idle deployment list AND broadcast the diff as
@@ -1142,6 +1336,7 @@ async fn update_ring(hydration: &Arc<Mutex<HydrationSnapshot>>, stamped: &Stampe
 async fn ws_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
     let origin_raw = headers
@@ -1152,7 +1347,21 @@ async fn ws_handler(
         .as_deref()
         .map(|origin| state.allowed_origins.iter().any(|a| a == origin))
         .unwrap_or(false);
-    if !origin_ok {
+    // Token path: a page holding the per-process session token (the
+    // dashboard Studio route, which the operator opened via the URL
+    // `tofupilot studio` printed) may attach from an Origin outside
+    // the loopback allow-list. Possession of the 128-bit token is a
+    // stronger credential than the forgeable Origin header; only
+    // honored while the studio surface is enabled so kiosk-only
+    // processes keep the historic Origin-only posture.
+    let token_ok = match extract_ws_token(query.as_deref()) {
+        Some(presented) => {
+            state.studio.lock().await.is_some()
+                && studio::token_matches(&presented, &state.session_token)
+        }
+        None => false,
+    };
+    if !origin_ok && !token_ok {
         // Blank kiosk page often = SPA loaded but its WS connect was
         // 403'd here, leaving the operator stuck on a static shell with
         // no live state. Surface the offending Origin so the operator
@@ -1439,6 +1648,17 @@ async fn handle_text(
     // The frame body is attacker-controlled (any local process with
     // `Origin: http://127.0.0.1:<port>` can connect).
     crate::log::warn(&format!("local-ui: dropped unparseable WS frame: {text:?}"));
+}
+
+/// Pull `token=<value>` out of a raw query string without a full
+/// query-parser dependency. Values are the hex token — no percent
+/// escapes to worry about; anything else simply fails the match.
+fn extract_ws_token(query: Option<&str>) -> Option<String> {
+    query?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
 }
 
 #[derive(serde::Deserialize)]

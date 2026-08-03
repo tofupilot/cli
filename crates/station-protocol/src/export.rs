@@ -36,6 +36,18 @@ fn main() {
         specta::ts::export::<PresencePayload>(&config).unwrap(),
         specta::ts::export::<PresenceFocus>(&config).unwrap(),
         specta::ts::export::<PresenceDraft>(&config).unwrap(),
+        specta::ts::export::<StudioRequest>(&config).unwrap(),
+        specta::ts::export::<StudioResponse>(&config).unwrap(),
+        specta::ts::export::<StudioFileEntry>(&config).unwrap(),
+        specta::ts::export::<StudioEntryKind>(&config).unwrap(),
+        specta::ts::export::<StudioDiagnostic>(&config).unwrap(),
+        specta::ts::export::<StudioDiagnosticSeverity>(&config).unwrap(),
+        specta::ts::export::<StudioErrorCode>(&config).unwrap(),
+        specta::ts::export::<StudioSequence>(&config).unwrap(),
+        specta::ts::export::<StudioSequencePlug>(&config).unwrap(),
+        specta::ts::export::<StudioSequencePhase>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceMeasurement>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceValidator>(&config).unwrap(),
     ] {
         output.push_str(&ts);
         output.push('\n');

@@ -12,7 +12,7 @@ pub(crate) mod cancel;
 pub(crate) mod connector;
 pub(crate) mod deployment_id;
 pub(crate) mod emit;
-mod engine;
+pub(crate) mod engine;
 pub(crate) mod event_router;
 pub(crate) mod identify_host;
 pub(crate) mod log_source;
@@ -835,15 +835,7 @@ pub async fn start(
                 let identity = crate::commands::db::open()
                     .ok()
                     .and_then(|db| db.get_whoami().ok().flatten())
-                    .map(|w| crate::local_ws::HelloIdentity {
-                        auth_type: Some(w.auth_type),
-                        organization_slug: Some(w.organization_slug),
-                        organization_name: Some(w.organization_name),
-                        station_id: w.station_id,
-                        user_id: w.user_id,
-                        user_email: w.user_email,
-                        user_name: w.user_name,
-                    })
+                    .map(|w| crate::local_ws::HelloIdentity::from(&w))
                     .unwrap_or_default();
                 // Foreground `run --kiosk` never installs a station-command
                 // sink, so its loopback channel can't drive root — allow it
@@ -853,6 +845,7 @@ pub async fn start(
                     "CLI".to_string(),
                     identity,
                     crate::local_ws::HostMode::Local,
+                    crate::local_ws::PortChoice::Stable,
                 )
                 .await
                 {

@@ -2,7 +2,7 @@
 //! `whoami` (cache-first identity), and `logout`. Credentials persist to
 //! `~/.tofupilot/credentials.json` (see [`credentials`]).
 
-mod config;
+pub(crate) mod config;
 pub mod credentials;
 
 use config::{CLIENT_ID, DEFAULT_BASE_URL, POLL_INTERVAL};

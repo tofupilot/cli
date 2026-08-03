@@ -811,6 +811,208 @@ pub struct PresenceDraft {
 // to add for presence types.
 
 // ---------------------------------------------------------------------------
+// Studio RPC (dashboard Studio <-> CLI daemon)
+// ---------------------------------------------------------------------------
+//
+// Request/response pairs for the Studio surface: file browsing, file
+// read/write, and procedure validation. These do NOT ride the event
+// broadcast channels — payload-bearing replies go over request/response
+// transports only (loopback HTTP today, cloud-forwarded RPC later).
+// Keeping them in this crate gives Studio the same Rust→TS codegen and
+// CI drift check as the station wire types.
+//
+// Compatibility policy: additive-only. New ops/response variants may be
+// added; existing fields are never repurposed. Servers answer an
+// unrecognized op with `Error { code: Unsupported }` rather than
+// dropping the request, so a newer dashboard talking to an older daemon
+// gets a typed failure instead of a hung promise.
+
+/// A Studio operation requested by the dashboard.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum StudioRequest {
+    /// Project metadata for the daemon's studio root.
+    ProjectInfo {},
+    /// List entries of a directory (relative to the studio root).
+    /// `dir: None` lists the root itself.
+    ListFiles {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+    },
+    /// Read a text file (relative to the studio root).
+    ReadFile { path: String },
+    /// Write a text file. `expected_sha256` enables optimistic
+    /// concurrency: when set and the on-disk content no longer hashes
+    /// to it, the daemon refuses with `Error { code: Conflict }`.
+    WriteFile {
+        path: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_sha256: Option<String>,
+    },
+    /// Validate the project's procedure definition. `path: None`
+    /// validates the root's default procedure file.
+    Validate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    /// Structured view of the project's procedure, parsed by the
+    /// engine's real loader. This is the single source the sequence
+    /// tree / inspector consume — clients never parse YAML themselves.
+    GetSequence {},
+}
+
+/// Reply to a `StudioRequest`. Every request maps to exactly one
+/// variant (or `Error`).
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum StudioResponse {
+    ProjectInfo {
+        /// Absolute studio root on the daemon host. Display-only for
+        /// the dashboard; all request paths stay root-relative.
+        root: String,
+        name: String,
+        /// Root-relative path of the detected procedure definition
+        /// (e.g. `procedure.yaml`), when one exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedure_path: Option<String>,
+    },
+    Files {
+        entries: Vec<StudioFileEntry>,
+    },
+    FileContent {
+        path: String,
+        content: String,
+        sha256: String,
+    },
+    Written {
+        path: String,
+        sha256: String,
+    },
+    Diagnostics {
+        diagnostics: Vec<StudioDiagnostic>,
+    },
+    Sequence {
+        sequence: StudioSequence,
+    },
+    Error {
+        code: StudioErrorCode,
+        message: String,
+    },
+}
+
+/// Structured procedure view for the Studio UI, derived from the
+/// engine's parsed `ProcedureDefinition`. Deliberately a display
+/// projection, not the full model: writes stay full-file text, so
+/// this never needs to round-trip back to YAML.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequence {
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    // Lists are NEVER skipped when empty: the generated TS declares
+    // them non-optional, and omitting them on the wire made the UI
+    // crash on `undefined.map`. Bytes saved are not worth a lying type.
+    #[serde(default)]
+    pub plugs: Vec<StudioSequencePlug>,
+    #[serde(default)]
+    pub setup: Vec<StudioSequencePhase>,
+    pub main: Vec<StudioSequencePhase>,
+    #[serde(default)]
+    pub teardown: Vec<StudioSequencePhase>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequencePlug {
+    pub key: String,
+    pub name: String,
+    pub python: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequencePhase {
+    pub key: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub measurements: Vec<StudioSequenceMeasurement>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceMeasurement {
+    pub key: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default)]
+    pub validators: Vec<StudioSequenceValidator>,
+}
+
+/// Display form of a validator: operator + value already rendered to
+/// strings ("expression" validators carry the expression in `detail`).
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceValidator {
+    pub detail: String,
+}
+
+/// One entry in a `StudioResponse::Files` listing.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioFileEntry {
+    pub name: String,
+    /// Root-relative path, `/`-separated on all platforms.
+    pub path: String,
+    pub kind: StudioEntryKind,
+    /// File size in bytes, saturated to u32 (display-only; the read
+    /// path enforces its own byte cap). u32 because the TS codegen
+    /// forbids BigInt-mapped integers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioEntryKind {
+    File,
+    Dir,
+}
+
+/// A validation finding surfaced to the Studio UI.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioDiagnostic {
+    pub severity: StudioDiagnosticSeverity,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioDiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+/// Typed failure for a Studio request. `Unsupported` is the
+/// forward-compat arm: an older daemon answers ops it doesn't know
+/// with it instead of dropping the request.
+#[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioErrorCode {
+    NotFound,
+    Forbidden,
+    Conflict,
+    TooLarge,
+    Invalid,
+    Unsupported,
+    Internal,
+}
+
+// ---------------------------------------------------------------------------
 // Shared sub-types
 // ---------------------------------------------------------------------------
 

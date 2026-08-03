@@ -149,6 +149,20 @@ enum Commands {
         #[arg(long, value_name = "PORT", default_value_t = 5678, value_parser = clap::value_parser!(u16).range(1..))]
         debug_port: u16,
     },
+    /// Serve a local project to the dashboard Studio (web IDE)
+    // Hidden from `--help` while Studio is unreleased: the command
+    // stays callable for internal work, but customers running
+    // `tofupilot --help` must not discover an unfinished feature.
+    // Remove `hide` when Studio ships.
+    #[command(hide = true)]
+    Studio {
+        /// Project directory to serve (defaults to the current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+        /// Print the Studio URL without opening a browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Link a local procedure directory to a remote dashboard procedure
     Link {
         /// Procedure directory to link (defaults to the current directory)
@@ -518,6 +532,10 @@ async fn main() {
                 )
                 .await,
             );
+        }
+        Some(Commands::Studio { path, no_open }) => {
+            startup();
+            std::process::exit(commands::studio::run_cmd(path, no_open).await);
         }
         Some(Commands::Link {
             ref path,

@@ -298,15 +298,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
             .unwrap_or_else(|| "Station".to_string());
         let identity = whoami
             .as_ref()
-            .map(|w| crate::local_ws::HelloIdentity {
-                auth_type: Some(w.auth_type.clone()),
-                organization_slug: Some(w.organization_slug.clone()),
-                organization_name: Some(w.organization_name.clone()),
-                station_id: w.station_id.clone(),
-                user_id: w.user_id.clone(),
-                user_email: w.user_email.clone(),
-                user_name: w.user_name.clone(),
-            })
+            .map(crate::local_ws::HelloIdentity::from)
             .unwrap_or_default();
         // Daemon installs the station-command sink below, so its loopback
         // channel CAN drive root — refuse to bind as root.
@@ -315,6 +307,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
             station_name,
             identity,
             crate::local_ws::HostMode::Station,
+            crate::local_ws::PortChoice::Stable,
         )
         .await
         {

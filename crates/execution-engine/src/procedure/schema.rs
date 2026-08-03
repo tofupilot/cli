@@ -912,6 +912,11 @@ impl PlugDefinition {
 pub struct PythonSpec(String);
 
 impl PythonSpec {
+    /// Raw "module.callable" reference as written in the YAML.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Parse the spec and resolve to (file_path, callable_name)
     ///
     /// # Arguments
