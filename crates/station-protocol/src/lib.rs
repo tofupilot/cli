@@ -437,11 +437,13 @@ pub enum StationEvent {
         plug_name: String,
         stage: String,
         status: String,
-        /// `"all"` or `"each"` — plug lifecycle scope. Defaults empty for
+        /// `"slot"` | `"execution"` | `"station"` — plug lifetime scope
+        /// (legacy emitters said `"each"`/`"all"`). Defaults empty for
         /// pre-scope emitters.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         scope: String,
-        /// Slot this plug transition applies to. None for scope = all.
+        /// Slot this plug transition applies to. None for execution- and
+        /// station-scope plugs (shared across slots).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slot_id: Option<String>,
         /// Per-run identity from `RunStarted`. Reducer drops cross-run leaks.
@@ -1038,8 +1040,10 @@ pub struct PlugDefinition {
     pub key: String,
     /// Display name as configured in the procedure.
     pub name: String,
-    /// `"all"` | `"each"`. `"each"` plugs are instantiated per slot;
-    /// `"all"` plugs once per run.
+    /// `"slot"` | `"execution"` | `"station"` (legacy: `"each"`/`"all"`).
+    /// `slot` plugs are instantiated per slot; `execution` plugs once
+    /// per execution (all slots); `station` plugs once per station
+    /// process, held across executions.
     pub scope: String,
 }
 

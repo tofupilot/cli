@@ -55,10 +55,26 @@ impl Orchestrator {
         {
             let mut scopes = HashMap::new();
             for plug_def in &self.procedure_definition.plugs {
-                let scope = if plug_def.scope == crate::procedure::schema::Scope::All {
-                    PlugScope::All
-                } else {
-                    PlugScope::Each
+                let scope = match plug_def.scope {
+                    crate::procedure::schema::Scope::Execution => PlugScope::Execution,
+                    crate::procedure::schema::Scope::Slot => PlugScope::Slot,
+                    crate::procedure::schema::Scope::Station => {
+                        if self.station_plug_host.is_some() {
+                            PlugScope::Station
+                        } else {
+                            // No station context to own the instance (one-shot
+                            // run, Studio): degrade to execution scope so the plug
+                            // still gets a single shared instance for this
+                            // execution and is torn down with it.
+                            log::info!(
+                                "Plug '{}' has scope: station but no station \
+                                 context is present; behaving as execution-scoped \
+                                 for this execution",
+                                plug_def.key
+                            );
+                            PlugScope::Execution
+                        }
+                    }
                 };
                 scopes.insert(plug_def.key.clone(), scope);
             }
@@ -402,15 +418,43 @@ impl Orchestrator {
         // emit_plug_scope_event fires once per scope-batch, not per-plug:
         //   init:     1 event if all-scope plugs/SetupAll exist, 1 per slot if each-scope plugs/SetupEach exist
         //   teardown: 1 event if all-scope plugs exist, 1 per slot if each-scope plugs exist
-        let has_all_scope_plugs = self.procedure_definition.plugs.iter().any(|p| p.scope == crate::procedure::schema::Scope::All);
-        let has_each_scope_plugs = self.procedure_definition.plugs.iter().any(|p| p.scope != crate::procedure::schema::Scope::All);
+        // Station plugs held by a host count like execution-scope for the init
+        // batch (one acquire event) but contribute no teardown event —
+        // they outlive the run. Without a host they degrade to execution scope
+        // (see set_plug_scopes above) and count as execution-scope on both
+        // sides.
+        let has_station_host = self.station_plug_host.is_some();
+        let has_station_scope_plugs = self
+            .procedure_definition
+            .plugs
+            .iter()
+            .any(|p| p.scope == crate::procedure::schema::Scope::Station);
+        let has_all_scope_plugs = self
+            .procedure_definition
+            .plugs
+            .iter()
+            .any(|p| p.scope == crate::procedure::schema::Scope::Execution)
+            || (has_station_scope_plugs && !has_station_host);
+        let has_each_scope_plugs = self
+            .procedure_definition
+            .plugs
+            .iter()
+            .any(|p| p.scope == crate::procedure::schema::Scope::Slot);
+        let has_hosted_station_plugs = has_station_scope_plugs && has_station_host;
 
         let all_phases = self.procedure_definition.get_all_phases_with_stage_scope();
         let has_setup_all = all_phases.iter().any(|(s, p)| matches!(s, crate::procedure::schema::StageScope::SetupAll) && !p.should_skip());
         let has_setup_each = all_phases.iter().any(|(s, p)| matches!(s, crate::procedure::schema::StageScope::SetupEach) && !p.should_skip());
 
+        // The station branch and the execution branch in
+        // ensure_plugs_created_for_job are INDEPENDENT emitters — each
+        // fires its own terminal plug-scope event. A procedure with a
+        // hosted station plug AND a SetupAll trigger produces two init
+        // events, so they need two reserved slots, not a shared one
+        // (sharing made progress overshoot 100%).
         let init_events =
             (if has_all_scope_plugs || has_setup_all { 1 } else { 0 })
+            + (if has_hosted_station_plugs { 1 } else { 0 })
             + (if has_each_scope_plugs || has_setup_each { slots.len() } else { 0 });
         let teardown_events =
             (if has_all_scope_plugs { 1 } else { 0 })

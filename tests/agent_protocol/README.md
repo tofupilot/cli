@@ -58,7 +58,7 @@ the copied scenarios under `/tmp`).
 
 ## Coverage (last green run)
 
-- **YAML framework** — 29 scenarios (`yaml_audit.py`):
+- **YAML framework** — 44 scenarios (`yaml_audit.py`):
   happy single phase, measurements, failing measurements, phase exception,
   dependency order, parallel workers, missing phase module, YAML syntax error,
   empty `main`, python syntax/import error inside phase, unknown `depends_on`,
@@ -67,7 +67,9 @@ the copied scenarios under `/tmp`).
   measurement, text_input with pattern/length, slider + number boundaries,
   full journey, required UI answered, required UI timeout, unit metadata,
   pre-bake UI, simple plug, plug `__init__` raises, plug state persists,
-  plug missing module.
+  plug missing module, plug scope legacy `all`/`each` aliases, per-instance
+  plug config, plug config mismatch errors, station-scope plug degrades to
+  execution scope in one-shot runs.
 
 - **OpenHTF framework** — 22 scenarios (`audit_protocol.py`):
   happy measurements, failing measurements, text prompt, confirm prompt,

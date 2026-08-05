@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.27]
+
+### Added
+
+- `scope: station` for plugs. In station mode the instrument connection is
+  opened once, held across every execution, and closed when the station
+  stops — back-to-back units no longer pay the reconnection cost. The held
+  instance is health-checked before each reuse and respawned if the plug
+  definition, deployment, or process changed. In a one-shot `tofupilot
+  run`, station plugs behave as execution-scoped.
+
+### Changed
+
+- Plug and phase scope spellings are now `slot` / `execution` / `station`
+  (previously `each` / `all`). A slot maps to one dashboard run; an
+  execution is one pass over all slots. The legacy spellings still parse;
+  files that never specified a scope are unaffected. Wire events
+  (`plug_status`, `run_started.plugs`) now carry the new spellings.
+
+## [0.26.26]
+
+### Fixed
+
+- Plug method calls are no longer killed by a hard-coded 60-second RPC
+  timeout. They now inherit the phase timeout (`start_time + timeout_ms`),
+  so a thermal soak or firmware flash runs as long as its phase allows —
+  and indefinitely when the phase declares no timeout.
+
 ## [0.26.25]
 
 ### Fixed

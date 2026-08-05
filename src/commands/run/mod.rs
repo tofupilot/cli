@@ -161,6 +161,11 @@ pub struct DebugOptions {
 pub struct RunOptions {
     pub agent: AgentProtoOptions,
     pub debug: DebugOptions,
+    /// Station-process-scoped owner of `scope: station` plugs. Set by
+    /// the station loop so instrument connections survive across runs;
+    /// `None` everywhere else (station plugs then degrade to execution scope).
+    pub station_plug_host:
+        Option<std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>>,
 }
 
 /// Source of the procedure to run.
@@ -1277,7 +1282,7 @@ pub async fn start(
             reuse_unit,
             operated_by,
             cancel_rx,
-            run_opts.debug.clone(),
+            run_opts.clone(),
         );
         tokio::pin!(run_fut);
 
@@ -1776,9 +1781,11 @@ async fn run_test(
     // `wait_force` (escalation). One channel, one source of truth —
     // replaces the prior trio of oneshot pairs.
     cancel_rx: cancel::Receiver,
-    // Debug-run options (only the YAML/native engine path honors them).
-    debug: DebugOptions,
+    // Per-run options umbrella. Only the YAML/native engine path honors
+    // `debug` and `station_plug_host`.
+    run_opts: RunOptions,
 ) -> i32 {
+    let debug = run_opts.debug.clone();
     // Debug mode is only wired through the native YAML engine. Warn
     // rather than silently ignore it on connector frameworks.
     if debug.enabled && !matches!(framework, Framework::Yaml(_)) {
@@ -1811,6 +1818,7 @@ async fn run_test(
                 operated_by,
                 cancel_rx,
                 debug.clone(),
+                run_opts.station_plug_host.clone(),
             )
             .await;
 

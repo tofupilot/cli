@@ -19,13 +19,18 @@ pub enum PlugStatusValue {
     Skipped,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Wire mirror of `procedure::schema::Scope` for plug status events.
+/// Same serde as the schema enum: emits `slot`/`execution`/`station`,
+/// still parses the legacy `each`/`all` spellings.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "lowercase")]
 pub enum PlugScope {
-    #[serde(rename = "all")]
-    All,
-    #[serde(rename = "each")]
-    Each,
+    #[serde(alias = "each")]
+    Slot,
+    #[serde(alias = "all", alias = "run")]
+    Execution,
+    Station,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

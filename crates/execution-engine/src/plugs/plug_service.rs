@@ -19,6 +19,27 @@ use serde_json;
 
 pub type PlugService = ChildProcess;
 
+/// Probe a plug service's liveness with a bounded `GetStatus` RPC.
+/// Used by the station plug host before reusing a held instance across
+/// runs — a dead or wedged process must be respawned, not handed to a
+/// new run.
+pub async fn probe_plug_health(port: u16) -> Result<(), String> {
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        plug_rpc(port, &PlugRequest::GetStatus),
+    )
+    .await
+    .map_err(|_| "GetStatus timed out after 5s".to_string())??;
+
+    if response.success {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "plug reported unhealthy status".to_string()))
+    }
+}
+
 /// Send a plug request and read a response over a fresh TCP connection.
 async fn plug_rpc(port: u16, request: &PlugRequest) -> Result<PlugResponse, String> {
     let stream = TcpStream::connect(format!("127.0.0.1:{}", port))

@@ -102,6 +102,9 @@ fn is_skipped_name(name: &str) -> bool {
 /// as `files_handler`. Rejects paths that traverse a skipped dir
 /// (e.g. `venv/pyvenv.cfg`) so the allow-list can't be sidestepped by
 /// direct addressing.
+// The Err IS the wire response callers send back, not an error to
+// shrink — boxing it would just move the copy to every call site.
+#[allow(clippy::result_large_err)]
 fn clamp_rel(path: &str) -> Result<PathBuf, StudioResponse> {
     let safe: PathBuf = Path::new(path)
         .components()
@@ -135,6 +138,8 @@ fn clamp_rel(path: &str) -> Result<PathBuf, StudioResponse> {
 /// under the root while pointing at something the allow-list exists to
 /// keep off the wire. Re-run the same rules on the path the filesystem
 /// will actually touch.
+// Same rationale as clamp_rel: the Err is the wire response itself.
+#[allow(clippy::result_large_err)]
 fn check_canonical_policy(
     canon_root: &Path,
     canon_target: &Path,

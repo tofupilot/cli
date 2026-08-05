@@ -226,12 +226,38 @@ pub enum PhaseStage {
     Teardown,
 }
 
+/// Lifetime scope, smallest to largest: `slot < execution < station`.
+///
+/// The names are 1:1 with existing product vocabulary: a slot maps to
+/// one dashboard run (one unit under test), an execution is the whole
+/// multi-slot engine execution (`execution_id` on every wire event),
+/// and a station is the station process. "run" is deliberately NOT a
+/// scope name — a multi-slot execution produces several dashboard
+/// runs, so a "run-scoped" plug would read as per-unit while actually
+/// spanning all of them.
+///
+/// On plugs: how long the instrument instance lives and who shares it.
+/// On setup/teardown phases: whether the phase runs per slot or once
+/// for all slots (station is invalid there — rejected at load).
+///
+/// The legacy spellings `each`/`all` still parse (alias) so existing
+/// files keep working; everything emits the new spellings.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
-    All,
-    Each,
+    /// One instance per slot, destroyed with the slot. Legacy: `each`.
+    #[serde(alias = "each")]
+    Slot,
+    /// One instance shared by every slot of one execution, destroyed
+    /// with it. Legacy: `all`.
+    #[serde(alias = "all", alias = "run")]
+    Execution,
+    /// One instance shared by every execution for the life of the
+    /// station process. Only valid on plugs, and only held across
+    /// executions when a station plug host is present (station mode);
+    /// otherwise degrades to `execution` semantics.
+    Station,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -388,6 +414,12 @@ impl From<ProcedureYaml> for ProcedureDefinition {
 }
 
 impl ProcedureDefinition {
+    /// NOTE: no production code path writes this back to disk today —
+    /// only tests round-trip it. If that ever changes, mind the scope
+    /// spellings: this serializer emits the new `slot`/`execution`/`station`
+    /// spellings, which Studio's forked parser (apps/studio/src-tauri)
+    /// cannot read. Rewriting a user's `scope: all` as `scope: execution`
+    /// would lock the file out of the Studio editor.
     pub fn to_yaml(&self) -> ProcedureYaml {
         ProcedureYaml {
             id: self.id.clone(),
@@ -849,7 +881,7 @@ impl From<PlugDefinitionYaml> for PlugDefinition {
         PlugDefinition {
             key,
             name: yaml.name,
-            scope: yaml.scope.unwrap_or(Scope::Each),
+            scope: yaml.scope.unwrap_or(Scope::Slot),
             python: yaml.python,
             description: yaml.description,
             config: yaml.config,
@@ -867,7 +899,14 @@ impl PlugDefinition {
                 None
             },
             name: self.name.clone(),
-            scope: Some(self.scope),
+            // Omit the default so procedures that never specified a scope
+            // stay byte-identical on round-trip (Studio re-saves whole
+            // files).
+            scope: if self.scope == Scope::Slot {
+                None
+            } else {
+                Some(self.scope)
+            },
             python: self.python.clone(),
             description: self.description.clone(),
             config: self.config.clone(),
@@ -895,8 +934,16 @@ impl PlugDefinition {
         }))
     }
 
-    pub fn scope_is_all(&self) -> bool {
-        matches!(self.scope, Scope::All)
+    /// True for execution-scope plugs (legacy `all`): shared across all slots
+    /// of one run.
+    pub fn scope_is_execution(&self) -> bool {
+        matches!(self.scope, Scope::Execution)
+    }
+
+    /// True for station-scope plugs: held across runs by the station
+    /// plug host.
+    pub fn scope_is_station(&self) -> bool {
+        matches!(self.scope, Scope::Station)
     }
 }
 
@@ -1296,7 +1343,7 @@ impl ProcedureDefinition {
         self.setup
             .iter()
             .map(|p| {
-                let scope = if p.scope == Some(Scope::All) {
+                let scope = if p.scope == Some(Scope::Execution) {
                     StageScope::SetupAll
                 } else {
                     StageScope::SetupEach
@@ -1305,7 +1352,7 @@ impl ProcedureDefinition {
             })
             .chain(self.main.iter().map(|p| (StageScope::Main, p)))
             .chain(self.teardown.iter().map(|p| {
-                let scope = if p.scope == Some(Scope::All) {
+                let scope = if p.scope == Some(Scope::Execution) {
                     StageScope::TeardownAll
                 } else {
                     StageScope::TeardownEach
@@ -1329,7 +1376,7 @@ impl ProcedureDefinition {
             let key = phase.key.clone();
             p.key = Self::ensure_unique_key(key, &mut seen_keys);
             if p.scope.is_none() {
-                p.scope = Some(Scope::Each);
+                p.scope = Some(Scope::Slot);
             }
             phases.push(p);
         }
@@ -1347,10 +1394,10 @@ impl ProcedureDefinition {
         self.plugs
             .iter()
             .map(|plug| {
-                let scope = if plug.scope == Scope::All {
-                    PlugScope::All
-                } else {
-                    PlugScope::Each
+                let scope = match plug.scope {
+                    Scope::Execution => PlugScope::Execution,
+                    Scope::Station => PlugScope::Station,
+                    Scope::Slot => PlugScope::Slot,
                 };
                 (scope, plug)
             })
@@ -2152,6 +2199,124 @@ mod tests {
     #[test]
     fn test_ts_export() {
         assert!(true);
+    }
+
+    // ========================================================================
+    // Scope spellings: slot/execution/station canonical; each/all legacy
+    // aliases (plus "run", a spelling that existed only pre-release)
+    // ========================================================================
+
+    #[test]
+    fn scope_parses_new_and_legacy_spellings() {
+        for (input, expected) in [
+            ("slot", Scope::Slot),
+            ("each", Scope::Slot),
+            ("execution", Scope::Execution),
+            ("all", Scope::Execution),
+            ("run", Scope::Execution),
+            ("station", Scope::Station),
+        ] {
+            let parsed: Scope = serde_yaml::from_str(input)
+                .unwrap_or_else(|e| panic!("`{input}` should parse: {e}"));
+            assert_eq!(parsed, expected, "`{input}`");
+        }
+    }
+
+    #[test]
+    fn scope_rejects_unknown_spelling() {
+        assert!(serde_yaml::from_str::<Scope>("global").is_err());
+    }
+
+    #[test]
+    fn scope_emits_new_spellings() {
+        for (scope, expected) in [
+            (Scope::Slot, "slot"),
+            (Scope::Execution, "execution"),
+            (Scope::Station, "station"),
+        ] {
+            let out = serde_yaml::to_string(&scope).unwrap();
+            assert_eq!(out.trim(), expected);
+        }
+    }
+
+    #[test]
+    fn plug_scope_defaults_to_slot_and_roundtrip_omits_default() {
+        let yaml = r#"
+name: Bare Plug
+python: instruments.psu:PowerSupply
+"#;
+        let plug: PlugDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(plug.scope, Scope::Slot);
+
+        // Default scope must not be written back — Studio re-saves whole
+        // files and a procedure that never specified a scope must stay
+        // byte-identical.
+        let back = plug.to_yaml();
+        assert!(back.scope.is_none());
+    }
+
+    #[test]
+    fn plug_station_scope_roundtrips() {
+        let yaml = r#"
+name: Power Supply
+python: instruments.psu:PowerSupply
+scope: station
+"#;
+        let plug: PlugDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(plug.scope, Scope::Station);
+        assert!(plug.scope_is_station());
+        assert!(!plug.scope_is_execution());
+
+        let back = plug.to_yaml();
+        assert_eq!(back.scope, Some(Scope::Station));
+    }
+
+    #[test]
+    fn plug_legacy_all_maps_to_execution() {
+        let yaml = r#"
+name: Shared PSU
+python: instruments.psu:PowerSupply
+scope: all
+"#;
+        let plug: PlugDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(plug.scope, Scope::Execution);
+        assert!(plug.scope_is_execution());
+    }
+
+    #[test]
+    fn plugs_with_scope_maps_station() {
+        let yaml = r#"
+name: Test
+version: "1.0"
+plugs:
+  - name: Sta
+    python: instruments.a:A
+    scope: station
+  - name: Shared
+    python: instruments.b:B
+    scope: all
+  - name: Per Slot
+    python: instruments.c:C
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#;
+        let raw: ProcedureYaml = serde_yaml::from_str(yaml).unwrap();
+        let def = ProcedureDefinition::from(raw);
+        let scopes: Vec<_> = def
+            .get_all_plugs_with_scope()
+            .into_iter()
+            .map(|(s, p)| (p.key.clone(), s))
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                ("sta".to_string(), crate::events::PlugScope::Station),
+                ("shared".to_string(), crate::events::PlugScope::Execution),
+                ("per_slot".to_string(), crate::events::PlugScope::Slot),
+            ]
+        );
     }
 
     // ========================================================================

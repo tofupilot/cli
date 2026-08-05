@@ -376,7 +376,14 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
         if let Err(e) = update::background_check().await {
             log::warn(&format!("Boot update check failed: {e}"));
         }
-        try_apply_staged_update(None, installation_id, json_mode, local_ws_server.as_ref()).await;
+        try_apply_staged_update(
+            None,
+            installation_id,
+            json_mode,
+            local_ws_server.as_ref(),
+            None,
+        )
+        .await;
     }
 
     // Config sync is plain HTTP; its ConfigApplied events are held and
@@ -588,6 +595,12 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // procedure stations still wait for an explicit pick because the
     // choice is genuinely ambiguous.
     let mut active_run: Option<crate::commands::run::RunHandle> = None;
+    // Station-process-scoped owner of `scope: station` plugs. One per
+    // station loop; every run borrows instrument instances from it so
+    // connections survive across units. Shut down explicitly at loop
+    // exit; the Drop chain covers abnormal exits.
+    let station_plug_host =
+        std::sync::Arc::new(execution_engine::plugs::station_host::StationPlugHost::new());
     // Set when a run ends naturally (`done_rx` resolves). Read by the
     // update-tick to defer `apply_staged_update` so the operator-UI's
     // outcome screen survives long enough for the operator to read it
@@ -640,6 +653,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 creds,
                 client.as_ref(),
                 local_ws_server.as_ref(),
+                &station_plug_host,
             )
             .await;
         }
@@ -682,6 +696,21 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                             match swap.apply(&db).await {
                                 Ok(_) => {
                                     if !json_mode { log::success(&format!("Deployment updated: {name}")); }
+                                    // The swap replaced deployments/<proc>
+                                    // IN PLACE — same path, new contents —
+                                    // so the plug host's context check
+                                    // (procedure dir + python) cannot see
+                                    // it, and the fingerprint only covers
+                                    // the plug's YAML declaration, not its
+                                    // Python code. Held station plugs may
+                                    // be running code from the replaced
+                                    // bundle: release them now so the next
+                                    // run respawns from the new one. Drain
+                                    // parked teardowns first — a prior run
+                                    // may still be mid-RPC against these
+                                    // ports.
+                                    drain_prior_teardowns(&mut prior_run_teardowns, 10, json_mode).await;
+                                    station_plug_host.shutdown(None).await;
                                 }
                                 Err(e) => { log::error(&format!("Deployment swap failed: {e}")); }
                             }
@@ -739,6 +768,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                         &mut last_run_ended_at,
                         &staged,
                         local_ws_server.as_ref(),
+                        &station_plug_host,
                     ).await {
                         LoopControl::Continue => {}
                         LoopControl::Exit(code) => {
@@ -769,6 +799,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                             &mut last_run_ended_at,
                             &staged,
                             local_ws_server.as_ref(),
+                            &station_plug_host,
                         ).await {
                             LoopControl::Continue => {}
                             LoopControl::Exit(code) => {
@@ -864,6 +895,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                         installation_id,
                         json_mode,
                         local_ws_server.as_ref(),
+                        Some((&station_plug_host, &mut prior_run_teardowns)),
                     ).await;
                 }
             }
@@ -908,6 +940,14 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     if let Some(handle) = active_run.take() {
         handle.abort().await;
     }
+    // Release held station plugs (graceful Cleanup → Shutdown RPC per
+    // instance). Must run after every borrower is gone — the active
+    // run just aborted above, but parked prior-run teardowns may still
+    // be mid-RPC against these ports; shutting the host down under
+    // them would truncate an instrument cleanup. Drain them (bounded)
+    // first.
+    drain_prior_teardowns(&mut prior_run_teardowns, 10, json_mode).await;
+    station_plug_host.shutdown(None).await;
     // Detach the kiosk explicitly before dropping the Arc. `Server`'s
     // Drop only fires when the *last* Arc clone is gone, but the queue
     // drain task (and any other live tokio task) holds a clone — at
@@ -1026,6 +1066,13 @@ async fn try_apply_staged_update(
     installation_id: &str,
     json_mode: bool,
     local_ws_server: Option<&std::sync::Arc<crate::local_ws::Server>>,
+    // Held station plugs + their parked prior-run borrowers, released
+    // together right before re-exec. `None` at the boot-time call only —
+    // the host doesn't exist yet and nothing is held.
+    held_station_plugs: Option<(
+        &std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>,
+        &mut tokio::task::JoinSet<()>,
+    )>,
 ) {
     if !update::auto_update_enabled() || !update::has_staged() {
         return;
@@ -1051,6 +1098,19 @@ async fn try_apply_staged_update(
     // attaches a fresh kiosk via `attach_kiosk` at startup.
     if let Some(server) = local_ws_server {
         server.detach_kiosk().await;
+    }
+    // Release held station plugs before reexec, for the same no-Drop
+    // reason as the kiosk above: without this their Python processes
+    // survive the `execvp` as orphans, keeping their loopback ports
+    // AND their instrument connections (VISA/TCP/serial) — so the
+    // fresh process's respawned plugs find the instruments busy and
+    // the first run after an auto-update fails. Drain parked prior-run
+    // teardowns first: they may still be mid-RPC against these ports.
+    // If the apply fails below, the plugs were released for nothing;
+    // the next run's acquire simply respawns them.
+    if let Some((host, teardowns)) = held_station_plugs {
+        drain_prior_teardowns(teardowns, 10, json_mode).await;
+        host.shutdown(None).await;
     }
     if let Err(e) = update::apply_staged() {
         if let Some(c) = client {
@@ -1137,6 +1197,7 @@ async fn handle_command(
     last_run_ended_at: &mut Option<std::time::Instant>,
     staged: &Arc<Mutex<Option<StagedDeployment>>>,
     local_ws_server: Option<&std::sync::Arc<crate::local_ws::Server>>,
+    station_plug_host: &std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>,
 ) -> LoopControl {
     match cmd {
         StationCommand::Logout {
@@ -1317,6 +1378,14 @@ async fn handle_command(
             if let Some(ref id) = resolved_id {
                 *last_procedure_id = Some(id.clone());
             }
+            // The station plug host is about to be handed to the new
+            // run, whose acquire may respawn instances (fingerprint
+            // change, failed probe) or tear down every held plug
+            // (procedure switch = context change). A parked prior run
+            // can still be draining teardown phases against those very
+            // ports — let it finish (bounded) so the host never yanks
+            // an instrument out from under a live borrower.
+            drain_prior_teardowns(prior_run_teardowns, 15, json_mode).await;
             *active_run = try_start_run(
                 resolved_id.as_deref(),
                 reuse_unit,
@@ -1325,6 +1394,7 @@ async fn handle_command(
                 creds,
                 client,
                 local_ws_server,
+                station_plug_host,
             )
             .await;
             // Only clear the outcome grace if the new run actually
@@ -1527,6 +1597,62 @@ async fn auth_probe(creds: &Credentials) -> AuthProbeOutcome {
     }
 }
 
+/// Await parked prior-run teardowns, bounded. The parked runs are the
+/// only borrowers of the station plug host besides `active_run`, so
+/// anything about to mutate the host's held instances (a new run's
+/// acquire, host shutdown) must drain them first or an instrument can
+/// be torn down mid-RPC. On timeout the stragglers are force-aborted —
+/// their `AbortOnDrop` wrapper kills the inner run task — and we log
+/// loudly rather than wait forever on a wedged Python teardown.
+async fn drain_prior_teardowns(
+    teardowns: &mut tokio::task::JoinSet<()>,
+    timeout_secs: u64,
+    json_mode: bool,
+) {
+    if teardowns.is_empty() {
+        return;
+    }
+    if !json_mode {
+        log::info(&format!(
+            "Waiting for {} prior run(s) to finish teardown...",
+            teardowns.len()
+        ));
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while !teardowns.is_empty() {
+        match tokio::time::timeout_at(deadline, teardowns.join_next()).await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                if !json_mode {
+                    log::warn(&format!(
+                        "{} prior-run teardown(s) still running after {}s; aborting them",
+                        teardowns.len(),
+                        timeout_secs
+                    ));
+                }
+                teardowns.abort_all();
+                // Cancelled tasks resolve at their next await point, so
+                // this join is normally instant — but keep it bounded
+                // too, or a task wedged in a compute loop between
+                // awaits would violate this function's bounded
+                // contract.
+                let reap_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !teardowns.is_empty() {
+                    if tokio::time::timeout_at(reap_deadline, teardowns.join_next())
+                        .await
+                        .is_err()
+                    {
+                        teardowns.detach_all();
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 async fn try_start_run(
     procedure_id: Option<&str>,
     reuse_unit: Option<station_protocol::UnitInfo>,
@@ -1535,6 +1661,7 @@ async fn try_start_run(
     creds: &Credentials,
     client: Option<&client::StreamClient>,
     local_ws_server: Option<&std::sync::Arc<crate::local_ws::Server>>,
+    station_plug_host: &std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>,
 ) -> Option<crate::commands::run::RunHandle> {
     // No procedure to run on — every caller must pick one explicitly.
     // A None (or empty string, which we coerce here) is a bug at the
@@ -1591,8 +1718,13 @@ async fn try_start_run(
             json_mode,
             Some(creds),
             publisher,
-            // Station runs never enable debug mode.
-            crate::commands::run::RunOptions::default(),
+            // Station runs never enable debug mode, but they do carry
+            // the station plug host so `scope: station` plugs survive
+            // across runs.
+            crate::commands::run::RunOptions {
+                station_plug_host: Some(std::sync::Arc::clone(station_plug_host)),
+                ..Default::default()
+            },
             tui_presence_identity,
             // Station mode honours station config, never overrides.
             None,
@@ -1610,4 +1742,86 @@ async fn try_start_run(
         )
         .await,
     )
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::drain_prior_teardowns;
+
+    #[tokio::test]
+    async fn empty_set_returns_immediately() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let start = std::time::Instant::now();
+        drain_prior_teardowns(&mut set, 5, true).await;
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn fast_teardowns_drain_without_abort() {
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..3 {
+            let flag = std::sync::Arc::clone(&flag);
+            set.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        drain_prior_teardowns(&mut set, 5, true).await;
+        assert!(set.is_empty());
+        // All three ran to completion — none were aborted.
+        assert_eq!(flag.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn wedged_teardown_is_aborted_at_the_deadline() {
+        // Mirror the PRODUCTION parking structure exactly (the Run
+        // dispatcher's AbortOnDrop wrapper around an inner JoinHandle)
+        // so this test guards the cascade that matters: aborting the
+        // OUTER wrapper must abort the INNER run task, not detach it.
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let inner_finished = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inner_handle = {
+            let inner_finished = std::sync::Arc::clone(&inner_finished);
+            tokio::spawn(async move {
+                std::future::pending::<()>().await; // wedged run task
+                inner_finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let probe = inner_handle.abort_handle();
+        set.spawn(async move {
+            struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+            impl Drop for AbortOnDrop {
+                fn drop(&mut self) {
+                    if let Some(h) = self.0.take() {
+                        h.abort();
+                    }
+                }
+            }
+            let mut guard = AbortOnDrop(Some(inner_handle.abort_handle()));
+            let _ = inner_handle.await;
+            guard.0 = None;
+        });
+
+        let start = std::time::Instant::now();
+        drain_prior_teardowns(&mut set, 1, true).await;
+
+        // It actually waited for the deadline (not an instant abort)…
+        assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+        // …and returned bounded.
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        assert!(set.is_empty());
+        // The cascade fired: the INNER task was aborted, not detached.
+        for _ in 0..50 {
+            if probe.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            probe.is_finished(),
+            "inner run task must be aborted by the wrapper's Drop, not left running"
+        );
+        assert_eq!(inner_finished.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }

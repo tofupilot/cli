@@ -130,6 +130,13 @@ pub struct Orchestrator {
     /// and the Rust-side phase timeout wrapper is skipped so breakpoint
     /// pauses aren't killed.
     pub(super) debug_port: Option<u16>,
+    /// Station-process-scoped owner of `scope: station` plugs. Set in
+    /// station mode via `with_station_plug_host`; `None` (one-shot runs,
+    /// Studio) degrades station plugs to execution scope.
+    pub(super) station_plug_host: Option<Arc<crate::plugs::station_host::StationPlugHost>>,
+    /// Whether this execution has already borrowed its station plugs
+    /// from the host (mirrors `procedure_plugs_created`).
+    pub(super) station_plugs_acquired: Arc<RwLock<bool>>,
 }
 
 impl Orchestrator {
@@ -212,7 +219,20 @@ impl Orchestrator {
             end_time: None,
             initial_unit_infos: HashMap::new(),
             debug_port,
+            station_plug_host: None,
+            station_plugs_acquired: Arc::new(RwLock::new(false)),
         }
+    }
+
+    /// Attach the station-process-scoped plug host. Builder-style so the
+    /// constructor signature (shared with Studio) stays stable.
+    #[must_use]
+    pub fn with_station_plug_host(
+        mut self,
+        host: Option<Arc<crate::plugs::station_host::StationPlugHost>>,
+    ) -> Self {
+        self.station_plug_host = host;
+        self
     }
 
     pub fn set_initial_unit_infos(&mut self, unit_infos: HashMap<String, crate::unit::UnitInfo>) {

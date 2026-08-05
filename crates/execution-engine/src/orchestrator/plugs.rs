@@ -13,21 +13,112 @@ impl Orchestrator {
     /// Ensure plugs are created at the appropriate scope boundaries
     ///
     /// Lifecycle boundaries:
-    /// - All-slots (scope: all): Created once before the first phase that needs them
-    /// - Each-slot (scope: each): Created per-slot before the first phase that needs them for that slot
+    /// - Station (scope: station, host present): Borrowed from the
+    ///   station plug host once per execution, before the first phase
+    ///   that needs them. Never destroyed by the run.
+    /// - Execution-wide (scope: execution): Created once before the first phase that needs them
+    /// - Per-slot (scope: slot): Created per-slot before the first phase that needs them for that slot
     pub(super) async fn ensure_plugs_created_for_job(
         &self,
         job: &Job,
     ) -> Result<(), String> {
         let procedure_def = &self.procedure_definition;
 
-        // Create all-slots plugs if not yet created
-        // Triggered by: SetupAll phase, or any phase that requires a scope:all plug
+        // Borrow station plugs from the host if not yet borrowed this
+        // execution. Without a host, station plugs were downgraded to
+        // execution scope at init and flow through the branch below instead.
+        if let Some(host) = &self.station_plug_host {
+            let needs_station_plugs = matches!(job.stage_scope, StageScope::SetupAll)
+                || procedure_def
+                    .plugs
+                    .iter()
+                    .any(|p| p.scope_is_station() && job.required_plugs.contains(&p.key));
+
+            if needs_station_plugs {
+                let mut acquired = self.station_plugs_acquired.write().await;
+                if !*acquired {
+                    let station_plugs: Vec<_> = procedure_def
+                        .plugs
+                        .iter()
+                        .filter(|p| p.scope_is_station())
+                        .collect();
+
+                    if !station_plugs.is_empty() {
+                        log::info!(
+                            "Borrowing {} station plug(s) before phase '{}'",
+                            station_plugs.len(),
+                            job.phase_name
+                        );
+                        self.emit_plug_scope_event("running").await;
+
+                        // Acquire first, register under the resource-
+                        // manager guard second, emit last. Keeping the
+                        // rm guard out of scope during `acquire` (slow:
+                        // may spawn Python) and during the emit (which
+                        // takes `state.write()`) preserves the global
+                        // `state → resource_manager` lock order that
+                        // scheduling.rs documents.
+                        let mut acquired_ports = Vec::with_capacity(station_plugs.len());
+                        for plug in station_plugs {
+                            let config_json =
+                                plug.to_config_json(&self.procedure_dir).map_err(|e| {
+                                    format!("Failed to build config for plug '{}': {}", plug.key, e)
+                                })?;
+
+                            match host
+                                .acquire(
+                                    &self.procedure_dir,
+                                    &self.python_path,
+                                    &plug.key,
+                                    &plug.name,
+                                    config_json,
+                                    &self.event_sink,
+                                )
+                                .await
+                            {
+                                Ok(port) => acquired_ports.push((plug.key.clone(), port)),
+                                Err(e) => {
+                                    self.emit_plug_scope_event("error").await;
+                                    return Err(format!(
+                                        "Failed to acquire station plug '{}': {}",
+                                        plug.key, e
+                                    ));
+                                }
+                            }
+                        }
+
+                        {
+                            let resource_manager = self.resource_manager.write().await;
+                            for (key, port) in acquired_ports {
+                                resource_manager.register_station_plug(key, port).await;
+                            }
+                        }
+
+                        self.emit_plug_scope_event("pass").await;
+                    }
+                    // Deliberately OUTSIDE the is_empty guard: with zero
+                    // station plugs there is nothing to acquire, ever,
+                    // so latching avoids re-entering per job. If
+                    // `station_plugs` ever becomes a per-job filtered
+                    // subset, this must move inside the guard or later
+                    // jobs' plugs are silently skipped.
+                    *acquired = true;
+                }
+            }
+        }
+
+        // Create execution-wide plugs if not yet created
+        // Triggered by: SetupAll phase, or any phase that requires a
+        // scope:execution plug — including station plugs downgraded to execution
+        // scope when no host is present (the ResourceManager's scope map
+        // holds the downgraded value, so create_procedure_plugs will
+        // pick them up here).
+        let hostless = self.station_plug_host.is_none();
         let needs_procedure_plugs = matches!(job.stage_scope, StageScope::SetupAll)
-            || procedure_def
-                .plugs
-                .iter()
-                .any(|p| p.scope_is_all() && job.required_plugs.contains(&p.key));
+            || procedure_def.plugs.iter().any(|p| {
+                (p.scope_is_execution() || (hostless && p.scope_is_station()))
+                    && job.required_plugs.contains(&p.key)
+            });
 
         if needs_procedure_plugs {
             let mut procedure_plugs_created = self.procedure_plugs_created.write().await;
@@ -70,10 +161,10 @@ impl Orchestrator {
         // Triggered by: SetupEach phase, or any slot-scoped phase that requires a scope:each plug
         let needs_slot_plugs = job.slot_id.is_some()
             && (matches!(job.stage_scope, StageScope::SetupEach)
-                || procedure_def
-                    .plugs
-                    .iter()
-                    .any(|p| !p.scope_is_all() && job.required_plugs.contains(&p.key)));
+                || procedure_def.plugs.iter().any(|p| {
+                    matches!(p.scope, crate::procedure::schema::Scope::Slot)
+                        && job.required_plugs.contains(&p.key)
+                }));
 
         if needs_slot_plugs {
             if let Some(ref slot_id) = job.slot_id {

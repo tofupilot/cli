@@ -90,6 +90,26 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
         }
     }
 
+    // `scope: station` is a plug lifetime, not a phase grouping — a phase
+    // can't run "across runs". Phases silently coerce non-`all` scopes to
+    // per-slot (`iter_phases_with_stage`), so without this check a
+    // station-scoped phase would quietly behave as `slot`. Catch it at
+    // load with an error that points at the authoring bug.
+    for phase in procedure_def
+        .setup
+        .iter()
+        .chain(procedure_def.main.iter())
+        .chain(procedure_def.teardown.iter())
+    {
+        if phase.scope == Some(crate::procedure::schema::Scope::Station) {
+            return Err(format!(
+                "Phase `{}` has `scope: station`, which is only valid on plugs. \
+                 Use `scope: execution` (execution-wide) or `scope: slot` (per-slot) on phases",
+                phase.key
+            ));
+        }
+    }
+
     // A procedure with no main phases isn't a test — the runner would exit
     // PASS without doing anything, which is misleading.
     if procedure_def.main.is_empty() {
@@ -144,6 +164,97 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     }
 
     Ok(procedure_def)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_from_str(yaml: &str) -> Result<ProcedureDefinition, String> {
+        let dir = std::env::temp_dir().join(format!(
+            "tp-loader-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("procedure.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let result = load_procedure_definition(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        result
+    }
+
+    #[test]
+    fn station_scope_on_plug_loads() {
+        let result = load_from_str(
+            r#"
+name: Station Plug OK
+version: "1.0"
+plugs:
+  - name: Power Supply
+    python: instruments.psu:PowerSupply
+    scope: station
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        );
+        let def = result.expect("station scope on a plug is valid");
+        assert!(def.plugs[0].scope_is_station());
+    }
+
+    #[test]
+    fn station_scope_on_phase_rejected() {
+        for stage in ["setup", "teardown"] {
+            let result = load_from_str(&format!(
+                r#"
+name: Station Phase Bad
+version: "1.0"
+{stage}:
+  - key: s1
+    name: S1
+    python: phases.s1
+    scope: station
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#
+            ));
+            let err = result.expect_err("station scope on a phase must be rejected");
+            assert!(
+                err.contains("only valid on plugs"),
+                "unexpected error for {stage}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_phase_scope_all_still_loads() {
+        let result = load_from_str(
+            r#"
+name: Legacy Scope
+version: "1.0"
+setup:
+  - key: s1
+    name: S1
+    python: phases.s1
+    scope: all
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        );
+        let def = result.expect("legacy `scope: all` on a setup phase still loads");
+        use crate::procedure::schema::StageScope;
+        let (stage, _) = def
+            .get_all_phases_with_stage_scope()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(matches!(stage, StageScope::SetupAll));
+    }
 }
 
 /// DFS with three-color marking. Returns the cycle as an ordered list of

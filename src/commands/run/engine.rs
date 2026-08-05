@@ -253,18 +253,16 @@ impl EventSink for CliEventSink {
                 // entries reactively on the first plug_status event.
                 let mut plug_defs: Vec<station_protocol::PlugDefinition> =
                     Vec::with_capacity(plugs_all.len() + plugs_each.len());
-                for p in plugs_all {
+                // Carry the plan's scope string through verbatim
+                // ("slot" / "execution" / "station") instead of re-deriving
+                // it from which bucket the plug rode in — the buckets
+                // group shared vs per-slot, which collapses station
+                // into run and loses it on the wire.
+                for p in plugs_all.iter().chain(plugs_each.iter()) {
                     plug_defs.push(station_protocol::PlugDefinition {
                         key: p.plug_key.clone(),
                         name: p.plug_name.clone(),
-                        scope: "all".to_string(),
-                    });
-                }
-                for p in plugs_each {
-                    plug_defs.push(station_protocol::PlugDefinition {
-                        key: p.plug_key.clone(),
-                        name: p.plug_name.clone(),
-                        scope: "each".to_string(),
+                        scope: p.scope.clone(),
                     });
                 }
                 // `unit` is populated from the resolved-unit cell when
@@ -989,8 +987,9 @@ fn plug_stage_str(s: &execution_engine::events::PlugStage) -> &'static str {
 fn plug_scope_str(s: &execution_engine::events::PlugScope) -> &'static str {
     use execution_engine::events::PlugScope;
     match s {
-        PlugScope::All => "all",
-        PlugScope::Each => "each",
+        PlugScope::Execution => "execution",
+        PlugScope::Slot => "slot",
+        PlugScope::Station => "station",
     }
 }
 
@@ -1497,6 +1496,11 @@ pub async fn run_yaml_procedure(
     // Debug run: single worker, phase timeouts disabled, TP_DEBUG set on
     // the worker so tp_worker.py starts a debugpy listener.
     debug: super::DebugOptions,
+    // Station-process-scoped owner of `scope: station` plugs (station
+    // mode only). `None` degrades station plugs to execution scope.
+    station_plug_host: Option<
+        std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>,
+    >,
 ) -> (i32, Option<QueuedRun>) {
     let procedure_def = match load_procedure_definition(procedure_yaml) {
         Ok(def) => def,
@@ -1613,7 +1617,8 @@ pub async fn run_yaml_procedure(
         } else {
             None
         },
-    );
+    )
+    .with_station_plug_host(station_plug_host);
 
     // Worker stderr is not surfaced on the CLI, so the "waiting for
     // debugger" notice must come from here. The worker blocks in

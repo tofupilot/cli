@@ -94,17 +94,33 @@ impl Orchestrator {
             });
         }
 
+        // Station plugs ride in the shared (`plugs_all`) bucket — one
+        // instance shared by every slot, exactly like execution scope from the
+        // plan's point of view — but keep their own scope string so the
+        // UI can label them.
         let (plugs_all, plugs_each): (Vec<_>, Vec<_>) = procedure
             .plugs
             .iter()
-            .partition(|p| p.scope == crate::procedure::schema::Scope::All);
+            .partition(|p| p.scope != crate::procedure::schema::Scope::Slot);
 
+        // Report the EFFECTIVE scope, not the declared one: without a
+        // station plug host the plug was downgraded to execution scope at
+        // init (see initialization.rs), and every subsequent
+        // plug_status event carries "execution" — the plan must agree or the
+        // operator UI seeds a card whose label contradicts its events.
+        let station_effective = self.station_plug_host.is_some();
         let plugs_all: Vec<PlannedPlug> = plugs_all
             .into_iter()
             .map(|p| PlannedPlug {
                 plug_key: p.key.clone(),
                 plug_name: p.name.clone(),
-                scope: "all".to_string(),
+                scope: if p.scope == crate::procedure::schema::Scope::Station
+                    && station_effective
+                {
+                    "station".to_string()
+                } else {
+                    "execution".to_string()
+                },
             })
             .collect();
 
@@ -113,7 +129,7 @@ impl Orchestrator {
             .map(|p| PlannedPlug {
                 plug_key: p.key.clone(),
                 plug_name: p.name.clone(),
-                scope: "each".to_string(),
+                scope: "slot".to_string(),
             })
             .collect();
 

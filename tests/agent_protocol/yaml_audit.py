@@ -322,6 +322,12 @@ if not sk or not sk.get("reason"):
     RESULTS[-1] = (RESULTS[-1][0], False, RESULTS[-1][2] + ["expected phase_skipped with reason"])
     print("  - expected phase_skipped with reason")
 
+# Y44: scope: station on a plug. One-shot runs have no station plug host,
+# so the plug degrades to execution scope: a single shared instance whose
+# __init__ runs exactly once — both phases assert init_count == 1.
+events, rc = drive("/tmp/yaml_test44")
+check("Y44p station plug degrades to execution scope", events, rc, expect_pass=True)
+
 # ===== Y28+ framework depth =====
 events, rc = drive("/tmp/yaml_test28")
 check("Y28 phase timeout → TIMEOUT", events, rc, expect_pass=False)
@@ -381,8 +387,11 @@ events, rc = drive("/tmp/yaml_test38")
 check("Y38 duplicate phase keys rejected", events, rc, expect_pass=False,
       expect_crashed=True)
 
+# Y40 deliberately keeps the LEGACY scope spellings (`all`/`each`) in its
+# procedure.yaml — it is the regression coverage for the serde aliases
+# after the slot/run/station rename. Do not "modernize" the fixture.
 events, rc = drive("/tmp/yaml_test40")
-check("Y40 plug scope all vs each", events, rc, expect_pass=True)
+check("Y40 plug scope legacy all/each aliases", events, rc, expect_pass=True)
 slot_ids = {e.get("slot_id") for e in events if e.get("type") == "phase_finished"}
 if slot_ids != {"slot_a", "slot_b"}:
     RESULTS[-1] = (RESULTS[-1][0], False, RESULTS[-1][2] + [f"expected slot_ids slot_a+slot_b, got {slot_ids}"])

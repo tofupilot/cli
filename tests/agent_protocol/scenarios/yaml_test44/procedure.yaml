@@ -1,0 +1,39 @@
+name: Y44 Station Plug
+version: 1.0.0
+
+# One-shot runs have no station plug host, so `scope: station` degrades
+# to execution scope: single shared instance, torn down with the execution.
+# The scenario proves the degrade path parses, runs, and shares one
+# instance across phases.
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: SN-001
+  part_number:
+    default_value: PN-DEMO
+
+plugs:
+  - name: Counting PSU
+    key: psu
+    python: instruments.counting_psu:CountingPsu
+    scope: station
+
+main:
+  - key: first_read
+    name: First Read
+    python: phases.first_read
+    measurements:
+      - name: init_count
+        validators:
+          - operator: "=="
+            expected_value: 1
+  - key: second_read
+    name: Second Read
+    python: phases.second_read
+    depends_on: [first_read]
+    measurements:
+      - name: init_count
+        validators:
+          - operator: "=="
+            expected_value: 1

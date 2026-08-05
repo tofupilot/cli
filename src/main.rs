@@ -450,6 +450,9 @@ async fn main() {
                     enabled: debug,
                     port: debug_port,
                 },
+                // One-shot runs have no station process to own plugs
+                // across runs; station plugs degrade to execution scope.
+                station_plug_host: None,
             };
             // Tri-state UI overrides: explicit flag wins, otherwise fall
             // back to station config in `commands::run::run`.
