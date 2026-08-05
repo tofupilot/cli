@@ -1,8 +1,5 @@
 /// Constants for the execution system
 pub mod timeouts {
-    /// Default timeout for UI responses in seconds
-    pub const UI_RESPONSE_TIMEOUT_SECS: u64 = 300; // 5 minutes for operator responses
-
     /// Default timeout for worker shutdown in seconds
     pub const WORKER_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 

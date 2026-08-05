@@ -1393,12 +1393,38 @@ class Measurements:
         return self._measurements
 
 
+# Connect keeps a fixed timeout: the plug service is a local process
+# whose kernel backlog completes the handshake even mid-call, so a
+# connect that hangs means the process is frozen (typically an EDR
+# suspending the interpreter), not busy. Sized to match
+# JOB_ACK_TIMEOUT_SECS (constants.rs), the engine's deadline for the
+# same alive-but-not-executing failure. I/O has no timeout of its own —
+# a plug method legitimately runs as long as the phase allows (thermal
+# soak, firmware flash), so its only deadline is the phase's.
+PLUG_CONNECT_TIMEOUT_S = 30.0
+
+
 class Plug:
     """NDJSON TCP client for communicating with hardware plug services"""
 
     def __init__(self, name: str, address: str):
         self.name = name
         self.address = address
+        # Epoch seconds when the owning phase times out, or None for no
+        # phase timeout. Stamped by execute_job_streaming before the
+        # phase thread starts.
+        self.deadline = None
+
+    def _remaining(self, method: str) -> Optional[float]:
+        """Seconds left before the phase deadline, None if unlimited."""
+        if self.deadline is None:
+            return None
+        remaining = self.deadline - time.time()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"phase timed out before {method}() completed"
+            )
+        return remaining
 
     def __getattr__(self, method_name: str):
         def method_wrapper(*args, **kwargs):
@@ -1422,17 +1448,32 @@ class Plug:
                 "args_json": json.dumps(args) if args else "",
             }
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(60)
-            host, port_str = self.address.split(":")
-            sock.connect((host, int(port_str)))
+            remaining = self._remaining(method)
 
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
+                sock.settimeout(
+                    PLUG_CONNECT_TIMEOUT_S
+                    if remaining is None
+                    else min(PLUG_CONNECT_TIMEOUT_S, remaining)
+                )
+                host, port_str = self.address.split(":")
+                sock.connect((host, int(port_str)))
+
+                sock.settimeout(self._remaining(method))
                 sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
 
                 response_data = b""
                 while True:
-                    chunk = sock.recv(65536)
+                    # Re-derive the deadline per chunk so a slow-drip
+                    # response cannot stretch past the phase timeout.
+                    sock.settimeout(self._remaining(method))
+                    try:
+                        chunk = sock.recv(65536)
+                    except socket.timeout:
+                        raise TimeoutError(
+                            f"phase timed out while waiting for {method}() to complete"
+                        ) from None
                     if not chunk:
                         break
                     response_data += chunk
@@ -1476,7 +1517,9 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
     module_name = command.get("module", command.get("file", ""))
     function_name = command["function"]
     plugs = command.get("plugs", {})
-    timeout_ms = command.get("timeout_ms", 300000)
+    # None = no phase timeout: the protocol always sends the key,
+    # null when the procedure YAML has no `timeout` for this phase.
+    timeout_ms = command.get("timeout_ms")
     retry_count = command.get("retry_count", 0)
     retry_limit = command.get("retry_limit", 0)
     phase_results = command.get("phase_results", {})
@@ -1750,9 +1793,6 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
             }
 
     try:
-        thread = threading.Thread(target=run_phase, daemon=False)
-        thread.start()
-
         # Disable the phase timeout only when debugpy is actually
         # listening (not merely when TP_DEBUG is set) so a breakpoint
         # pause isn't killed. Keying off _debugpy_started keeps this in
@@ -1764,6 +1804,17 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         )
 
         start_time = time.time()
+
+        # Plug RPC calls share the phase's deadline instead of carrying
+        # their own: a plug call must be allowed to run exactly as long
+        # as the phase itself is. Stamped before the thread starts so
+        # even a first-line plug call sees it.
+        deadline = (start_time + timeout_seconds) if timeout_seconds else None
+        for plug_instance in plugs_dict.values():
+            plug_instance.deadline = deadline
+
+        thread = threading.Thread(target=run_phase, daemon=False)
+        thread.start()
         while thread.is_alive():
             if timeout_seconds and (time.time() - start_time) > timeout_seconds:
                 event_queue.close()
