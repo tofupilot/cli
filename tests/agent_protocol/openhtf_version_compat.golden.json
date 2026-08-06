@@ -1,0 +1,451 @@
+{
+  "events": [
+    {
+      "type": "bridge_ready"
+    },
+    {
+      "auto_identify": false,
+      "identify": true,
+      "part_number": "",
+      "phases": [
+        "all_validators",
+        "dimensioned",
+        "attachments",
+        "repeating",
+        "never_runs",
+        "failing"
+      ],
+      "procedure_id": "",
+      "test_name": "version compat probe",
+      "type": "test_start",
+      "unit_kwargs": {
+        "batch_number": "",
+        "part_number": "",
+        "revision_number": "",
+        "serial_number": ""
+      }
+    },
+    {
+      "name": "all_validators",
+      "type": "phase_begin"
+    },
+    {
+      "file": "probe_main.py",
+      "level": "INFO",
+      "line": 32,
+      "message": "user log marker",
+      "phase_name": "all_validators",
+      "type": "phase_log"
+    },
+    {
+      "name": "v_in",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": 231.4
+    },
+    {
+      "name": "lo_only",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": 5.0
+    },
+    {
+      "name": "hi_only",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": 5.0
+    },
+    {
+      "name": "fw",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": "3.4"
+    },
+    {
+      "name": "rev",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": 2
+    },
+    {
+      "name": "cur",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": 31.8
+    },
+    {
+      "name": "s_val",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": "OK"
+    },
+    {
+      "name": "b_val",
+      "phase_name": "all_validators",
+      "type": "measurement",
+      "value": true
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "measured_value": 231.4,
+          "name": "v_in",
+          "outcome": "PASS",
+          "units": "V",
+          "validators": [
+            {
+              "expected_value": 200,
+              "operator": ">=",
+              "outcome": "PASS"
+            },
+            {
+              "expected_value": 250,
+              "operator": "<=",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": 5.0,
+          "name": "lo_only",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": 1.0,
+              "operator": ">=",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": 5.0,
+          "name": "hi_only",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": 9.0,
+              "operator": "<=",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": 3.4,
+          "name": "fw",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": "^\\d+\\.\\d+$",
+              "operator": "matches",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": 2.0,
+          "name": "rev",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": 2,
+              "operator": "==",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": 31.8,
+          "name": "cur",
+          "outcome": "PASS",
+          "units": "A",
+          "validators": [
+            {
+              "expected_value": 30.4,
+              "expression": "'x' is within 5.0% of 32.0",
+              "operator": ">=",
+              "outcome": "PASS"
+            },
+            {
+              "expected_value": 33.6,
+              "expression": "'x' is within 5.0% of 32.0",
+              "operator": "<=",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": "OK",
+          "name": "s_val",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": "^OK$",
+              "operator": "matches",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "measured_value": true,
+          "name": "b_val",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": true,
+              "operator": "==",
+              "outcome": "PASS"
+            }
+          ]
+        },
+        {
+          "name": "unset_one",
+          "outcome": "UNSET"
+        }
+      ],
+      "name": "all_validators",
+      "outcome": "FAIL",
+      "retry_count": 0,
+      "type": "phase_end"
+    },
+    {
+      "name": "dimensioned",
+      "type": "phase_begin"
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "is_multidim": true,
+          "name": "ramp",
+          "outcome": "PASS",
+          "x_axis": {
+            "data": [
+              0,
+              1,
+              2,
+              3
+            ],
+            "units": "s"
+          },
+          "y_axis": [
+            {
+              "data": [
+                40.0,
+                41.0,
+                42.0,
+                43.0
+              ],
+              "description": "ramp",
+              "units": "\u00b0C"
+            }
+          ]
+        },
+        {
+          "is_multidim": true,
+          "measured_value": [
+            [
+              208,
+              8,
+              98.0
+            ],
+            [
+              208,
+              16,
+              106.0
+            ],
+            [
+              230,
+              8,
+              98.0
+            ],
+            [
+              230,
+              16,
+              106.0
+            ]
+          ],
+          "name": "grid",
+          "outcome": "PASS",
+          "units": [
+            "V",
+            "A",
+            "pct"
+          ]
+        }
+      ],
+      "name": "dimensioned",
+      "outcome": "PASS",
+      "retry_count": 0,
+      "type": "phase_end"
+    },
+    {
+      "name": "attachments",
+      "type": "phase_begin"
+    },
+    {
+      "live": true,
+      "mimetype": "text/plain",
+      "name": "cal",
+      "phase_name": "attachments",
+      "size": 7,
+      "type": "attachment"
+    },
+    {
+      "live": true,
+      "mimetype": "application/octet-stream",
+      "name": "blob",
+      "phase_name": "attachments",
+      "size": 64,
+      "type": "attachment"
+    },
+    {
+      "docstring": null,
+      "measurements": [],
+      "name": "attachments",
+      "outcome": "PASS",
+      "retry_count": 0,
+      "type": "phase_end"
+    },
+    {
+      "name": "repeating",
+      "type": "phase_begin"
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "name": "tries",
+          "outcome": "UNSET",
+          "validators": [
+            {
+              "expected_value": 5,
+              "operator": "<="
+            }
+          ]
+        }
+      ],
+      "name": "repeating",
+      "outcome": "SKIP",
+      "retry_count": 0,
+      "type": "phase_end"
+    },
+    {
+      "name": "repeating",
+      "type": "phase_begin"
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "name": "tries",
+          "outcome": "UNSET",
+          "validators": [
+            {
+              "expected_value": 5,
+              "operator": "<="
+            }
+          ]
+        }
+      ],
+      "name": "repeating",
+      "outcome": "SKIP",
+      "retry_count": 1,
+      "type": "phase_end"
+    },
+    {
+      "name": "repeating",
+      "type": "phase_begin"
+    },
+    {
+      "name": "tries",
+      "phase_name": "repeating",
+      "type": "measurement",
+      "value": 3
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "measured_value": 3.0,
+          "name": "tries",
+          "outcome": "PASS",
+          "validators": [
+            {
+              "expected_value": 5,
+              "operator": "<=",
+              "outcome": "PASS"
+            }
+          ]
+        }
+      ],
+      "name": "repeating",
+      "outcome": "PASS",
+      "retry_count": 2,
+      "type": "phase_end"
+    },
+    {
+      "name": "never_runs",
+      "type": "phase_begin"
+    },
+    {
+      "name": "failing",
+      "type": "phase_begin"
+    },
+    {
+      "name": "leak",
+      "phase_name": "failing",
+      "type": "measurement",
+      "value": 0.0074
+    },
+    {
+      "docstring": null,
+      "measurements": [
+        {
+          "measured_value": 0.0074,
+          "name": "leak",
+          "outcome": "FAIL",
+          "units": "A",
+          "validators": [
+            {
+              "expected_value": 0.003,
+              "is_decisive": true,
+              "operator": "<=",
+              "outcome": "FAIL"
+            }
+          ]
+        }
+      ],
+      "name": "failing",
+      "outcome": "FAIL",
+      "retry_count": 0,
+      "type": "phase_end"
+    },
+    {
+      "mimetype": "text/plain",
+      "name": "cal",
+      "size": 7,
+      "type": "attachment"
+    },
+    {
+      "mimetype": "application/octet-stream",
+      "name": "blob",
+      "size": 64,
+      "type": "attachment"
+    },
+    {
+      "docstring": null,
+      "dut_id": "SN-COMPAT",
+      "metadata": {},
+      "outcome": "FAIL",
+      "test_name": "version compat probe",
+      "type": "test_end"
+    }
+  ],
+  "user_logs": [
+    [
+      "INFO",
+      "user log marker"
+    ]
+  ]
+}

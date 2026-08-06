@@ -9,6 +9,7 @@ Usage: python openhtf.py <main.py>
 """
 import importlib.util
 import json
+import logging
 import os
 import select
 import signal
@@ -347,14 +348,20 @@ def _output_callback(test_record, phase_docstrings=None):
                     safe = f"{base}_{n}{ext}"
                 used_names.add(safe)
                 path = os.path.join(att_dir, safe)
+                data = att.data
                 with open(path, "wb") as f:
-                    f.write(att.data)
+                    f.write(data)
+                # OpenHTF < 1.5 has no Attachment.size (data lived in
+                # memory, so there was nothing to precompute).
+                size = getattr(att, "size", None)
+                if size is None:
+                    size = len(data)
                 _emit({
                     "type": Event.ATTACHMENT,
                     "name": att_name,
                     "path": path,
                     "mimetype": att.mimetype or "application/octet-stream",
-                    "size": att.size,
+                    "size": size,
                 })
             except Exception as e:
                 _emit({"type": Event.WARNING, "message": f"Attachment {att_name}: {e}"})
@@ -645,6 +652,20 @@ def _extract_validators(meas):
 
     from openhtf.util import validators as V
 
+    # Validator classes added after OpenHTF 1.4.4. isinstance() accepts an
+    # empty tuple as "never matches", so absent classes degrade instead of
+    # raising. The isinstance() check also rejects a non-class — a fork that
+    # shadows one of these names with a module or function would otherwise
+    # turn every measurement into a TypeError.
+    def _cls(name):
+        candidate = getattr(V, name, None)
+        return candidate if isinstance(candidate, type) else ()
+
+    _AllInRange = _cls("AllInRangeValidator")
+    _AllEquals = _cls("AllEqualsValidator")
+    _DimPivot = _cls("DimensionPivot")
+    _ConsistentEndDimPivot = _cls("ConsistentEndDimensionPivot")
+
     mv = meas.measured_value
     has_value = mv is not None and mv.is_value_set
     result = []
@@ -653,14 +674,14 @@ def _extract_validators(meas):
 
     def _emit_subvalidator(inner, expr):
         """Common path for DimensionPivot / ConsistentEndDimensionPivot."""
-        if isinstance(inner, (V.InRange, V.AllInRangeValidator)):
+        if isinstance(inner, (V.InRange, _AllInRange)):
             if inner._minimum is not None:
                 result.append(_val_entry(None, ">=", inner._minimum, val, True))
             if inner._maximum is not None:
                 result.append(_val_entry(None, "<=", inner._maximum, val, True))
         elif isinstance(inner, V.Equals):
             result.append(_val_entry(None, "==", inner._expected, val, True))
-        elif isinstance(inner, V.AllEqualsValidator):
+        elif isinstance(inner, _AllEquals):
             result.append(_val_entry(None, "==", inner.spec, val, True))
         elif isinstance(inner, V.RegexMatcher):
             result.append(_val_entry(None, "matches", inner.regex, val, True))
@@ -670,7 +691,7 @@ def _extract_validators(meas):
     for v in meas.validators:
         expr = str(v) if type(v).__str__ is not object.__str__ else _custom_expression(v)
 
-        if isinstance(v, (V.InRange, V.AllInRangeValidator)):
+        if isinstance(v, (V.InRange, _AllInRange)):
             if v._minimum is not None and v._maximum is not None and v._minimum == v._maximum:
                 result.append(_val_entry(None, "==", v._minimum, val, True))
             else:
@@ -684,7 +705,7 @@ def _extract_validators(meas):
                         result.append(_val_entry(None, "<=", v._marginal_maximum, val, False))
         elif isinstance(v, V.Equals):
             result.append(_val_entry(None, "==", v._expected, val, True))
-        elif isinstance(v, V.AllEqualsValidator):
+        elif isinstance(v, _AllEquals):
             result.append(_val_entry(None, "==", v.spec, val, True))
         elif isinstance(v, V.RegexMatcher):
             result.append(_val_entry(None, "matches", v.regex, val, True))
@@ -696,10 +717,11 @@ def _extract_validators(meas):
             base_expr = "'x' is within {}% of {}".format(v.percent, v.expected)
             result.append(_val_entry(base_expr, ">=", v.minimum, val, True))
             result.append(_val_entry(base_expr, "<=", v.maximum, val, True))
-            if v.marginal_percent is not None:
+            # Marginal limits were added after OpenHTF 1.4.4.
+            if getattr(v, "marginal_percent", None) is not None:
                 result.append(_val_entry(base_expr, ">=", v.marginal_minimum, val, False))
                 result.append(_val_entry(base_expr, "<=", v.marginal_maximum, val, False))
-        elif isinstance(v, (V.DimensionPivot, V.ConsistentEndDimensionPivot)) and hasattr(v, "_sub_validator"):
+        elif isinstance(v, (_DimPivot, _ConsistentEndDimPivot)) and hasattr(v, "_sub_validator"):
             _emit_subvalidator(v._sub_validator, expr)
         else:
             # Unknown validator (custom ValidatorBase subclass or
@@ -878,12 +900,28 @@ def main():
     try:
         from openhtf.core import test_state as _ts
 
-        _orig_finalize = _ts.PhaseState.finalize
+        # OpenHTF < 1.5 has no PhaseState.finalize; the equivalent end-of-phase
+        # hook is _set_phase_outcome. A version with neither must not take down
+        # the connector — the post-hoc output callback still reports every
+        # phase, only the live streaming is lost.
+        _finalize_attr = ("finalize" if hasattr(_ts.PhaseState, "finalize")
+                          else "_set_phase_outcome")
+        _orig_finalize = getattr(_ts.PhaseState, _finalize_attr, None)
+        if _orig_finalize is None:
+            raise ImportError("PhaseState has no finalize hook")
 
         def _patched_finalize(self, *args, **kwargs):
             result = _orig_finalize(self, *args, **kwargs)
             try:
                 phase = self.phase_record
+                # On OpenHTF < 1.5 we hook _set_phase_outcome, which
+                # record_timing_context calls one line BEFORE it stamps
+                # end_time_millis — so the value isn't there yet. Stamp it
+                # ourselves; the framework overwrites with an equivalent
+                # reading microseconds later.
+                if getattr(phase, "end_time_millis", None) is None:
+                    from openhtf import util as _htf_util
+                    phase.end_time_millis = _htf_util.time_millis()
                 phase_name = phase.name
                 if hasattr(phase, "descriptor") and hasattr(phase.descriptor, "func"):
                     phase_name = phase.descriptor.func.__name__
@@ -900,7 +938,8 @@ def main():
                 traceback.print_exc()
             return result
 
-        _patch_once(_ts.PhaseState, "finalize", _patched_finalize)
+        # Both hooks take (self) only, so the same wrapper fits either.
+        _patch_once(_ts.PhaseState, _finalize_attr, _patched_finalize)
     except ImportError:
         pass
 
@@ -1081,6 +1120,13 @@ def main():
     phase_docstrings = {}
     original_init = htf.Test.__init__
 
+    # PhaseGroup exists from OpenHTF 1.4.4 on, but not in 1.3.0. isinstance()
+    # treats an empty tuple as "never matches", so on 1.3.0 the recursion
+    # below is simply never taken — that version cannot produce a PhaseGroup.
+    _PhaseGroup = getattr(htf, "PhaseGroup", None)
+    if not isinstance(_PhaseGroup, type):
+        _PhaseGroup = ()
+
     def _unwrap(seq):
         """Resolve a PhaseSequence / list / tuple / None into an iterable."""
         if seq is None:
@@ -1094,7 +1140,7 @@ def main():
         for p in nodes:
             # PhaseGroup: recurse into setup / main / teardown in the order
             # OpenHTF executes them.
-            if isinstance(p, htf.PhaseGroup):
+            if isinstance(p, _PhaseGroup):
                 _flatten(_unwrap(p.setup), out)
                 _flatten(_unwrap(p.main), out)
                 _flatten(_unwrap(p.teardown), out)
@@ -1237,8 +1283,17 @@ def main():
                         getattr(getattr(user_phase, "func", None), "__name__", None)
                         or getattr(user_phase, "name", "trigger_phase")
                     )
+                    # `state_logger` is 1.5+; 1.4.x exposes `logger`; 1.3.0 has
+                    # neither, so fall back to the module logger — which
+                    # OpenHTF's own record handler still captures — rather
+                    # than dropping the notice entirely.
+                    _state_log = (
+                        getattr(running_test_state, "state_logger", None)
+                        or getattr(running_test_state, "logger", None)
+                        or logging.getLogger("openhtf")
+                    )
                     try:
-                        running_test_state.state_logger.info(
+                        _state_log.info(
                             "[tofupilot] Skipped user trigger phase '%s' "
                             "because the framework resolved serial_number=%s. "
                             "Drop `test_start=user_input.prompt_for_test_start()` "

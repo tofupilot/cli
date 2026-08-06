@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0]
+
+### Added
+
+- OpenHTF 1.3.0 through 1.6.1 all run on the CLI. The connector reached into
+  five framework internals that moved between releases — `Attachment.size`,
+  `PhaseState.finalize`, `PhaseGroup` and two groups of validator classes —
+  each unguarded, so a stock test on any pre-1.5 OpenHTF died before producing
+  a single event. Teams on an old pinned OpenHTF, often a local fork nobody
+  wants to migrate mid-production, can now point the CLI at their existing test
+  and get the same measurements, validators, attachments, dimensioned data and
+  phase outcomes as a team on 1.6.1. Verified end-to-end through the built
+  binary, and by a CI matrix that runs every supported release on each PR.
+
+### Fixed
+
+- Phases report their duration on OpenHTF below 1.5. The live `phase_end` was
+  emitted one step before the framework stamped its end time, so every phase
+  arrived with a null duration.
+- The notice explaining that a trigger phase was skipped reaches the run log on
+  OpenHTF below 1.5. It was written to a logger that only exists from 1.5 on,
+  inside a bare `except`, so the message — and the reason the user's
+  trigger-phase side effects were dropped — silently vanished on exactly the
+  versions that needed it.
+
 ## [0.26.27]
 
 ### Added
