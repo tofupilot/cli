@@ -31,7 +31,8 @@ use sha2::{Digest, Sha256};
 use station_protocol::{
     StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
     StudioRequest, StudioResponse, StudioSequence, StudioSequenceMeasurement, StudioSequencePhase,
-    StudioSequencePlug, StudioSequenceValidator,
+    StudioSequencePlug, StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi,
+    StudioSequenceUnit, StudioSequenceUnitField, StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -321,6 +322,28 @@ async fn get_sequence(root: &Path) -> StudioResponse {
             python: p.python.as_ref().map(|py| py.as_str().to_string()),
             description: p.description.clone(),
             enabled: p.enabled,
+            depends_on: p.depends_on.clone(),
+            ui_components: p
+                .ui
+                .as_ref()
+                .and_then(|u| u.components.as_ref())
+                .map(|c| c.len() as u32)
+                .unwrap_or(0),
+            executable: p.executable.is_some(),
+            // ms values saturate into the u32 the TS codegen requires;
+            // the schema caps them below that anyway.
+            timeout: p.timeout.map(|t| t.min(u32::MAX as u64) as u32),
+            retry: p.retry.as_ref().map(|r| StudioSequenceRetry {
+                limit: r.limit.min(u32::MAX as usize) as u32,
+                delay: r.delay.map(|d| d.min(u32::MAX as u64) as u32),
+            }),
+            // Same schema -> wire conversion the runtime uses, so the
+            // Builder sees every declared field without a second
+            // projection to keep in sync.
+            ui: p.ui.as_ref().map(|u| StudioSequenceUi {
+                requires_input: u.requires_input,
+                components: u.components.iter().flatten().map(Into::into).collect(),
+            }),
             measurements: p
                 .measurements
                 .iter()
@@ -341,11 +364,58 @@ async fn get_sequence(root: &Path) -> StudioResponse {
         }
     }
 
+    fn map_unit_field(
+        f: &execution_engine::procedure::schema::UnitFieldConfig,
+    ) -> StudioSequenceUnitField {
+        StudioSequenceUnitField {
+            default_value: f.default_value.clone(),
+            placeholder: f.placeholder.clone(),
+            description: f.description.clone(),
+            pattern: f.pattern.clone(),
+            min_length: f.min_length.map(|v| v.min(u32::MAX as usize) as u32),
+            max_length: f.max_length.map(|v| v.min(u32::MAX as usize) as u32),
+        }
+    }
+
     StudioResponse::Sequence {
         sequence: StudioSequence {
             name: def.name.clone(),
             version: def.version.clone(),
             description: def.description.clone(),
+            unit: def.unit.as_ref().map(|u| StudioSequenceUnit {
+                auto_identify: u.auto_identify,
+                serial_number: u.serial_number.as_ref().map(map_unit_field),
+                part_number: u.part_number.as_ref().map(map_unit_field),
+                revision_number: u.revision_number.as_ref().map(map_unit_field),
+                batch_number: u.batch_number.as_ref().map(map_unit_field),
+                sub_units: u
+                    .sub_units
+                    .as_ref()
+                    .map(|s| {
+                        s.0.iter()
+                            .map(|item| StudioSequenceSubUnit {
+                                label: item.label.clone(),
+                                serial_number: item.serial_number.as_ref().map(map_unit_field),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                components: {
+                    // The canonical builder requires serial/part configs;
+                    // they are always prompted even when the YAML omits
+                    // them, so normalize before building rather than
+                    // erroring on a hand-written partial `unit:` block.
+                    let mut cfg = u.clone();
+                    if cfg.serial_number.is_none() {
+                        cfg.serial_number = Some(Default::default());
+                    }
+                    if cfg.part_number.is_none() {
+                        cfg.part_number = Some(Default::default());
+                    }
+                    execution_engine::identify_unit::components::build_components(&cfg)
+                        .unwrap_or_default()
+                },
+            }),
             plugs: def
                 .plugs
                 .iter()

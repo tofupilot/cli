@@ -736,6 +736,7 @@ mod tests {
             run_id: None,
             deployment_id: None,
             unit: None,
+            only_phase: None,
         }
     }
 

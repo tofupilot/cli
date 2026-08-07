@@ -472,8 +472,9 @@ struct AppState {
     /// procedure directory. UI components reference images relative
     /// to it (radio/checklist option `image`, image component
     /// `value`) — same base the TUI's `ImageCache` resolves against.
-    /// Swapped per-run via `attach_run`; `None` between runs, so
-    /// `/files/*` 404s when no run is attached.
+    /// Swapped per-run via `attach_run`; `None` between runs, where
+    /// `/files/*` falls back to the studio root (studio sessions) or
+    /// 404s (every other daemon).
     procedure_dir: Arc<Mutex<Option<PathBuf>>>,
     /// Root the `/attachments/*` route serves from: the directory the
     /// engine writes run attachments to (the report dir). Unlike
@@ -912,9 +913,19 @@ impl Server {
         let root = tokio::fs::canonicalize(root).await?;
         *self.state.studio.lock().await = Some(studio::StudioConfig { root });
         let mut hello = self.state.hello.lock().await;
-        let cap = "studio-rpc-v1".to_string();
-        if !hello.capabilities.contains(&cap) {
-            hello.capabilities.push(cap);
+        // `partial_run`: the studio dispatcher honors `Run.only_phase`.
+        // Not advisory — an older daemon ignores the field and runs the
+        // WHOLE procedure against real hardware, so the dashboard must
+        // hide the per-phase play button unless this is present.
+        // `upload_run`: the dispatcher handles `StationCommand::UploadRun`
+        // (explicit post-run upload); without it the command is dropped.
+        // `idle_files`: `/files/*` serves the project root between runs.
+        // Gated so the dashboard previews keep their neutral image
+        // placeholder against an older daemon instead of a 404 error.
+        for cap in ["studio-rpc-v1", "partial_run", "upload_run", "idle_files"] {
+            if !hello.capabilities.iter().any(|c| c == cap) {
+                hello.capabilities.push(cap.to_string());
+            }
         }
         Ok(())
     }
@@ -1814,14 +1825,25 @@ fn is_image_path(path: &std::path::Path) -> bool {
 /// kiosk SPA resolves relative component image paths (radio/checklist
 /// option `image`, image component value) to `/files/<rel>` URLs — the
 /// same strings the TUI's `ImageCache` resolves against the same root.
-/// 404 on everything else: no run attached, non-image extension, or a
-/// path that escapes the root.
+/// 404 on everything else: no root to serve from, non-image extension,
+/// or a path that escapes the root.
 async fn files_handler(
     State(state): State<AppState>,
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Response {
-    let Some(root) = state.procedure_dir.lock().await.clone() else {
-        return StatusCode::NOT_FOUND.into_response();
+    // Between runs a studio session still resolves against its project
+    // root — same directory a studio run serves, since the procedure
+    // YAML sits at the root — so the Builder and Sequence previews can
+    // show component images without starting a run. The root is already
+    // exposed read/write through `/studio/rpc`, so serving images from
+    // it widens nothing. Kiosk/station daemons keep the 404.
+    let run_dir = state.procedure_dir.lock().await.clone();
+    let root = match run_dir {
+        Some(dir) => dir,
+        None => match state.studio.lock().await.as_ref().map(|s| s.root.clone()) {
+            Some(root) => root,
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
     };
     // Same clamp as `read_dev_file`: keep only Normal components so a
     // `..%2F` escape collapses back inside the root.
@@ -1976,6 +1998,7 @@ mod tests {
                 procedure_id: None,
                 reuse_unit: None,
                 operated_by: None,
+                only_phase: None,
             },
             StationCommand::ConfigUpdate {
                 key: "kiosk_ui".into(),

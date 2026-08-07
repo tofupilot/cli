@@ -37,10 +37,16 @@ impl Orchestrator {
             if needs_station_plugs {
                 let mut acquired = self.station_plugs_acquired.write().await;
                 if !*acquired {
+                    // Narrowed to the run's required set like the two
+                    // branches below: on a partial run only station plugs
+                    // in the introspected union are borrowed, so the host
+                    // never spins up instruments the selected phases can't
+                    // touch (and never emits plug_status for plugs absent
+                    // from the execution plan).
                     let station_plugs: Vec<_> = procedure_def
                         .plugs
                         .iter()
-                        .filter(|p| p.scope_is_station())
+                        .filter(|p| p.scope_is_station() && job.required_plugs.contains(&p.key))
                         .collect();
 
                     if !station_plugs.is_empty() {
@@ -95,14 +101,15 @@ impl Orchestrator {
                         }
 
                         self.emit_plug_scope_event("pass").await;
+
+                        // Latch only after a real acquisition. The filtered
+                        // set is per-run constant (`required_plugs` carries
+                        // the same union on every job), so an empty set
+                        // stays empty all run and re-entering here is a
+                        // cheap no-op — while latching on empty would skip
+                        // acquisition outright if that invariant ever broke.
+                        *acquired = true;
                     }
-                    // Deliberately OUTSIDE the is_empty guard: with zero
-                    // station plugs there is nothing to acquire, ever,
-                    // so latching avoids re-entering per job. If
-                    // `station_plugs` ever becomes a per-job filtered
-                    // subset, this must move inside the guard or later
-                    // jobs' plugs are silently skipped.
-                    *acquired = true;
                 }
             }
         }
@@ -113,44 +120,80 @@ impl Orchestrator {
         // scope when no host is present (the ResourceManager's scope map
         // holds the downgraded value, so create_procedure_plugs will
         // pick them up here).
+        //
+        // Only the plugs the job's run actually requires are started:
+        // `required_plugs` is every declared plug on a full run and the
+        // introspected union on a partial run, so this is what keeps a
+        // partial run from starting instruments its phases never touch.
         let hostless = self.station_plug_host.is_none();
-        let needs_procedure_plugs = matches!(job.stage_scope, StageScope::SetupAll)
-            || procedure_def.plugs.iter().any(|p| {
+        let wanted_procedure_keys: Vec<String> = procedure_def
+            .plugs
+            .iter()
+            .filter(|p| {
                 (p.scope_is_execution() || (hostless && p.scope_is_station()))
                     && job.required_plugs.contains(&p.key)
-            });
+            })
+            .map(|p| p.key.clone())
+            .collect();
+
+        let needs_procedure_plugs = matches!(job.stage_scope, StageScope::SetupAll)
+            || !wanted_procedure_keys.is_empty();
 
         if needs_procedure_plugs {
-            let mut procedure_plugs_created = self.procedure_plugs_created.write().await;
-            if !*procedure_plugs_created {
+            let mut created = self.procedure_plugs_created.write().await;
+            // `None` until the first job passes this gate: the scope-batch
+            // progress event pair fires exactly once per run, even when the
+            // first batch has nothing to create (submit_procedure reserved
+            // exactly one pair for it).
+            let first_batch = created.is_none();
+            let created_keys = created.get_or_insert_with(std::collections::HashSet::new);
+            let missing: Vec<String> = wanted_procedure_keys
+                .iter()
+                .filter(|k| !created_keys.contains(*k))
+                .cloned()
+                .collect();
+
+            if first_batch || !missing.is_empty() {
                 log::info!("Creating all-slots plugs before phase '{}'", job.phase_name);
 
-                // First: Clean up any manually-started plugs to prevent conflicts
                 let resource_manager = self.resource_manager.write().await;
-                let teardown_result = resource_manager.teardown_manual_plugs(&self.event_sink).await;
 
-                if let Err(e) = teardown_result {
-                    log::warn!("Warning during manual plug teardown: {}", e);
-                    // Continue anyway - not fatal
+                if first_batch {
+                    // Clean up any manually-started plugs to prevent conflicts
+                    let teardown_result =
+                        resource_manager.teardown_manual_plugs(&self.event_sink).await;
+
+                    if let Err(e) = teardown_result {
+                        log::warn!("Warning during manual plug teardown: {}", e);
+                        // Continue anyway - not fatal
+                    }
+
+                    self.emit_plug_scope_event("running").await;
                 }
 
-                self.emit_plug_scope_event("running").await;
-
-                let all_plug_configs = self.get_all_plug_configs(procedure_def);
+                let plug_configs: HashMap<String, serde_json::Value> = self
+                    .get_all_plug_configs(procedure_def)
+                    .into_iter()
+                    .filter(|(key, _)| missing.contains(key))
+                    .collect();
                 let plug_display_names = self.get_plug_display_names(procedure_def);
                 let plug_result = resource_manager
-                    .create_procedure_plugs(&all_plug_configs, &plug_display_names, &self.event_sink)
+                    .create_procedure_plugs(&plug_configs, &plug_display_names, &self.event_sink)
                     .await;
 
                 match plug_result {
                     Ok(_) => {
                         log::info!("Successfully created all-slots plugs");
-                        self.emit_plug_scope_event("pass").await;
-                        *procedure_plugs_created = true;
+                        if first_batch {
+                            self.emit_plug_scope_event("pass").await;
+                        }
+                        created_keys.extend(missing);
                     }
                     Err(e) => {
                         let error_msg = format!("Failed to create all-slots plugs: {}", e);
-                        self.emit_plug_scope_event("error").await;
+                        if first_batch {
+                            self.emit_plug_scope_event("error").await;
+                        }
                         return Err(error_msg);
                     }
                 }
@@ -158,31 +201,57 @@ impl Orchestrator {
         }
 
         // Create each-slot plugs if not yet created for this slot
-        // Triggered by: SetupEach phase, or any slot-scoped phase that requires a scope:each plug
+        // Triggered by: SetupEach phase, or any slot-scoped phase that
+        // requires a scope:each plug. Narrowed to the job's required set
+        // the same way as the execution-scope branch above; tracking is
+        // genuinely per-slot (a multi-slot procedure with no `unit:`
+        // block runs on all its slots).
+        let wanted_slot_keys: Vec<String> = procedure_def
+            .plugs
+            .iter()
+            .filter(|p| {
+                matches!(p.scope, crate::procedure::schema::Scope::Slot)
+                    && job.required_plugs.contains(&p.key)
+            })
+            .map(|p| p.key.clone())
+            .collect();
+
         let needs_slot_plugs = job.slot_id.is_some()
-            && (matches!(job.stage_scope, StageScope::SetupEach)
-                || procedure_def.plugs.iter().any(|p| {
-                    matches!(p.scope, crate::procedure::schema::Scope::Slot)
-                        && job.required_plugs.contains(&p.key)
-                }));
+            && (matches!(job.stage_scope, StageScope::SetupEach) || !wanted_slot_keys.is_empty());
 
         if needs_slot_plugs {
             if let Some(ref slot_id) = job.slot_id {
                 let mut created_slots = self.slot_plugs_created.write().await;
-                if !created_slots.contains(slot_id) {
+                // Entry presence marks the slot's batch event pair as
+                // fired, mirroring the execution-scope gate above.
+                let first_batch = !created_slots.contains_key(slot_id);
+                let created_keys = created_slots.entry(slot_id.clone()).or_default();
+                let missing: Vec<String> = wanted_slot_keys
+                    .iter()
+                    .filter(|k| !created_keys.contains(*k))
+                    .cloned()
+                    .collect();
+
+                if first_batch || !missing.is_empty() {
                     log::info!(
                         "Creating each-slot plugs for {} before phase '{}'",
                         slot_id,
                         job.phase_name
                     );
 
-                    self.emit_plug_scope_event("running").await;
+                    if first_batch {
+                        self.emit_plug_scope_event("running").await;
+                    }
 
                     let resource_manager = self.resource_manager.write().await;
-                    let all_plug_configs = self.get_all_plug_configs(procedure_def);
+                    let plug_configs: HashMap<String, serde_json::Value> = self
+                        .get_all_plug_configs(procedure_def)
+                        .into_iter()
+                        .filter(|(key, _)| missing.contains(key))
+                        .collect();
                     let plug_display_names = self.get_plug_display_names(procedure_def);
                     let plug_result = resource_manager
-                        .create_slot_plugs(slot_id.clone(), &all_plug_configs, &plug_display_names, &self.event_sink)
+                        .create_slot_plugs(slot_id.clone(), &plug_configs, &plug_display_names, &self.event_sink)
                         .await;
 
                     match plug_result {
@@ -191,13 +260,17 @@ impl Orchestrator {
                                 "Successfully created each-slot plugs for {}",
                                 slot_id
                             );
-                            self.emit_plug_scope_event("pass").await;
-                            created_slots.insert(slot_id.clone());
+                            if first_batch {
+                                self.emit_plug_scope_event("pass").await;
+                            }
+                            created_keys.extend(missing);
                         }
                         Err(e) => {
                             let error_msg =
                                 format!("Failed to create each-slot plugs for {}: {}", slot_id, e);
-                            self.emit_plug_scope_event("error").await;
+                            if first_batch {
+                                self.emit_plug_scope_event("error").await;
+                            }
                             return Err(error_msg);
                         }
                     }

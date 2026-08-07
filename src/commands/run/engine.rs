@@ -169,6 +169,10 @@ struct CliEventSink {
     /// UIs can resolve relative component image paths against the
     /// deployment's stored files.
     deployment_id: Option<String>,
+    /// Partial run: the main phase this run was narrowed to. Stamped
+    /// on `RunStarted` so "Run again" can repeat the partial run
+    /// instead of silently escalating to the whole procedure.
+    only_phase: Option<String>,
     /// Flipped on the first post-submit sign of life from the engine
     /// (job dispatched, plug status, UI request, log line…). The
     /// dispatch-stall watchdog in `run_yaml_procedure` races this flag:
@@ -188,6 +192,7 @@ impl CliEventSink {
         procedure_id: String,
         execution_id: String,
         deployment_id: Option<String>,
+        only_phase: Option<String>,
     ) -> Self {
         let router = EventRouter::new(tx.clone(), agent.clone(), execution_id.clone());
         Self {
@@ -199,6 +204,7 @@ impl CliEventSink {
             procedure_id,
             execution_id,
             deployment_id,
+            only_phase,
             data: Arc::new(Mutex::new(RunData {
                 phases: Vec::new(),
                 run_outcome: None,
@@ -291,6 +297,7 @@ impl EventSink for CliEventSink {
                     run_id: None,
                     deployment_id: self.deployment_id.clone(),
                     unit,
+                    only_phase: self.only_phase.clone(),
                 });
                 if let Some(ref agent) = self.agent {
                     let payload_phases: Vec<PhasePlanPayload> = phases
@@ -1493,15 +1500,17 @@ pub async fn run_yaml_procedure(
     // `force_kill_immediate`). The watch lets the same receiver
     // observe escalation from Stop → Kill without a second oneshot.
     cancel_rx: super::cancel::Receiver,
-    // Debug run: single worker, phase timeouts disabled, TP_DEBUG set on
-    // the worker so tp_worker.py starts a debugpy listener.
-    debug: super::DebugOptions,
-    // Station-process-scoped owner of `scope: station` plugs (station
-    // mode only). `None` degrades station plugs to execution scope.
-    station_plug_host: Option<
-        std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>,
-    >,
+    // Per-run options umbrella (debug, station plug host, partial-run
+    // phase selection) — passed wholesale so new run-scoped flags don't
+    // keep growing this signature.
+    run_opts: super::RunOptions,
 ) -> (i32, Option<QueuedRun>) {
+    let super::RunOptions {
+        debug,
+        station_plug_host,
+        only_phase,
+        ..
+    } = run_opts;
     let procedure_def = match load_procedure_definition(procedure_yaml) {
         Ok(def) => def,
         Err(e) => {
@@ -1582,13 +1591,23 @@ pub async fn run_yaml_procedure(
     // Fall back to a default config that prompts for the two API-
     // required fields so simple "hello world" templates that omit
     // `unit:` still upload correctly.
-    let unit_cfg = procedure_def.unit.clone().or_else(|| {
-        Some(execution_engine::procedure::UnitConfig {
-            serial_number: Some(execution_engine::procedure::UnitFieldConfig::default()),
-            part_number: Some(execution_engine::procedure::UnitFieldConfig::default()),
-            ..Default::default()
-        })
-    });
+    // Same rationale applied per field: a `unit:` block that declares
+    // only one of the two (e.g. `serial_number:` alone) used to make
+    // the identify host hard-error the whole run with "invalid unit
+    // config: unit config missing part_number" — the loader does NOT
+    // enforce presence. Defaulting the missing field prompts for it
+    // instead, exactly like the whole-block fallback.
+    let unit_cfg = procedure_def
+        .unit
+        .clone()
+        .or_else(|| Some(execution_engine::procedure::UnitConfig::default()))
+        .map(|mut cfg| {
+            cfg.serial_number
+                .get_or_insert_with(execution_engine::procedure::UnitFieldConfig::default);
+            cfg.part_number
+                .get_or_insert_with(execution_engine::procedure::UnitFieldConfig::default);
+            cfg
+        });
 
     // Scratch dir the engine writes attachment bytes into so every
     // `AttachmentAdded` carries an on-disk path the CLI can upload then
@@ -1638,11 +1657,27 @@ pub async fn run_yaml_procedure(
         procedure_id.to_string(),
         execution_id.to_string(),
         super::deployment_id::lookup_deployment_id(procedure_id),
+        only_phase.clone(),
     );
     let run_data = sink.data.clone();
     let engine_progressed = sink.progressed.clone();
     let event_sink: Arc<dyn EventSink> = Arc::new(sink);
     orchestrator.set_event_sink(event_sink.clone());
+
+    // Stamp partial runs so an upload stays identifiable in the
+    // dashboard — a partial PASS covers only the phases that ran, not
+    // the whole procedure. `build_run_request` folds this into
+    // `runs.create`'s `metadata`; no API or SDK change.
+    if let Some(phase_key) = &only_phase {
+        run_data.lock().await.run_metadata_sources.push((
+            "studio_partial_run".to_string(),
+            std::iter::once((
+                "studio_partial_run".to_string(),
+                serde_json::Value::String(phase_key.clone()),
+            ))
+            .collect(),
+        ));
+    }
 
     if let Err(e) = orchestrator.initialize().await {
         emit_crash(
@@ -1803,7 +1838,7 @@ pub async fn run_yaml_procedure(
         };
 
     if let Err(e) = orchestrator
-        .submit_procedure(slots, strategy, unit_infos)
+        .submit_procedure(slots, strategy, unit_infos, only_phase.as_deref())
         .await
     {
         emit_crash(

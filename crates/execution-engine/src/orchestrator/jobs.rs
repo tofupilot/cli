@@ -43,6 +43,11 @@ pub(super) fn filter_jobs_by_slot_and_type(
 }
 
 /// Helper to create a job with the appropriate runtime type
+///
+/// `partial_required_plugs` is `Some` on a partial run: the introspected
+/// union of plug keys over the whole partial phase set, assigned to every
+/// job so the creation gates start exactly that subset. `None` (full run)
+/// keeps today's behaviour: every declared plug.
 pub(super) fn create_job_for_phase(
     phase: &PhaseDefinition,
     slot_id: Option<String>,
@@ -51,6 +56,7 @@ pub(super) fn create_job_for_phase(
     job_map: &HashMap<String, Uuid>,
     procedure_dir: &std::path::Path,
     procedure: &ProcedureDefinition,
+    partial_required_plugs: Option<&[String]>,
 ) -> Job {
     // Determine runtime type from phase configuration
     let runtime_type = if phase.python.is_some() {
@@ -83,12 +89,16 @@ pub(super) fn create_job_for_phase(
         (None, None)
     };
 
-    // Collect all available plug keys from procedure definition
-    let all_available_plugs: Vec<String> = procedure
-        .get_all_plugs_with_scope()
-        .iter()
-        .map(|(_, plug)| plug.key.clone())
-        .collect();
+    // Collect the run's plug keys: the introspected union on a partial
+    // run, every declared plug on a full run.
+    let all_available_plugs: Vec<String> = match partial_required_plugs {
+        Some(subset) => subset.to_vec(),
+        None => procedure
+            .get_all_plugs_with_scope()
+            .iter()
+            .map(|(_, plug)| plug.key.clone())
+            .collect(),
+    };
 
     log::debug!(
         "Creating job for phase '{}' with {} available plugs: {:?}",

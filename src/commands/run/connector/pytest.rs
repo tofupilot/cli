@@ -499,6 +499,8 @@ pub async fn run_pytest(
                             &pid,
                         ),
                         unit: resolved_wire.as_ref().map(unit_info_to_wire),
+                        // Connector frameworks never run partially.
+                        only_phase: None,
                     });
                     if let Some(ref agent) = agent_for_task {
                         let phases: Vec<super::super::agent_proto::PhasePlanPayload> = phase_keys

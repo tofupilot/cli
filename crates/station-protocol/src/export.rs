@@ -44,8 +44,13 @@ fn main() {
         specta::ts::export::<StudioDiagnosticSeverity>(&config).unwrap(),
         specta::ts::export::<StudioErrorCode>(&config).unwrap(),
         specta::ts::export::<StudioSequence>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceUnit>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceUnitField>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceSubUnit>(&config).unwrap(),
         specta::ts::export::<StudioSequencePlug>(&config).unwrap(),
         specta::ts::export::<StudioSequencePhase>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceRetry>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceUi>(&config).unwrap(),
         specta::ts::export::<StudioSequenceMeasurement>(&config).unwrap(),
         specta::ts::export::<StudioSequenceValidator>(&config).unwrap(),
     ] {

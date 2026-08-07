@@ -76,16 +76,31 @@ impl Orchestrator {
         }
     }
 
+    /// `partial_main_set` / `partial_plugs`: a partial run's filters
+    /// (Some only for partial runs). The plan must announce exactly
+    /// what will execute — a phase listed here but never given a job
+    /// gets "flushed" with the run outcome by UI reducers at
+    /// run_complete, painting phases that never ran as PASS; a plug
+    /// listed but never started sits "pending" forever.
     pub(super) async fn emit_execution_plan(
         &self,
         procedure: &ProcedureDefinition,
         state: &OrchestratorState,
         slots: &[String],
+        partial_main_set: Option<&std::collections::HashSet<String>>,
+        partial_plugs: Option<&[String]>,
     ) {
         let mut phases = Vec::new();
         for (stage_scope, phase) in procedure.get_all_phases_with_stage_scope() {
             if phase.should_skip() {
                 continue;
+            }
+            if let Some(set) = partial_main_set {
+                if matches!(stage_scope, crate::procedure::schema::StageScope::Main)
+                    && !set.contains(&phase.key)
+                {
+                    continue;
+                }
             }
             phases.push(PlannedPhase {
                 phase_key: phase.key.clone(),
@@ -101,6 +116,11 @@ impl Orchestrator {
         let (plugs_all, plugs_each): (Vec<_>, Vec<_>) = procedure
             .plugs
             .iter()
+            .filter(|p| {
+                partial_plugs
+                    .map(|keys| keys.contains(&p.key))
+                    .unwrap_or(true)
+            })
             .partition(|p| p.scope != crate::procedure::schema::Scope::Slot);
 
         // Report the EFFECTIVE scope, not the declared one: without a

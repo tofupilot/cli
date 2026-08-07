@@ -382,18 +382,34 @@ async fn provision(
 
 /// Detect missing venv and provision one if the operator agrees.
 ///
+/// How a missing venv may be provisioned for a local-path run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootstrapPolicy {
+    /// `--no-bootstrap`: never provision; error with the manual hint.
+    Disabled,
+    /// Interactive `tofupilot run`: ask before a first-time bootstrap
+    /// (auto-proceeds when stdin is not a tty — daemons have nobody
+    /// to answer).
+    Prompt,
+    /// Dispatcher-driven runs (studio, station): the operator drives
+    /// from a browser and is not watching the terminal, so a tty
+    /// prompt would park the run invisibly. Provision without asking.
+    Auto,
+}
+
 /// Returns `Ok(EnsuredVenv)` when a usable venv is in place at
 /// `<project>/venv` — either because it already existed and its stamp
 /// matched, or because we just built it. Returns `Err` when the user
 /// declined, the build failed, or bootstrap was disabled by flag.
 ///
-/// `bootstrap_enabled = false` matches the operator passing
+/// `BootstrapPolicy::Disabled` matches the operator passing
 /// `--no-bootstrap`: we fall through with the original error so the
 /// existing `env_error` path surfaces the diagnostic.
 pub async fn ensure_venv(
     project_dir: &Path,
-    bootstrap_enabled: bool,
+    policy: BootstrapPolicy,
 ) -> crate::error::CliResult<EnsuredVenv> {
+    let bootstrap_enabled = policy != BootstrapPolicy::Disabled;
     // Venv lives at `<venv_dir>/venv`. For single-procedure repos
     // `venv_dir == project_dir` and the layout matches station mode's
     // installer (`<package_dir>/venv`). For uv-workspace monorepos
@@ -466,8 +482,12 @@ pub async fn ensure_venv(
 
     // Prompt the operator only on a true first-time bootstrap. A
     // rebuild fires because deps changed under an already-consented
-    // venv — re-asking would be noise.
-    if !rebuilding && !confirm_bootstrap(&venv_dir, &runtime_version) {
+    // venv — re-asking would be noise. Auto-policy runs (studio /
+    // station dispatchers) never prompt at all.
+    if !rebuilding
+        && policy == BootstrapPolicy::Prompt
+        && !confirm_bootstrap(&venv_dir, &runtime_version)
+    {
         return Err(format!(
             "Operator declined to bootstrap venv at {}. \
              Rerun with --no-bootstrap to skip the prompt, \
@@ -701,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_venv_errors_with_no_bootstrap_and_no_venv() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = ensure_venv(tmp.path(), false)
+        let err = ensure_venv(tmp.path(), BootstrapPolicy::Disabled)
             .await
             .unwrap_err()
             .to_string();
@@ -726,7 +746,9 @@ mod tests {
         fs::write(&python, b"").unwrap();
         fs::write(stamp_path(&venv), b"stale-hash-from-an-old-run").unwrap();
 
-        let ensured = ensure_venv(tmp.path(), false).await.unwrap();
+        let ensured = ensure_venv(tmp.path(), BootstrapPolicy::Disabled)
+            .await
+            .unwrap();
         assert_eq!(ensured.python, python);
         // Stamp file untouched — bootstrap-disabled must not rewrite
         // it, or the next run (with bootstrap re-enabled) would skip
@@ -748,7 +770,9 @@ mod tests {
         fs::create_dir_all(python.parent().unwrap()).unwrap();
         fs::write(&python, b"").unwrap();
 
-        let ensured = ensure_venv(tmp.path(), true).await.unwrap();
+        let ensured = ensure_venv(tmp.path(), BootstrapPolicy::Prompt)
+            .await
+            .unwrap();
         assert_eq!(ensured.python, python);
         assert!(stamp_path(&tmp.path().join("venv")).exists());
     }

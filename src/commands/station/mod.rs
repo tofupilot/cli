@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use crate::commands::auth::credentials::Credentials;
 use crate::commands::config;
 use crate::commands::pull::sync::StagedDeployment;
+use crate::commands::run::teardown::{drain_prior_teardowns, park_prior_run};
 use crate::commands::update;
 use crate::http::RequestBuilderExt;
 use crate::log;
@@ -1310,6 +1311,9 @@ async fn handle_command(
             procedure_id,
             reuse_unit,
             operated_by,
+            // Partial runs are a Studio feature; the station operator UI
+            // never sends a phase selection.
+            only_phase: _,
         } => {
             // Detach any in-flight run's teardown so the dispatcher
             // returns to its select! tick without blocking on Python
@@ -1335,33 +1339,13 @@ async fn handle_command(
                 // publisher drain.
                 handle.request_cancel();
                 handle.request_kill();
-                // Reap any finished teardowns before parking a new one
-                // so a hammering operator can't pile up unbounded
-                // tasks. JoinSet's `try_join_next` is non-blocking.
-                while prior_run_teardowns.try_join_next().is_some() {}
                 if let Some(task) = handle.take_task() {
-                    // Wrap in a future that aborts the inner JoinHandle
-                    // if the wrapper itself is cancelled (JoinSet::Drop
-                    // on station_loop exit). Without this, dropping the
-                    // wrapper merely detaches the inner task — Python
-                    // child process keeps running past CLI shutdown.
-                    prior_run_teardowns.spawn(async move {
-                        // RAII: aborts on Drop unless explicitly disarmed.
-                        struct AbortOnDrop(Option<tokio::task::AbortHandle>);
-                        impl Drop for AbortOnDrop {
-                            fn drop(&mut self) {
-                                if let Some(h) = self.0.take() {
-                                    h.abort();
-                                }
-                            }
-                        }
-                        let mut guard = AbortOnDrop(Some(task.abort_handle()));
-                        let _ = task.await;
-                        // Natural completion — disarm so we don't abort
-                        // a JoinHandle that's already finished (no-op
-                        // anyway, but semantically cleaner).
-                        guard.0 = None;
-                    });
+                    // Reap-then-park via the shared helper: the wrapper
+                    // aborts the inner run task if the wrapper itself is
+                    // cancelled (JoinSet::Drop on station_loop exit, the
+                    // drain deadline) — dropping a bare JoinHandle would
+                    // merely detach the Python child.
+                    park_prior_run(prior_run_teardowns, task);
                 }
             }
             // `procedure_id: None` means "rerun the last procedure".
@@ -1441,6 +1425,16 @@ async fn handle_command(
                 handle.request_cancel();
             } else if !json_mode {
                 log::warn("Stop command received with no active run; ignoring.");
+            }
+        }
+        StationCommand::UploadRun { .. } => {
+            // Studio-only command: station runs upload through their own
+            // configured path, and the daemon retains no finished run to
+            // re-publish.
+            if !json_mode {
+                log::warn(
+                    "UploadRun received but only Studio sessions retain runs for explicit upload.",
+                );
             }
         }
         StationCommand::SkipPhase { .. } | StationCommand::RetryPhase { .. } => {
@@ -1597,62 +1591,6 @@ async fn auth_probe(creds: &Credentials) -> AuthProbeOutcome {
     }
 }
 
-/// Await parked prior-run teardowns, bounded. The parked runs are the
-/// only borrowers of the station plug host besides `active_run`, so
-/// anything about to mutate the host's held instances (a new run's
-/// acquire, host shutdown) must drain them first or an instrument can
-/// be torn down mid-RPC. On timeout the stragglers are force-aborted —
-/// their `AbortOnDrop` wrapper kills the inner run task — and we log
-/// loudly rather than wait forever on a wedged Python teardown.
-async fn drain_prior_teardowns(
-    teardowns: &mut tokio::task::JoinSet<()>,
-    timeout_secs: u64,
-    json_mode: bool,
-) {
-    if teardowns.is_empty() {
-        return;
-    }
-    if !json_mode {
-        log::info(&format!(
-            "Waiting for {} prior run(s) to finish teardown...",
-            teardowns.len()
-        ));
-    }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    while !teardowns.is_empty() {
-        match tokio::time::timeout_at(deadline, teardowns.join_next()).await {
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => {
-                if !json_mode {
-                    log::warn(&format!(
-                        "{} prior-run teardown(s) still running after {}s; aborting them",
-                        teardowns.len(),
-                        timeout_secs
-                    ));
-                }
-                teardowns.abort_all();
-                // Cancelled tasks resolve at their next await point, so
-                // this join is normally instant — but keep it bounded
-                // too, or a task wedged in a compute loop between
-                // awaits would violate this function's bounded
-                // contract.
-                let reap_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !teardowns.is_empty() {
-                    if tokio::time::timeout_at(reap_deadline, teardowns.join_next())
-                        .await
-                        .is_err()
-                    {
-                        teardowns.detach_all();
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-    }
-}
-
 async fn try_start_run(
     procedure_id: Option<&str>,
     reuse_unit: Option<station_protocol::UnitInfo>,
@@ -1734,9 +1672,10 @@ async fn try_start_run(
             operated_by,
             // Station mode runs only manifested deployments; bootstrap
             // is a no-op for those (the path is gated on
-            // `manifest_present == false`). Pass `true` to keep the
-            // signature uniform with standalone runs.
-            true,
+            // `manifest_present == false`). `Auto` keeps the edge case
+            // (manifest-less local dir) from parking a dispatcher-driven
+            // run on a terminal prompt nobody is watching.
+            crate::commands::run::bootstrap::BootstrapPolicy::Auto,
             // Deployments carry their entry point in the manifest.
             None,
         )

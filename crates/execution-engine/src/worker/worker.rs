@@ -221,7 +221,7 @@ impl Worker {
     /// Bundled worker script, embedded at compile time.
     const WORKER_SCRIPT: &'static str = include_str!("../../python/tp_worker.py");
 
-    fn find_worker_script_cli() -> Result<PathBuf, String> {
+    pub(crate) fn find_worker_script_cli() -> Result<PathBuf, String> {
         // First check next to the executable (Studio/packaged layout).
         if let Some(p) = super::embedded_script::next_to_exe("tp_worker.py") {
             return Ok(p);

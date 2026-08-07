@@ -146,6 +146,12 @@ pub enum StationEvent {
         /// begins).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unit: Option<UnitInfo>,
+        /// Partial run: the main phase this run was narrowed to (the
+        /// Builder's play button). Carried on the event so "Run again"
+        /// can repeat the same partial run instead of silently
+        /// escalating to the whole procedure. None for full runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only_phase: Option<String>,
     },
     /// Phase execution began.
     PhaseStarted {
@@ -676,6 +682,25 @@ pub enum StationCommand {
         /// browser session) or from the CLI directly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operated_by: Option<String>,
+        /// Partial run: execute only this main phase — plus its
+        /// transitive `depends_on` closure and every setup/teardown
+        /// phase. Sent by the Studio Builder's per-phase play button.
+        /// None runs the whole procedure. Older daemons ignore the
+        /// field, which is why the web gates the button on the
+        /// `partial_run` hello capability.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only_phase: Option<String>,
+    },
+    /// Upload a finished Studio run to a dashboard procedure the user
+    /// picked. Studio runs execute under a local marker id and never
+    /// auto-upload; the daemon retains the most recent finished run and
+    /// this command publishes it. `execution_id` identifies that run;
+    /// `procedure_id` is the destination procedure's UUID chosen in the
+    /// web UI (there is no way to derive it from a local folder).
+    /// Progress comes back as the standard `RunUpload*` events.
+    UploadRun {
+        execution_id: String,
+        procedure_id: String,
     },
     UiResponse {
         request_id: String,
@@ -913,15 +938,14 @@ pub struct StudioSequence {
     pub version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<StudioSequenceUnit>,
     // Lists are NEVER skipped when empty: the generated TS declares
     // them non-optional, and omitting them on the wire made the UI
     // crash on `undefined.map`. Bytes saved are not worth a lying type.
-    #[serde(default)]
     pub plugs: Vec<StudioSequencePlug>,
-    #[serde(default)]
     pub setup: Vec<StudioSequencePhase>,
     pub main: Vec<StudioSequencePhase>,
-    #[serde(default)]
     pub teardown: Vec<StudioSequencePhase>,
 }
 
@@ -930,6 +954,54 @@ pub struct StudioSequencePlug {
     pub key: String,
     pub name: String,
     pub python: String,
+}
+
+/// Unit identification projection (`unit:` at the procedure root):
+/// auto-identify, the four operator-entered identity fields, and the
+/// sub-unit list. Metadata stays in YAML.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceUnit {
+    pub auto_identify: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<StudioSequenceUnitField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_number: Option<StudioSequenceUnitField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_number: Option<StudioSequenceUnitField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_number: Option<StudioSequenceUnitField>,
+    pub sub_units: Vec<StudioSequenceSubUnit>,
+    /// The canonical identify-unit prompt, exactly as the engine's
+    /// `identify_unit::build_components` will pose it at run time
+    /// (serial + part always, then revision/batch/sub-units/metadata
+    /// as configured). Lets Studio preview the real station screen
+    /// without re-deriving the shape from the field configs above.
+    /// `serde(default)` so payloads from older daemons still parse.
+    #[serde(default)]
+    pub components: Vec<UiComponent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceSubUnit {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<StudioSequenceUnitField>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceUnitField {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Type, Clone)]
@@ -941,8 +1013,43 @@ pub struct StudioSequencePhase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub enabled: bool,
-    #[serde(default)]
     pub measurements: Vec<StudioSequenceMeasurement>,
+    pub depends_on: Vec<String>,
+    /// Count of operator UI components (kept for the tree badges; the
+    /// editable projection is `ui`).
+    pub ui_components: u32,
+    /// Phase runs an external executable (v2's shell equivalent).
+    pub executable: bool,
+    /// Timeout in ms. u32 because the TS codegen forbids BigInt-mapped
+    /// integers; the schema caps timeouts at 24h anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<StudioSequenceRetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<StudioSequenceUi>,
+}
+
+/// Retry policy projection (delay in ms, same u32 caveat as timeout).
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceRetry {
+    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<u32>,
+}
+
+/// Operator UI projection. Components are the full runtime
+/// `UiComponent` — the same type the operator UI renders — so the
+/// Builder can edit every field the YAML declares (options, ranges,
+/// image sizing, text styling) instead of a trimmed subset. `value` is
+/// always absent here: nothing is running.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceUi {
+    /// Explicit override; when absent the engine auto-detects from the
+    /// component types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_input: Option<bool>,
+    pub components: Vec<UiComponent>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Type, Clone)]
@@ -951,7 +1058,6 @@ pub struct StudioSequenceMeasurement {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
-    #[serde(default)]
     pub validators: Vec<StudioSequenceValidator>,
 }
 

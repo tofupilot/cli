@@ -120,8 +120,15 @@ pub struct Orchestrator {
     pub(super) run_id: String,
     pub execution_id: String,
     pub(super) procedure_definition: ProcedureDefinition,
-    pub(super) procedure_plugs_created: Arc<RwLock<bool>>,
-    pub(super) slot_plugs_created: Arc<RwLock<HashSet<String>>>,
+    /// Execution-scope plug keys already created this run. `None` until
+    /// the first job passes the creation gate — the scope-batch progress
+    /// event pair must fire exactly once per run, even when the gate has
+    /// nothing to create (submit_procedure reserves exactly one pair).
+    pub(super) procedure_plugs_created: Arc<RwLock<Option<HashSet<String>>>>,
+    /// Slot id → slot-scope plug keys already created for that slot.
+    /// Entry presence marks the slot's batch event pair as fired (same
+    /// accounting as above).
+    pub(super) slot_plugs_created: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     pub(super) event_sink: Arc<dyn crate::EventSink>,
     pub(super) start_time: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) end_time: Option<chrono::DateTime<chrono::Utc>>,
@@ -212,8 +219,8 @@ impl Orchestrator {
             run_id,
             execution_id,
             procedure_definition,
-            procedure_plugs_created: Arc::new(RwLock::new(false)),
-            slot_plugs_created: Arc::new(RwLock::new(HashSet::new())),
+            procedure_plugs_created: Arc::new(RwLock::new(None)),
+            slot_plugs_created: Arc::new(RwLock::new(HashMap::new())),
             event_sink: Arc::new(crate::NullSink),
             start_time: None,
             end_time: None,

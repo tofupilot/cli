@@ -275,6 +275,7 @@ fn station_command_kind(cmd: &StationCommand) -> &'static str {
         StationCommand::ConfigUpdate { .. } => "ConfigUpdate",
         StationCommand::Pull {} => "Pull",
         StationCommand::Run { .. } => "Run",
+        StationCommand::UploadRun { .. } => "UploadRun",
         StationCommand::UiResponse { .. } => "UiResponse",
         StationCommand::Kill { .. } => "Kill",
         StationCommand::Stop { .. } => "Stop",

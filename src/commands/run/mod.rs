@@ -21,6 +21,7 @@ pub(crate) mod procedure_version;
 pub(crate) mod python;
 pub(crate) mod queue;
 pub(crate) mod run_log;
+pub(crate) mod teardown;
 pub(crate) mod time_fmt;
 mod tui;
 pub(crate) mod ui_response;
@@ -166,7 +167,21 @@ pub struct RunOptions {
     /// `None` everywhere else (station plugs then degrade to execution scope).
     pub station_plug_host:
         Option<std::sync::Arc<execution_engine::plugs::station_host::StationPlugHost>>,
+    /// Partial run: only this main phase (plus its transitive
+    /// `depends_on` closure and every setup/teardown phase). Set by the
+    /// studio dispatcher for the Builder's per-phase play button; `None`
+    /// runs the whole procedure. Only the YAML engine path honors it.
+    pub only_phase: Option<String>,
+    /// Where to park the finished run when `upload` is off, so an
+    /// explicit `StationCommand::UploadRun` can publish it later. Set by
+    /// the studio dispatcher; `None` keeps today's behaviour (the queued
+    /// request drops at scope end). Only the most recent run is kept.
+    pub retain_queued_run: Option<RetainedRun>,
 }
+
+/// Most recent finished run retained for a later explicit upload
+/// (Studio's post-run Upload button), keyed by execution id.
+pub type RetainedRun = std::sync::Arc<tokio::sync::Mutex<Option<(String, queue::QueuedRun)>>>;
 
 /// Source of the procedure to run.
 #[derive(Clone, Debug)]
@@ -400,7 +415,7 @@ fn resolve_entry_file(
 
 async fn prepare_run(
     deployment_dir: &Path,
-    bootstrap_enabled: bool,
+    bootstrap: bootstrap::BootstrapPolicy,
     // Explicit file from the command line (`tofupilot run ./my-test.yml`,
     // `tofupilot run ./stage1_entry.py`). Wins over on-disk detection the
     // same way a manifest `entry_point` does: YAML → the procedure file,
@@ -437,7 +452,7 @@ async fn prepare_run(
     let python_path = if manifest_present {
         python::deployment_python(&package_dir)
     } else {
-        bootstrap::ensure_venv(&package_dir, bootstrap_enabled)
+        bootstrap::ensure_venv(&package_dir, bootstrap)
             .await
             .map(|e| e.python)
     }
@@ -615,11 +630,13 @@ pub async fn start(
     // run was triggered from the web operator UI; None for kiosk and
     // CLI-driven runs.
     operated_by: Option<String>,
-    // Whether local-path runs may auto-provision a missing venv via
-    // `bootstrap::ensure_venv`. Station-mode runs (manifest-present
-    // deployments) ignore this flag; their venvs are owned by the
-    // deployer's installer. False corresponds to `--no-bootstrap`.
-    bootstrap_enabled: bool,
+    // Whether (and how) local-path runs may auto-provision a missing
+    // venv via `bootstrap::ensure_venv`. Station-mode runs
+    // (manifest-present deployments) ignore this; their venvs are owned
+    // by the deployer's installer. `Disabled` corresponds to
+    // `--no-bootstrap`; `Auto` is for dispatcher-driven runs whose
+    // operator is not watching the terminal.
+    bootstrap: bootstrap::BootstrapPolicy,
     // Explicit procedure or entry file from the command line; None for
     // directory runs and deployments (the manifest covers those).
     entry_hint: Option<PathBuf>,
@@ -655,8 +672,7 @@ pub async fn start(
     // entry file, and Python subprocess cwd all live there. For
     // single-package bundles `root_directory` is null and the
     // package dir collapses to the deployment root.
-    let prepared = match prepare_run(&procedure_dir, bootstrap_enabled, entry_hint.as_deref()).await
-    {
+    let prepared = match prepare_run(&procedure_dir, bootstrap, entry_hint.as_deref()).await {
         Ok(p) => p,
         Err(fail) => {
             crate::log::error(&fail.message);
@@ -1379,7 +1395,7 @@ pub async fn run_cmd(
     run_opts: RunOptions,
     tui_override: Option<bool>,
     kiosk_override: Option<bool>,
-    bootstrap_enabled: bool,
+    bootstrap: bootstrap::BootstrapPolicy,
 ) -> i32 {
     let resolved = match resolve_source(source, json_mode) {
         Ok(r) => r,
@@ -1418,7 +1434,7 @@ pub async fn run_cmd(
         // Standalone CLI runs are unattributed; only web-mode operator
         // UI runs forward an `operated_by` email.
         None,
-        bootstrap_enabled,
+        bootstrap,
         resolved.entry_hint,
     )
     .await;
@@ -1803,6 +1819,7 @@ async fn run_test(
             // fallback.
             let agent_for_upload = agent.clone();
             let bus_for_upload = event_tx.clone();
+            let retain_slot = run_opts.retain_queued_run.clone();
             let (exit_code, queued_run) = engine::run_yaml_procedure(
                 procedure_yaml,
                 package_dir,
@@ -1817,8 +1834,7 @@ async fn run_test(
                 reuse_unit,
                 operated_by,
                 cancel_rx,
-                debug.clone(),
-                run_opts.station_plug_host.clone(),
+                run_opts,
             )
             .await;
 
@@ -1833,6 +1849,10 @@ async fn run_test(
                         Some(bus_for_upload),
                     );
                 }
+            } else if let (Some(slot), Some(queued)) = (retain_slot, queued_run) {
+                // Studio: park the finished run so an explicit UploadRun
+                // command can publish it later. Most recent run wins.
+                *slot.lock().await = Some((execution_id.to_string(), queued));
             }
 
             exit_code
@@ -2071,7 +2091,7 @@ fn resolve_procedure_id(procedure_id_arg: Option<&str>, json_mode: bool) -> Resu
         .0)
 }
 
-fn spawn_upload(
+pub(crate) fn spawn_upload(
     creds: &Credentials,
     procedure_id: &str,
     mut queued: queue::QueuedRun,
@@ -2219,7 +2239,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(&package);
         let expected_python = touch_venv(&package);
 
-        let prepared = prepare_run(deployment, false, None)
+        let prepared = prepare_run(deployment, bootstrap::BootstrapPolicy::Disabled, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.package_dir, package);
@@ -2236,7 +2256,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(deployment);
         let expected_python = touch_venv(deployment);
 
-        let prepared = prepare_run(deployment, false, None)
+        let prepared = prepare_run(deployment, bootstrap::BootstrapPolicy::Disabled, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.package_dir, deployment);
@@ -2256,7 +2276,7 @@ mod prepare_run_tests {
         // Pytest depending on imports). All three need a venv.
         fs::write(deployment.join("main.py"), b"print('hi')\n").unwrap();
 
-        let err = prepare_run(deployment, false, None)
+        let err = prepare_run(deployment, bootstrap::BootstrapPolicy::Disabled, None)
             .await
             .expect_err("should fail without venv");
         assert_eq!(err.kind, "env_error");
@@ -2272,7 +2292,7 @@ mod prepare_run_tests {
         // main.py forces Framework::Plain, which requires a Python env.
         fs::write(tmp.path().join("main.py"), b"print('hi')\n").unwrap();
 
-        let err = prepare_run(tmp.path(), false, None)
+        let err = prepare_run(tmp.path(), bootstrap::BootstrapPolicy::Disabled, None)
             .await
             .expect_err("should fail without venv when bootstrap disabled");
         assert_eq!(err.kind, "env_error");
@@ -2294,7 +2314,7 @@ mod prepare_run_tests {
         touch_procedure_yaml(project);
         let python = touch_venv(project);
 
-        let prepared = prepare_run(project, true, None)
+        let prepared = prepare_run(project, bootstrap::BootstrapPolicy::Prompt, None)
             .await
             .expect("prepare_run should succeed");
         assert_eq!(prepared.python_path, python);

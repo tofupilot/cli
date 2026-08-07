@@ -453,6 +453,11 @@ async fn main() {
                 // One-shot runs have no station process to own plugs
                 // across runs; station plugs degrade to execution scope.
                 station_plug_host: None,
+                // Partial runs and post-run retention are Studio
+                // features; `tofupilot run` runs the whole procedure and
+                // uploads (or not) right away.
+                only_phase: None,
+                retain_queued_run: None,
             };
             // Tri-state UI overrides: explicit flag wins, otherwise fall
             // back to station config in `commands::run::run`.
@@ -531,7 +536,13 @@ async fn main() {
                     run_opts,
                     tui_override,
                     kiosk_override,
-                    !no_bootstrap,
+                    if no_bootstrap {
+                        commands::run::bootstrap::BootstrapPolicy::Disabled
+                    } else {
+                        // Interactive CLI run: ask before a first-time
+                        // bootstrap (auto-proceeds without a tty).
+                        commands::run::bootstrap::BootstrapPolicy::Prompt
+                    },
                 )
                 .await,
             );

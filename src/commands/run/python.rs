@@ -244,6 +244,8 @@ pub async fn execute(
                 &c.procedure_id,
             ),
             unit: None,
+            // Plain-script runs never run partially.
+            only_phase: None,
         });
     }
     let mut cmd = build_command(python_path, &[file], working_dir, "");

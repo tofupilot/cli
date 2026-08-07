@@ -1509,6 +1509,76 @@ def load_module(module_path: str):
     return module
 
 
+def load_phase_module(module_name: str, procedure_dir: Path):
+    """Resolve a phase's `python:` module reference and import it.
+
+    Shared by job execution and --introspect: introspection must resolve
+    modules exactly the way execution does, or it reports signatures for
+    the wrong file.
+    """
+    is_file_path = "/" in module_name or "\\" in module_name
+
+    if is_file_path:
+        if module_name.startswith("~"):
+            module_file = Path(module_name).expanduser()
+        else:
+            module_file = procedure_dir / module_name
+        if not module_file.suffix == ".py":
+            module_file = module_file.with_suffix(".py")
+    else:
+        leading_dots = len(module_name) - len(module_name.lstrip("."))
+
+        if leading_dots > 0:
+            parent_path = "../" * (leading_dots - 1)
+            remaining_path = module_name[leading_dots:].replace(".", "/")
+            module_path = "phases/" + parent_path + remaining_path + ".py"
+        else:
+            module_path = module_name.replace(".", "/") + ".py"
+
+        module_file = procedure_dir / module_path
+
+    try:
+        module_file = module_file.resolve()
+    except:
+        pass
+
+    # Two-stage resolution: file-path first (in-tree phases /
+    # plugs of the procedure), then standard `importlib` if the
+    # file isn't on disk. The importlib path lets
+    # `python: shared.foo:Bar` resolve to a workspace-installed
+    # wheel (uv-workspace monorepo layout) without requiring
+    # relative dot-prefixed module names. Skip the fallback for
+    # explicit file-path modules ("/", "\\" in name) and for
+    # leading-dot or "~" prefixes — those mean "look in this
+    # tree", not "look in site-packages".
+    #
+    # Threat model note: this DOES technically allow phase YAML
+    # to call arbitrary importable modules (e.g.
+    # `python: subprocess:Popen`). The procedure is already
+    # trusted to ship and run Python code, so the same author
+    # could just write `import subprocess; subprocess.Popen(...)`
+    # inside a phase file. We're not adding capability — only
+    # changing the spelling. Hosts that need stricter isolation
+    # should sandbox at the venv / OS layer, not at the YAML.
+    if module_file.exists():
+        return load_module(str(module_file))
+    elif (
+        not is_file_path
+        and not module_name.startswith(".")
+        and not module_name.startswith("~")
+    ):
+        import importlib as _importlib
+        try:
+            return _importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Module {module_name} not found at {module_file} "
+                f"and not importable from sys.path: {exc}"
+            ) from None
+    else:
+        raise FileNotFoundError(f"Module {module_name} not found at {module_file}")
+
+
 def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
     """Execute a single job with streaming events via generator."""
     job_id = command["job_id"]
@@ -1580,67 +1650,7 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         # debugger must be told to trace it explicitly.
         _debug_this_thread()
         try:
-            is_file_path = "/" in module_name or "\\" in module_name
-
-            if is_file_path:
-                if module_name.startswith("~"):
-                    module_file = Path(module_name).expanduser()
-                else:
-                    module_file = procedure_dir / module_name
-                if not module_file.suffix == ".py":
-                    module_file = module_file.with_suffix(".py")
-            else:
-                leading_dots = len(module_name) - len(module_name.lstrip("."))
-
-                if leading_dots > 0:
-                    parent_path = "../" * (leading_dots - 1)
-                    remaining_path = module_name[leading_dots:].replace(".", "/")
-                    module_path = "phases/" + parent_path + remaining_path + ".py"
-                else:
-                    module_path = module_name.replace(".", "/") + ".py"
-
-                module_file = procedure_dir / module_path
-
-            try:
-                module_file = module_file.resolve()
-            except:
-                pass
-
-            # Two-stage resolution: file-path first (in-tree phases /
-            # plugs of the procedure), then standard `importlib` if the
-            # file isn't on disk. The importlib path lets
-            # `python: shared.foo:Bar` resolve to a workspace-installed
-            # wheel (uv-workspace monorepo layout) without requiring
-            # relative dot-prefixed module names. Skip the fallback for
-            # explicit file-path modules ("/", "\\" in name) and for
-            # leading-dot or "~" prefixes — those mean "look in this
-            # tree", not "look in site-packages".
-            #
-            # Threat model note: this DOES technically allow phase YAML
-            # to call arbitrary importable modules (e.g.
-            # `python: subprocess:Popen`). The procedure is already
-            # trusted to ship and run Python code, so the same author
-            # could just write `import subprocess; subprocess.Popen(...)`
-            # inside a phase file. We're not adding capability — only
-            # changing the spelling. Hosts that need stricter isolation
-            # should sandbox at the venv / OS layer, not at the YAML.
-            if module_file.exists():
-                module = load_module(str(module_file))
-            elif (
-                not is_file_path
-                and not module_name.startswith(".")
-                and not module_name.startswith("~")
-            ):
-                import importlib as _importlib
-                try:
-                    module = _importlib.import_module(module_name)
-                except ModuleNotFoundError as exc:
-                    raise FileNotFoundError(
-                        f"Module {module_name} not found at {module_file} "
-                        f"and not importable from sys.path: {exc}"
-                    ) from None
-            else:
-                raise FileNotFoundError(f"Module {module_name} not found at {module_file}")
+            module = load_phase_module(module_name, procedure_dir)
 
             if not hasattr(module, function_name):
                 raise AttributeError(f"Function {function_name} not found in {module_name}")
@@ -2122,12 +2132,57 @@ def serve(procedure_dir: Path):
         server.close()
 
 
+def run_introspection(procedure_dir: Path):
+    """--introspect mode: report each requested phase's real parameter
+    names before the job graph is built.
+
+    Reads one JSON object from stdin:
+        {"phases": {"<phase_key>": {"module": "...", "function": "..."}}}
+    imports each callable exactly the way execution would
+    (load_phase_module), and prints one JSON object to stdout:
+        {"phases": {"<phase_key>": {"params": [...]} | {"error": "..."}}}
+
+    Per-phase errors are reported, not fatal: a phase whose module won't
+    import would fail at run time anyway, and if it isn't in the partial
+    set its import error must not stop the run from starting.
+    """
+    request = json.load(sys.stdin)
+
+    # Importing phase modules runs their module-level code, which may
+    # print. Keep stdout clean for the JSON contract with the Rust side.
+    out_stream = sys.stdout
+    sys.stdout = sys.stderr
+
+    results = {}
+    try:
+        for phase_key, spec in (request.get("phases") or {}).items():
+            try:
+                module_name = spec.get("module", spec.get("file", ""))
+                function_name = spec["function"]
+                module = load_phase_module(module_name, procedure_dir)
+                if not hasattr(module, function_name):
+                    raise AttributeError(
+                        f"Function {function_name} not found in {module_name}"
+                    )
+                sig = inspect.signature(getattr(module, function_name))
+                results[phase_key] = {"params": list(sig.parameters)}
+            except BaseException as exc:
+                results[phase_key] = {"error": str(exc) or type(exc).__name__}
+    finally:
+        sys.stdout = out_stream
+
+    print(json.dumps({"phases": results}), flush=True)
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: tp_worker.py <procedure_dir>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if a != "--introspect"]
+    introspect_mode = len(args) != len(sys.argv) - 1
+
+    if len(args) != 1:
+        print("Usage: tp_worker.py <procedure_dir> [--introspect]", file=sys.stderr)
         sys.exit(1)
 
-    procedure_dir = Path(sys.argv[1]).resolve()
+    procedure_dir = Path(args[0]).resolve()
     if not procedure_dir.exists():
         print(f"Error: Procedure directory not found: {procedure_dir}", file=sys.stderr)
         sys.exit(1)
@@ -2139,6 +2194,10 @@ def main():
     procedure_dir_str = str(procedure_dir)
     if procedure_dir_str not in sys.path:
         sys.path.insert(0, procedure_dir_str)
+
+    if introspect_mode:
+        run_introspection(procedure_dir)
+        return
 
     _start_parent_watchdog()
     serve(procedure_dir)

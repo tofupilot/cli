@@ -93,7 +93,17 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     // station-level commands) land here.
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<station_protocol::StationCommand>(16);
     server.set_station_cmd_sink(cmd_tx).await;
-    let dispatcher = tokio::spawn(run_dispatcher(server.clone(), root.clone(), cmd_rx));
+    // Explicit shutdown signal: the dispatcher holds an Arc of the
+    // server, and the server holds the cmd sink, so neither channel
+    // closes on its own at Ctrl-C — without this the only exit would
+    // be an abort, which skips the run-teardown tail below.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut dispatcher = tokio::spawn(run_dispatcher(
+        server.clone(),
+        root.clone(),
+        cmd_rx,
+        shutdown_rx,
+    ));
 
     let port = server.port();
     let token = server.session_token().to_string();
@@ -145,15 +155,36 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
 
     // Park until Ctrl-C. The server lives on this task's stack; drop
     // on return tears down the listener and any kiosk attachments.
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        crate::log::error(&format!("signal handler failed: {e}"));
-        return 1;
+    let exit_code = match tokio::signal::ctrl_c().await {
+        Ok(()) => {
+            eprintln!();
+            crate::log::info("studio session ended");
+            0
+        }
+        Err(e) => {
+            crate::log::error(&format!("signal handler failed: {e}"));
+            1
+        }
+    };
+
+    // Orderly dispatcher shutdown BEFORE returning: main.rs turns this
+    // return value into `std::process::exit`, which skips every Drop
+    // handler — the engine child's kill_on_drop never fires, so the
+    // cancel must reach the active run while we're still running. The
+    // dispatcher's shutdown tail kills the active run and drains the
+    // parked teardowns, each bounded (worst case ~15s), so this await
+    // is bounded too; the outer timeout is a backstop against a wedged
+    // dispatcher.
+    let _ = shutdown_tx.send(());
+    if tokio::time::timeout(std::time::Duration::from_secs(20), &mut dispatcher)
+        .await
+        .is_err()
+    {
+        crate::log::warn("studio: dispatcher shutdown timed out; aborting it");
+        dispatcher.abort();
     }
-    eprintln!();
-    crate::log::info("studio session ended");
-    dispatcher.abort();
     drop(server);
-    0
+    exit_code
 }
 
 /// Fixed procedure id advertised in the hello frame for the studio
@@ -165,31 +196,80 @@ const STUDIO_PROCEDURE_ID: &str = "studio-local";
 /// project. Mirrors the station daemon's Run handling, reduced to one
 /// local procedure: a new Run aborts any in-flight run (the operator
 /// clicked Run again), failures are logged and never end the session.
+///
+/// `shutdown_rx` firing (Ctrl-C in `run_cmd`) breaks the loop into the
+/// teardown tail: kill the active run, bound-await its task, drain the
+/// parked teardowns — the studio counterpart of the station loop's
+/// post-loop exit path.
 async fn run_dispatcher(
     server: std::sync::Arc<crate::local_ws::Server>,
     root: std::path::PathBuf,
     mut cmd_rx: tokio::sync::mpsc::Receiver<station_protocol::StationCommand>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut active_run: Option<crate::commands::run::RunHandle> = None;
     let mut teardowns = tokio::task::JoinSet::new();
-    while let Some(cmd) = cmd_rx.recv().await {
+
+    // Most recent finished run, parked by `run_test` (upload is off for
+    // studio runs) so an explicit UploadRun can publish it later.
+    let retained: crate::commands::run::RetainedRun = Default::default();
+
+    // Bridge the upload queue's progress events (`RunUploadQueued` /
+    // `Started` / `Succeeded` / `Failed`) onto the loopback WS so the
+    // studio page can render them. `spawn_upload` speaks broadcast; the
+    // page listens on the server's event stream.
+    let (upload_bus, mut upload_rx) =
+        tokio::sync::broadcast::channel::<station_protocol::StationEvent>(64);
+    let bridge_server = server.clone();
+    let upload_bridge = tokio::spawn(async move {
+        while let Ok(ev) = upload_rx.recv().await {
+            bridge_server.publish_event(ev).await;
+        }
+    });
+
+    loop {
+        let cmd = tokio::select! {
+            _ = &mut shutdown_rx => break,
+            cmd = cmd_rx.recv() => match cmd {
+                Some(cmd) => cmd,
+                None => break,
+            },
+        };
         match cmd {
             station_protocol::StationCommand::Run {
                 reuse_unit,
                 operated_by,
+                only_phase,
                 ..
             } => {
+                // Always log the dispatch: "I clicked and nothing
+                // happened" must be distinguishable between the frame
+                // never arriving and the run failing after start.
+                crate::log::info(&format!(
+                    "studio: run requested ({})",
+                    only_phase
+                        .as_deref()
+                        .map(|p| format!("phase '{p}' + deps/setup/teardown"))
+                        .unwrap_or_else(|| "full procedure".to_string())
+                ));
                 if let Some(mut handle) = active_run.take() {
                     crate::log::info("studio: aborting in-flight run (Run again)");
                     handle.request_cancel();
                     handle.request_kill();
-                    while teardowns.try_join_next().is_some() {}
                     if let Some(task) = handle.take_task() {
-                        teardowns.spawn(async move {
-                            let _ = task.await;
-                        });
+                        // Shared parking: the wrapper aborts the inner
+                        // run task if the wrapper itself is cancelled
+                        // (JoinSet::Drop, drain deadline) — a bare
+                        // spawn would detach the Python child on drop.
+                        crate::commands::run::teardown::park_prior_run(&mut teardowns, task);
                     }
                 }
+                // The prior run's engine may still be draining teardown
+                // phases against the project's instrument ports — wait
+                // (bounded) before the replacement engine spawns, or two
+                // processes can briefly drive the same serial/VISA ports.
+                crate::commands::run::teardown::drain_prior_teardowns(&mut teardowns, 5, false)
+                    .await;
                 active_run = Some(
                     crate::commands::run::start(
                         STUDIO_PROCEDURE_ID,
@@ -199,7 +279,11 @@ async fn run_dispatcher(
                         false,
                         None,
                         None,
-                        crate::commands::run::RunOptions::default(),
+                        crate::commands::run::RunOptions {
+                            only_phase,
+                            retain_queued_run: Some(retained.clone()),
+                            ..Default::default()
+                        },
                         None,
                         // No TUI; kiosk_override=true is what routes
                         // events onto the loopback WS (attach_run is
@@ -211,13 +295,22 @@ async fn run_dispatcher(
                         Some(server.clone()),
                         reuse_unit,
                         operated_by,
-                        // Local project: auto-provision the venv like a
-                        // standalone `tofupilot run`.
-                        true,
+                        // Local project driven from the browser: provision
+                        // the venv without a terminal prompt — the operator
+                        // is not watching the terminal, and a tty Y/n would
+                        // park the run invisibly.
+                        crate::commands::run::bootstrap::BootstrapPolicy::Auto,
                         None,
                     )
                     .await,
                 );
+            }
+            station_protocol::StationCommand::UploadRun {
+                execution_id,
+                procedure_id,
+            } => {
+                handle_upload_run(&server, &retained, &upload_bus, execution_id, procedure_id)
+                    .await;
             }
             other => {
                 crate::log::info(&format!(
@@ -227,6 +320,107 @@ async fn run_dispatcher(
             }
         }
     }
+
+    // Teardown tail. The session is exiting via `std::process::exit`
+    // (which skips Drop handlers, so kill_on_drop on the engine child
+    // never fires): the cancel must reach the run here or the Python
+    // engine + plug processes are orphaned holding their instrument
+    // connections. Escalate immediately — the operator hit Ctrl-C —
+    // and stay bounded, mirroring the station Exit path's bounds.
+    if let Some(mut handle) = active_run.take() {
+        crate::log::info("studio: stopping active run...");
+        handle.request_cancel();
+        handle.request_kill();
+        if let Some(task) = handle.take_task() {
+            tokio::pin!(task);
+            if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+                .await
+                .is_err()
+            {
+                crate::log::warn("studio: active run didn't stop in 5s; aborting its task");
+                task.abort();
+            }
+        }
+    }
+    crate::commands::run::teardown::drain_prior_teardowns(&mut teardowns, 5, false).await;
+
+    upload_bridge.abort();
+}
+
+/// Publish the retained Studio run to the procedure the user picked.
+///
+/// Pre-queue failures (not logged in, nothing retained, stale execution
+/// id) surface as a synthetic `RunUploadFailed` on the WS — there is no
+/// real queue entry yet at that point, so the queue_id is derived from
+/// the execution id. Once `spawn_upload` takes over, the standard
+/// queue events flow through `upload_bus`.
+async fn handle_upload_run(
+    server: &crate::local_ws::Server,
+    retained: &crate::commands::run::RetainedRun,
+    upload_bus: &tokio::sync::broadcast::Sender<station_protocol::StationEvent>,
+    execution_id: String,
+    procedure_id: String,
+) {
+    let fail = |error: String| station_protocol::StationEvent::RunUploadFailed {
+        queue_id: format!("studio_{execution_id}"),
+        attempt: 0,
+        kind: "unknown".to_string(),
+        status: None,
+        error,
+        next_retry_at: None,
+    };
+
+    // Fresh load: the studio session only borrows credentials at startup
+    // to build the dashboard URL and never keeps them, and `run::start`
+    // is called with no creds.
+    let Some(creds) = crate::commands::auth::credentials::load() else {
+        crate::log::warn("studio: cannot upload run — not logged in");
+        server
+            .publish_event(fail(
+                "Not logged in on this machine. Run `tofupilot login`, then retry the upload."
+                    .to_string(),
+            ))
+            .await;
+        return;
+    };
+
+    let taken = {
+        let mut slot = retained.lock().await;
+        let matches = slot.as_ref().is_some_and(|(id, _)| *id == execution_id);
+        if matches {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    let Some((_, mut queued)) = taken else {
+        crate::log::warn(&format!(
+            "studio: no retained run for execution {execution_id}"
+        ));
+        server
+            .publish_event(fail(
+                "This run is no longer available to upload. Run the procedure again, then upload."
+                    .to_string(),
+            ))
+            .await;
+        return;
+    };
+
+    // Rewrite the local marker id ("studio-local") with the procedure
+    // the user picked. Safe after the fact: `deployment_id` is the only
+    // other procedure-derived field and a studio run has none, while
+    // `procedure_version` came from the procedure directory and stays
+    // the local YAML's version.
+    queued.request.procedure_id = procedure_id.clone();
+
+    crate::commands::run::spawn_upload(
+        &creds,
+        &procedure_id,
+        queued,
+        false,
+        None,
+        Some(upload_bus.clone()),
+    );
 }
 
 fn resolve_root(path: Option<PathBuf>) -> Result<PathBuf, String> {

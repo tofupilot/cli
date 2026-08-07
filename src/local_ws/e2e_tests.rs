@@ -323,3 +323,56 @@ async fn ws_token_refused_without_studio() {
         403
     );
 }
+
+/// `/files/*` serves component images from the studio root between
+/// runs (the Builder/Sequence previews resolve against it), with the
+/// same clamps as the run path: image extensions only, no escapes.
+/// Non-studio daemons keep the 404 (covered by the enable-gating
+/// asserts below).
+#[tokio::test]
+async fn files_served_from_studio_root_while_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_project(dir.path());
+    std::fs::create_dir(dir.path().join("images")).unwrap();
+    std::fs::write(dir.path().join("images/board.png"), b"not-really-a-png").unwrap();
+
+    let server = studio_server(dir.path()).await;
+    let base = format!("http://127.0.0.1:{}", server.port());
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{base}/files/images/board.png"))
+        .send()
+        .await
+        .expect("files request");
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    assert_eq!(res.bytes().await.unwrap().as_ref(), b"not-really-a-png");
+
+    // Non-image extensions stay off the HTTP surface even idle.
+    let res = client
+        .get(format!("{base}/files/procedure.yaml"))
+        .send()
+        .await
+        .expect("files request");
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // A plain kiosk/station daemon (no studio surface) keeps the 404.
+    let plain = Server::start(
+        "kiosk-files-test".into(),
+        "Kiosk".into(),
+        HelloIdentity::default(),
+        HostMode::Local,
+        PortChoice::Ephemeral,
+    )
+    .await
+    .expect("bind");
+    let res = client
+        .get(format!(
+            "http://127.0.0.1:{}/files/images/board.png",
+            plain.port()
+        ))
+        .send()
+        .await
+        .expect("files request");
+    assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+}

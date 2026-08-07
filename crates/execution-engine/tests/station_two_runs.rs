@@ -154,6 +154,7 @@ async fn run_once(
             vec!["default".to_string()],
             execution_engine::procedure::schema::ExecutionStrategy::PhaseFirst,
             std::collections::HashMap::new(),
+            None,
         )
         .await
         .expect("submit_procedure");
@@ -225,6 +226,7 @@ async fn hostless_run_tears_station_plug_down() {
                 vec!["default".to_string()],
                 execution_engine::procedure::schema::ExecutionStrategy::PhaseFirst,
                 std::collections::HashMap::new(),
+                None,
             )
             .await
             .expect("submit_procedure");
@@ -258,4 +260,171 @@ async fn hostless_run_tears_station_plug_down() {
         2,
         "second hostless run must respawn — run 1's instance was torn down"
     );
+}
+
+/// Partial-run narrowing against a hosted station: two station plugs,
+/// a phase that uses one, a phase that uses neither.
+///
+/// Pins two behaviours:
+/// - a partial run only borrows the station plugs in its introspected
+///   union (playing `check` acquires `psu`, never spawns `dmm`);
+/// - progress accounting closes: reserved plug-scope event slots match
+///   what actually emits, so completed_jobs reaches total_jobs even when
+///   the union excludes every station plug (playing `no_plug` reserves
+///   no acquire event for the hosted plugs it will never borrow).
+#[tokio::test]
+async fn partial_run_borrows_only_station_plugs_in_union() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+
+    let dir = std::env::temp_dir().join(format!("tp-partial-station-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("instruments")).unwrap();
+    std::fs::create_dir_all(dir.join("phases")).unwrap();
+    let psu_log = dir.join("psu_init_log");
+    let dmm_log = dir.join("dmm_init_log");
+
+    std::fs::write(
+        dir.join("procedure.yaml"),
+        r#"
+name: Partial Station Narrowing
+version: 1.0.0
+
+plugs:
+  - name: PSU
+    key: psu
+    python: instruments.psu:Psu
+    scope: station
+  - name: DMM
+    key: dmm
+    python: instruments.dmm:Dmm
+    scope: station
+
+main:
+  - key: check
+    name: Check
+    python: phases.check
+  - key: no_plug
+    name: No Plug
+    python: phases.no_plug
+"#,
+    )
+    .unwrap();
+
+    for (module, class, log) in [("psu", "Psu", &psu_log), ("dmm", "Dmm", &dmm_log)] {
+        std::fs::write(
+            dir.join("instruments").join(format!("{module}.py")),
+            format!(
+                r#"
+class {class}:
+    def __init__(self):
+        with open({log:?}, "a") as f:
+            f.write("init\n")
+
+    def ping(self):
+        return "ok"
+"#,
+                log = log.to_string_lossy()
+            ),
+        )
+        .unwrap();
+    }
+
+    std::fs::write(
+        dir.join("phases").join("check.py"),
+        r#"
+def check(psu):
+    assert psu.ping() == "ok"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("phases").join("no_plug.py"),
+        r#"
+def no_plug():
+    pass
+"#,
+    )
+    .unwrap();
+
+    let init_count = |log: &PathBuf| {
+        std::fs::read_to_string(log)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+
+    async fn partial_run(
+        dir: &PathBuf,
+        python: &PathBuf,
+        host: &Arc<StationPlugHost>,
+        target: &str,
+    ) -> execution_engine::orchestrator::ExecutionStats {
+        let procedure_def =
+            load_procedure_definition(&dir.join("procedure.yaml")).expect("procedure loads");
+        let mut orchestrator = Orchestrator::new_with_python(
+            1,
+            dir.clone(),
+            Some(python.clone()),
+            None,
+            format!("exec-partial-{target}"),
+            format!("run-partial-{target}"),
+            procedure_def,
+            None,
+        )
+        .with_station_plug_host(Some(Arc::clone(host)));
+
+        let sink: Arc<dyn EventSink> = Arc::new(NullSink);
+        orchestrator.set_event_sink(sink);
+        orchestrator.initialize().await.expect("initialize");
+        orchestrator
+            .submit_procedure(
+                vec!["default".to_string()],
+                execution_engine::procedure::schema::ExecutionStrategy::PhaseFirst,
+                std::collections::HashMap::new(),
+                Some(target),
+            )
+            .await
+            .expect("submit_procedure");
+        let stats = orchestrator.execute_all().await.expect("execute_all");
+        orchestrator.shutdown().await.expect("shutdown");
+        stats
+    }
+
+    // Play `check` (uses psu): only psu is borrowed, dmm never spawns.
+    {
+        let host = Arc::new(StationPlugHost::new());
+        let stats = partial_run(&dir, &python, &host, "check").await;
+        assert_eq!(stats.run_outcome, Some(Outcome::Pass), "check run must pass");
+        assert_eq!(
+            host.held_count().await,
+            1,
+            "only the union's station plug may be borrowed"
+        );
+        assert_eq!(init_count(&psu_log), 1, "psu must spawn exactly once");
+        assert_eq!(init_count(&dmm_log), 0, "dmm is outside the union: never spawned");
+        assert_eq!(
+            stats.completed_jobs, stats.total_jobs,
+            "every reserved progress slot must be consumed"
+        );
+        host.shutdown(None).await;
+    }
+
+    // Play `no_plug` (uses neither): nothing borrowed, and the progress
+    // total must not reserve an acquire event that will never fire.
+    {
+        let host = Arc::new(StationPlugHost::new());
+        let stats = partial_run(&dir, &python, &host, "no_plug").await;
+        assert_eq!(stats.run_outcome, Some(Outcome::Pass), "no_plug run must pass");
+        assert_eq!(host.held_count().await, 0, "no station plug in the union");
+        assert_eq!(init_count(&psu_log), 1, "psu count unchanged from the first run");
+        assert_eq!(init_count(&dmm_log), 0);
+        assert_eq!(
+            stats.completed_jobs, stats.total_jobs,
+            "no reserved-but-never-emitted plug event may remain"
+        );
+        host.shutdown(None).await;
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
 }
