@@ -13,7 +13,9 @@ use execution_engine::procedure::loader::load_procedure_definition;
 use execution_engine::procedure::schema::StageScope;
 use execution_engine::ui::UiRequestData;
 use execution_engine::EventSink;
-use station_protocol::{PhaseLogLine, PhasePlan, RunMeasurement, StationEvent, ValidatorResult};
+use station_protocol::{
+    AggregationResult, PhaseLogLine, PhasePlan, RunMeasurement, StationEvent, ValidatorResult,
+};
 use tofupilot_sdk::types::*;
 // SDK enum names track the alphabetically-first endpoint; alias back to the
 // names this crate uses (see connector/mod.rs).
@@ -385,6 +387,7 @@ impl EventSink for CliEventSink {
                             measured_value: Some(m.value.to_raw_json()),
                             units: m.unit.clone(),
                             validators: validator_results,
+                            aggregations: build_aggregation_results(m),
                         }
                     })
                     .collect();
@@ -720,6 +723,9 @@ impl EventSink for CliEventSink {
                         measured_value: Some(value.clone()),
                         units: unit.clone(),
                         validators: Vec::new(),
+                        // Aggregations are evaluated at phase end; the
+                        // live update has nothing to carry yet.
+                        aggregations: Vec::new(),
                     },
                     execution_id: Some(self.execution_id.clone()),
                 });
@@ -1088,6 +1094,91 @@ fn cap_metadata_keys(
         .collect()
 }
 
+/// Render a validator's `expected_value` onto the wire as plain JSON.
+fn expected_value_to_json(
+    exp: &execution_engine::procedure::schema::ValidatorExpectedValue,
+) -> serde_json::Value {
+    use execution_engine::procedure::schema::ValidatorExpectedValue as E;
+    match exp {
+        E::Number(n) => serde_json::json!(n),
+        E::String(s) => serde_json::json!(s),
+        E::Boolean(b) => serde_json::json!(b),
+        E::Null => serde_json::Value::Null,
+        E::NumberArray(a) => serde_json::json!(a),
+        E::StringArray(a) => serde_json::json!(a),
+        E::MixedArray(a) => serde_json::json!(a),
+        E::Object(o) => serde_json::Value::Object(o.clone()),
+    }
+}
+
+/// Render an aggregation's computed value onto the wire as plain JSON.
+fn aggregation_value_to_json(
+    value: &execution_engine::procedure::schema::AggregationValue,
+) -> serde_json::Value {
+    use execution_engine::procedure::schema::AggregationValue as A;
+    match value {
+        A::Number(n) => serde_json::json!(n),
+        A::String(s) => serde_json::json!(s),
+        A::Boolean(b) => serde_json::json!(b),
+        A::Object(o) => serde_json::Value::Object(o.clone()),
+    }
+}
+
+/// The generated SDK declares one validator/aggregation struct per nesting
+/// site (`RunCreateValidators`, `RunCreateYAxisValidators`, …) even though
+/// they are field-for-field identical. These macros map the engine's
+/// `ValidatorSpec` / `AggregationSpec` onto whichever pair the call site
+/// needs, so the same conversion isn't written out six times.
+macro_rules! map_validators {
+    ($ty:ident, $vs:expr) => {
+        $vs.iter()
+            .filter_map(|v| {
+                let mut vb = $ty::builder();
+                if let Some(ref op) = v.operator {
+                    vb = vb.operator(op);
+                }
+                if let Some(ref exp) = v.expected_value {
+                    vb = vb.expected_value(expected_value_to_json(exp));
+                }
+                if let Some(ref expr) = v.expression {
+                    vb = vb.expression(expr);
+                }
+                if let Some(ref o) = v.outcome {
+                    vb = vb.outcome(validator_outcome_to_wire(o));
+                }
+                vb.build().ok()
+            })
+            .collect::<Vec<_>>()
+    };
+}
+
+macro_rules! map_aggregations {
+    ($agg_ty:ident, $val_ty:ident, $aggs:expr) => {
+        $aggs
+            .iter()
+            .filter_map(|a| {
+                let mut ab = $agg_ty::builder().r#type(&a.aggregation_type);
+                if let Some(ref v) = a.value {
+                    ab = ab.value(aggregation_value_to_json(v));
+                }
+                if let Some(ref u) = a.unit {
+                    ab = ab.unit(u);
+                }
+                if let Some(ref o) = a.outcome {
+                    ab = ab.outcome(validator_outcome_to_wire(o));
+                }
+                if let Some(ref vs) = a.validators {
+                    let validators = map_validators!($val_ty, vs);
+                    if !validators.is_empty() {
+                        ab = ab.validators(validators);
+                    }
+                }
+                ab.build().ok()
+            })
+            .collect::<Vec<_>>()
+    };
+}
+
 fn build_measurement(
     m: &execution_engine::measurements::Measurement,
 ) -> crate::error::CliResult<RunCreateMeasurements> {
@@ -1124,6 +1215,24 @@ fn build_measurement(
         if let Some(ref u) = multidim.x_axis.unit {
             xb = xb.units(u);
         }
+        // The wire calls the series label `name`; the engine calls it
+        // `legend` (falling back to the axis key when unset).
+        if let Some(legend) = multidim.x_axis.get_legend() {
+            xb = xb.name(legend);
+        }
+        if let Some(ref vs) = multidim.x_axis.validators {
+            let validators = map_validators!(RunCreateValidators, vs);
+            if !validators.is_empty() {
+                xb = xb.validators(validators);
+            }
+        }
+        if let Some(ref aggs) = multidim.x_axis.aggregations {
+            let aggregations =
+                map_aggregations!(RunCreateAggregations, RunCreateAggregationsValidators, aggs);
+            if !aggregations.is_empty() {
+                xb = xb.aggregations(aggregations);
+            }
+        }
         if let Ok(xa) = xb.build() {
             b = b.x_axis(xa);
         }
@@ -1143,6 +1252,25 @@ fn build_measurement(
                 if let Some(ref u) = y.unit {
                     yb = yb.units(u);
                 }
+                if let Some(legend) = y.get_legend() {
+                    yb = yb.name(legend);
+                }
+                if let Some(ref vs) = y.validators {
+                    let validators = map_validators!(RunCreateYAxisValidators, vs);
+                    if !validators.is_empty() {
+                        yb = yb.validators(validators);
+                    }
+                }
+                if let Some(ref aggs) = y.aggregations {
+                    let aggregations = map_aggregations!(
+                        RunCreateYAxisAggregations,
+                        RunCreateYAxisAggregationsValidators,
+                        aggs
+                    );
+                    if !aggregations.is_empty() {
+                        yb = yb.aggregations(aggregations);
+                    }
+                }
                 yb.build().ok()
             })
             .collect();
@@ -1156,40 +1284,10 @@ fn build_measurement(
         }
     }
 
-    // Validators
+    // Validators. Wire contract for `outcome` is uppercase
+    // (`PASS`/`FAIL`/`UNSET`) — the V2 Zod schema rejects anything else.
     if let Some(ref vs) = m.validators {
-        let validators: Vec<RunCreateMeasurementsValidators> = vs
-            .iter()
-            .filter_map(|v| {
-                let mut vb = RunCreateMeasurementsValidators::builder();
-                if let Some(ref op) = v.operator {
-                    vb = vb.operator(op);
-                }
-                if let Some(ref exp) = v.expected_value {
-                    let json_val = match exp {
-                        execution_engine::procedure::schema::ValidatorExpectedValue::Number(n) => serde_json::json!(n),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::String(s) => serde_json::json!(s),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::Boolean(b) => serde_json::json!(b),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::Null => serde_json::Value::Null,
-                        execution_engine::procedure::schema::ValidatorExpectedValue::NumberArray(a) => serde_json::json!(a),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::StringArray(a) => serde_json::json!(a),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::MixedArray(a) => serde_json::json!(a),
-                        execution_engine::procedure::schema::ValidatorExpectedValue::Object(o) => serde_json::Value::Object(o.clone()),
-                    };
-                    vb = vb.expected_value(json_val);
-                }
-                if let Some(ref expr) = v.expression {
-                    vb = vb.expression(expr);
-                }
-                if let Some(ref o) = v.outcome {
-                    // Wire contract is uppercase (`PASS`/`FAIL`/`UNSET`); the
-                    // previous `format!("{:?}", o).to_lowercase()` produced
-                    // `"pass"` etc. which the V2 Zod schema rejects.
-                    vb = vb.outcome(validator_outcome_to_wire(o));
-                }
-                vb.build().ok()
-            })
-            .collect();
+        let validators = map_validators!(RunCreateMeasurementsValidators, vs);
         if !validators.is_empty() {
             b = b.validators(validators);
         }
@@ -1197,38 +1295,11 @@ fn build_measurement(
 
     // Aggregations
     if let Some(ref aggs) = m.aggregations {
-        let aggregations: Vec<RunCreateMeasurementsAggregations> = aggs
-            .iter()
-            .filter_map(|a| {
-                let mut ab =
-                    RunCreateMeasurementsAggregations::builder().r#type(&a.aggregation_type);
-                if let Some(ref v) = a.value {
-                    let json_val = match v {
-                        execution_engine::procedure::schema::AggregationValue::Number(n) => {
-                            serde_json::json!(n)
-                        }
-                        execution_engine::procedure::schema::AggregationValue::String(s) => {
-                            serde_json::json!(s)
-                        }
-                        execution_engine::procedure::schema::AggregationValue::Boolean(b) => {
-                            serde_json::json!(b)
-                        }
-                        execution_engine::procedure::schema::AggregationValue::Object(o) => {
-                            serde_json::Value::Object(o.clone())
-                        }
-                    };
-                    ab = ab.value(json_val);
-                }
-                if let Some(ref u) = a.unit {
-                    ab = ab.unit(u);
-                }
-                if let Some(ref o) = a.outcome {
-                    // Same uppercase wire contract as validator outcome.
-                    ab = ab.outcome(validator_outcome_to_wire(o));
-                }
-                ab.build().ok()
-            })
-            .collect();
+        let aggregations = map_aggregations!(
+            RunCreateMeasurementsAggregations,
+            RunCreateMeasurementsAggregationsValidators,
+            aggs
+        );
         if !aggregations.is_empty() {
             b = b.aggregations(aggregations);
         }
@@ -2193,6 +2264,12 @@ fn build_validator_results(
     let Some(validators) = m.validators.as_ref() else {
         return Vec::new();
     };
+    validator_specs_to_results(validators)
+}
+
+fn validator_specs_to_results(
+    validators: &[execution_engine::procedure::schema::ValidatorSpec],
+) -> Vec<ValidatorResult> {
     validators
         .iter()
         .map(|v| {
@@ -2211,6 +2288,37 @@ fn build_validator_results(
                 outcome,
                 is_decisive: None,
             }
+        })
+        .collect()
+}
+
+/// Map the engine's evaluated measurement-level aggregations onto the wire.
+/// The engine stamps `outcome` on every aggregation during evaluation;
+/// axis-level aggregations of multi-dimensional values are NOT mapped here —
+/// they travel inside `measured_value` with the rest of the spec.
+fn build_aggregation_results(
+    m: &execution_engine::measurements::Measurement,
+) -> Vec<AggregationResult> {
+    let Some(aggregations) = m.aggregations.as_ref() else {
+        return Vec::new();
+    };
+    aggregations
+        .iter()
+        .map(|a| AggregationResult {
+            aggregation_type: a.aggregation_type.clone(),
+            value: a.value.as_ref().and_then(|v| serde_json::to_value(v).ok()),
+            unit: a.unit.clone(),
+            outcome: a
+                .outcome
+                .as_ref()
+                .map(validator_outcome_wire_str)
+                .unwrap_or("UNSET")
+                .to_string(),
+            validators: a
+                .validators
+                .as_deref()
+                .map(validator_specs_to_results)
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -2572,5 +2680,148 @@ mod tests {
         assert_eq!(out["truncated"], true);
         assert!(out["original_size_bytes"].as_u64().unwrap() > MAX_WARNING_DETAIL_BYTES as u64);
         assert!(out.get("reason").is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // build_measurement — the run-upload wire mapping
+    // -----------------------------------------------------------------
+
+    use execution_engine::measurements::{Measurement, MeasurementValue};
+    use execution_engine::procedure::schema::{
+        AggregationSpec, AggregationValue, AxisData, AxisSpec, MultiDimensionalSpec,
+        ValidatorExpectedValue, ValidatorOutcome, ValidatorSpec,
+    };
+
+    fn validator(op: &str, expected: f64, outcome: ValidatorOutcome) -> ValidatorSpec {
+        ValidatorSpec {
+            outcome: Some(outcome),
+            operator: Some(op.to_string()),
+            expected_value: Some(ValidatorExpectedValue::Number(expected)),
+            expression: None,
+        }
+    }
+
+    fn aggregation(
+        kind: &str,
+        value: f64,
+        unit: &str,
+        outcome: ValidatorOutcome,
+        validators: Vec<ValidatorSpec>,
+    ) -> AggregationSpec {
+        AggregationSpec {
+            aggregation_type: kind.to_string(),
+            outcome: Some(outcome),
+            value: Some(AggregationValue::Number(value)),
+            unit: Some(unit.to_string()),
+            validators: Some(validators),
+        }
+    }
+
+    fn measurement(name: &str, value: MeasurementValue) -> Measurement {
+        Measurement {
+            name: name.to_string(),
+            value,
+            unit: None,
+            timestamp: "2026-08-07T18:07:31Z".to_string(),
+            validators: None,
+            aggregations: None,
+            description: None,
+            outcome: ValidatorOutcome::Unset,
+        }
+    }
+
+    /// Assert against the serialized form: the JSON body is the actual
+    /// contract with the V2 API, and it sidesteps `NullableField` matching.
+    fn wire(m: &Measurement) -> serde_json::Value {
+        serde_json::to_value(build_measurement(m).expect("build_measurement")).unwrap()
+    }
+
+    #[test]
+    fn build_measurement_carries_axis_legend_validators_and_aggregations() {
+        let mut m = measurement(
+            "power_sweep",
+            MeasurementValue::MultiDimensional(MultiDimensionalSpec {
+                title: Some("Voltage and current vs step".to_string()),
+                x_axis: AxisSpec {
+                    data: Some(AxisData::Numeric(vec![0.0, 1.0])),
+                    unit: None,
+                    legend: Some("Step".to_string()),
+                    key: Some("step".to_string()),
+                    aggregations: None,
+                    validators: None,
+                    description: None,
+                },
+                y_axis: vec![AxisSpec {
+                    data: Some(AxisData::Numeric(vec![3.28, 3.32])),
+                    unit: Some("V".to_string()),
+                    legend: Some("Rail voltage".to_string()),
+                    key: Some("voltage".to_string()),
+                    aggregations: Some(vec![aggregation(
+                        "max",
+                        3.32,
+                        "V",
+                        ValidatorOutcome::Fail,
+                        vec![validator("<=", 3.3, ValidatorOutcome::Fail)],
+                    )]),
+                    validators: Some(vec![validator("<=", 3.5, ValidatorOutcome::Pass)]),
+                    description: None,
+                }],
+            }),
+        );
+        m.outcome = ValidatorOutcome::Fail;
+
+        let w = wire(&m);
+
+        assert_eq!(w["x_axis"]["name"], "Step");
+        assert_eq!(w["x_axis"]["data"], serde_json::json!([0.0, 1.0]));
+
+        let y = &w["y_axis"][0];
+        assert_eq!(y["name"], "Rail voltage");
+        assert_eq!(y["units"], "V");
+        assert_eq!(y["validators"][0]["operator"], "<=");
+        assert_eq!(y["validators"][0]["expected_value"], 3.5);
+        assert_eq!(y["validators"][0]["outcome"], "PASS");
+
+        let agg = &y["aggregations"][0];
+        assert_eq!(agg["type"], "max");
+        assert_eq!(agg["value"], 3.32);
+        assert_eq!(agg["unit"], "V");
+        assert_eq!(agg["outcome"], "FAIL");
+        assert_eq!(agg["validators"][0]["expected_value"], 3.3);
+        assert_eq!(agg["validators"][0]["outcome"], "FAIL");
+    }
+
+    #[test]
+    fn build_measurement_carries_aggregation_validators_on_scalars() {
+        let mut m = measurement("supply_ripple", MeasurementValue::Numeric(17.9));
+        m.unit = Some("mV".to_string());
+        m.aggregations = Some(vec![
+            aggregation(
+                "avg",
+                20.28,
+                "mV",
+                ValidatorOutcome::Pass,
+                vec![validator("<=", 25.0, ValidatorOutcome::Pass)],
+            ),
+            // No validators: must still upload, with an empty/absent list
+            // rather than being dropped.
+            AggregationSpec {
+                aggregation_type: "count".to_string(),
+                outcome: Some(ValidatorOutcome::Unset),
+                value: Some(AggregationValue::Number(5.0)),
+                unit: None,
+                validators: None,
+            },
+        ]);
+
+        let w = wire(&m);
+        let aggs = w["aggregations"].as_array().expect("aggregations");
+        assert_eq!(aggs.len(), 2);
+        assert_eq!(aggs[0]["type"], "avg");
+        assert_eq!(aggs[0]["validators"][0]["expected_value"], 25.0);
+        assert_eq!(aggs[0]["validators"][0]["outcome"], "PASS");
+        assert_eq!(aggs[1]["type"], "count");
+        assert_eq!(aggs[1]["value"], 5.0);
+        assert!(aggs[1].get("validators").is_none());
     }
 }

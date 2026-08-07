@@ -961,6 +961,16 @@ fn build_measurement(m: &serde_json::Value) -> crate::error::CliResult<RunCreate
             b = b.validators(vs);
         }
     }
+    if let Some(arr) = m.get("aggregations").and_then(|v| v.as_array()) {
+        let aggs = json_aggregations!(
+            RunCreateMeasurementsAggregations,
+            RunCreateMeasurementsAggregationsValidators,
+            arr
+        );
+        if !aggs.is_empty() {
+            b = b.aggregations(aggs);
+        }
+    }
     b.build().map_err(|e| e.to_string().into())
 }
 
@@ -989,8 +999,23 @@ fn build_x_axis(x: &serde_json::Value) -> crate::error::CliResult<RunCreateXAxis
     if let Some(u) = json_str(x, "units") {
         b = b.units(u);
     }
+    if let Some(n) = axis_label(x) {
+        b = b.name(n);
+    }
     if let Some(d) = json_str(x, "description") {
         b = b.description(d);
+    }
+    if let Some(arr) = x.get("validators").and_then(|v| v.as_array()) {
+        let vs = json_validators!(RunCreateValidators, arr);
+        if !vs.is_empty() {
+            b = b.validators(vs);
+        }
+    }
+    if let Some(arr) = x.get("aggregations").and_then(|v| v.as_array()) {
+        let aggs = json_aggregations!(RunCreateAggregations, RunCreateAggregationsValidators, arr);
+        if !aggs.is_empty() {
+            b = b.aggregations(aggs);
+        }
     }
     b.build().map_err(|e| e.to_string().into())
 }
@@ -1000,7 +1025,35 @@ fn build_y_axis(y: &serde_json::Value) -> crate::error::CliResult<RunCreateYAxis
     if let Some(u) = json_str(y, "units") {
         b = b.units(u);
     }
+    if let Some(n) = axis_label(y) {
+        b = b.name(n);
+    }
+    if let Some(d) = json_str(y, "description") {
+        b = b.description(d);
+    }
+    if let Some(arr) = y.get("validators").and_then(|v| v.as_array()) {
+        let vs = json_validators!(RunCreateYAxisValidators, arr);
+        if !vs.is_empty() {
+            b = b.validators(vs);
+        }
+    }
+    if let Some(arr) = y.get("aggregations").and_then(|v| v.as_array()) {
+        let aggs = json_aggregations!(
+            RunCreateYAxisAggregations,
+            RunCreateYAxisAggregationsValidators,
+            arr
+        );
+        if !aggs.is_empty() {
+            b = b.aggregations(aggs);
+        }
+    }
     b.build().map_err(|e| e.to_string().into())
+}
+
+/// The series label. The wire field is `name`; frameworks spell it `legend`
+/// (the execution engine's term) or `name`, so accept both.
+fn axis_label(axis: &serde_json::Value) -> Option<&str> {
+    json_str(axis, "name").or_else(|| json_str(axis, "legend"))
 }
 
 fn extract_run_measurements(phase_event: &serde_json::Value) -> Vec<RunMeasurement> {
@@ -1016,6 +1069,7 @@ fn extract_run_measurements(phase_event: &serde_json::Value) -> Vec<RunMeasureme
                         measured_value: m.get("measured_value").cloned(),
                         units: json_str(m, "units").map(String::from),
                         validators: extract_validator_results(m),
+                        aggregations: Vec::new(),
                     })
                 })
                 .collect()

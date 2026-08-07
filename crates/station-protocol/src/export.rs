@@ -16,6 +16,7 @@ fn main() {
         specta::ts::export::<RunMeasurement>(&config).unwrap(),
         specta::ts::export::<UnitInfo>(&config).unwrap(),
         specta::ts::export::<ValidatorResult>(&config).unwrap(),
+        specta::ts::export::<AggregationResult>(&config).unwrap(),
         specta::ts::export::<UiComponent>(&config).unwrap(),
         specta::ts::export::<UiOption>(&config).unwrap(),
         specta::ts::export::<ComponentType>(&config).unwrap(),
@@ -53,6 +54,8 @@ fn main() {
         specta::ts::export::<StudioSequenceUi>(&config).unwrap(),
         specta::ts::export::<StudioSequenceMeasurement>(&config).unwrap(),
         specta::ts::export::<StudioSequenceValidator>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceAggregation>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceAxis>(&config).unwrap(),
     ] {
         output.push_str(&ts);
         output.push('\n');

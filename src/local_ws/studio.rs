@@ -30,9 +30,10 @@ use axum::{
 use sha2::{Digest, Sha256};
 use station_protocol::{
     StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
-    StudioRequest, StudioResponse, StudioSequence, StudioSequenceMeasurement, StudioSequencePhase,
-    StudioSequencePlug, StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi,
-    StudioSequenceUnit, StudioSequenceUnitField, StudioSequenceValidator,
+    StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation, StudioSequenceAxis,
+    StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug, StudioSequenceRetry,
+    StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit, StudioSequenceUnitField,
+    StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -268,6 +269,7 @@ async fn dispatch(config: &StudioConfig, request: StudioRequest) -> StudioRespon
             content,
             expected_sha256,
         } => write_file(&config.root, &path, &content, expected_sha256.as_deref()).await,
+        StudioRequest::CreateDir { path } => create_dir(&config.root, &path).await,
         StudioRequest::Validate { path } => validate(&config.root, path.as_deref()).await,
         StudioRequest::GetSequence {} => get_sequence(&config.root).await,
     }
@@ -351,16 +353,52 @@ async fn get_sequence(root: &Path) -> StudioResponse {
                     key: m.key.clone(),
                     name: m.name.clone(),
                     unit: m.unit.clone(),
-                    validators: m
-                        .validators
-                        .iter()
-                        .flatten()
-                        .map(|v| StudioSequenceValidator {
-                            detail: validator_detail(v),
-                        })
-                        .collect(),
+                    validators: map_validators(m.validators.as_deref()),
+                    aggregations: map_aggregations(m.aggregations.as_deref()),
+                    title: m.title.clone(),
+                    x_axis: m.x_axis.as_ref().map(map_axis),
+                    y_axis: m.y_axis.iter().flatten().map(map_axis).collect(),
                 })
                 .collect(),
+        }
+    }
+
+    fn map_validators(
+        validators: Option<&[execution_engine::procedure::schema::ValidatorSpec]>,
+    ) -> Vec<StudioSequenceValidator> {
+        validators
+            .unwrap_or_default()
+            .iter()
+            .map(|v| StudioSequenceValidator {
+                detail: validator_detail(v),
+            })
+            .collect()
+    }
+
+    fn map_aggregations(
+        aggregations: Option<&[execution_engine::procedure::schema::AggregationSpec]>,
+    ) -> Vec<StudioSequenceAggregation> {
+        aggregations
+            .unwrap_or_default()
+            .iter()
+            .map(|a| StudioSequenceAggregation {
+                aggregation_type: a.aggregation_type.clone(),
+                unit: a.unit.clone(),
+                validators: map_validators(a.validators.as_deref()),
+            })
+            .collect()
+    }
+
+    // Resolved key/legend (each derives from the other when only one is
+    // in the YAML) so the Builder always has a display label.
+    fn map_axis(axis: &execution_engine::procedure::schema::AxisSpec) -> StudioSequenceAxis {
+        StudioSequenceAxis {
+            key: axis.get_key(),
+            legend: axis.get_legend(),
+            unit: axis.unit.clone(),
+            description: axis.description.clone(),
+            aggregations: map_aggregations(axis.aggregations.as_deref()),
+            validators: map_validators(axis.validators.as_deref()),
         }
     }
 
@@ -660,6 +698,72 @@ async fn write_file(
     }
 }
 
+async fn create_dir(root: &Path, path: &str) -> StudioResponse {
+    let rel = match clamp_rel(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // Descend one component at a time instead of `create_dir_all`.
+    // Confinement can only be checked on a path that exists, so each
+    // level is created and then re-canonicalized: an intermediate that
+    // already exists may be a symlink out of the root (or into an
+    // excluded dir), and `create_dir_all` would follow it and plant the
+    // new directory there before anything got a chance to object.
+    let mut current = root.to_path_buf();
+    let last = rel.components().count();
+    for (index, comp) in rel.components().enumerate() {
+        current.push(comp);
+        let fresh = match tokio::fs::create_dir(&current).await {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => {
+                return err(
+                    StudioErrorCode::Internal,
+                    format!("cannot create directory: {e}"),
+                )
+            }
+        };
+        if !fresh {
+            // An existing FILE on the path is not something to build
+            // through, and an existing final component means the
+            // caller's folder is not the one we would be reporting.
+            match tokio::fs::metadata(&current).await {
+                Ok(m) if !m.is_dir() => {
+                    return err(StudioErrorCode::Conflict, "a file with that name exists")
+                }
+                Ok(_) if index + 1 == last => {
+                    return err(StudioErrorCode::Conflict, "directory already exists")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return err(
+                        StudioErrorCode::Internal,
+                        format!("cannot inspect directory: {e}"),
+                    )
+                }
+            }
+        }
+        let Ok(canon) = tokio::fs::canonicalize(&current).await else {
+            return err(
+                StudioErrorCode::Internal,
+                "created directory vanished before it could be checked",
+            );
+        };
+        if let Err(e) = check_canonical_policy(root, &canon, false) {
+            // Only unwind what this request made: an escaping symlink
+            // that was already there is not ours to remove.
+            if fresh {
+                let _ = tokio::fs::remove_dir(&current).await;
+            }
+            return e;
+        }
+        current = canon;
+    }
+    let rel_display = rel.to_string_lossy().replace('\\', "/");
+    crate::log::info(&format!("studio: created directory {rel_display}"));
+    StudioResponse::DirCreated { path: rel_display }
+}
+
 async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
     let yaml_path = match path {
         Some(p) => {
@@ -817,6 +921,108 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn create_dir_makes_nested_dirs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+
+        let c = create_dir(root, "phases/setup").await;
+        assert!(
+            matches!(&c, StudioResponse::DirCreated { path } if path == "phases/setup"),
+            "got {c:?}"
+        );
+        assert!(root.join("phases/setup").is_dir());
+
+        // Creating it again is a conflict, not a silent success: the
+        // sidebar must not report a folder it did not make.
+        let again = create_dir(root, "phases/setup").await;
+        assert!(matches!(
+            again,
+            StudioResponse::Error {
+                code: StudioErrorCode::Conflict,
+                ..
+            }
+        ));
+        // An existing parent is fine as long as the leaf is new.
+        let deeper = create_dir(root, "phases/setup/probe").await;
+        assert!(matches!(deeper, StudioResponse::DirCreated { .. }));
+    }
+
+    #[tokio::test]
+    async fn create_dir_refuses_excluded_files_and_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+
+        // Excluded and hidden names are refused by the same rule the
+        // rest of the surface uses.
+        for path in ["venv", "node_modules/pkg", ".git", "plugs/.hidden"] {
+            let bad = create_dir(root, path).await;
+            assert!(
+                matches!(
+                    bad,
+                    StudioResponse::Error {
+                        code: StudioErrorCode::Forbidden,
+                        ..
+                    }
+                ),
+                "{path} was not refused: {bad:?}"
+            );
+        }
+
+        // A file already holding the name is a conflict, not something
+        // to build a subtree through.
+        tokio::fs::write(root.join("phases.py"), "x = 1\n")
+            .await
+            .unwrap();
+        let clash = create_dir(root, "phases.py").await;
+        assert!(matches!(
+            clash,
+            StudioResponse::Error {
+                code: StudioErrorCode::Conflict,
+                ..
+            }
+        ));
+        let through = create_dir(root, "phases.py/inner").await;
+        assert!(matches!(
+            through,
+            StudioResponse::Error {
+                code: StudioErrorCode::Conflict,
+                ..
+            }
+        ));
+
+        // Traversal collapses inside the root rather than escaping it.
+        let up = create_dir(root, "../escape").await;
+        assert!(
+            matches!(&up, StudioResponse::DirCreated { path } if path == "escape"),
+            "got {up:?}"
+        );
+        assert!(root.join("escape").is_dir());
+        assert!(!dir.path().parent().unwrap().join("escape").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_dir_does_not_follow_a_symlinked_parent_out_of_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+
+        let bad = create_dir(root, "link/planted").await;
+        assert!(
+            matches!(
+                bad,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "got {bad:?}"
+        );
+        assert!(!outside.path().join("planted").exists());
     }
 
     #[tokio::test]

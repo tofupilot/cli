@@ -737,6 +737,7 @@ mod tests {
                 measured_value: Some(serde_json::Value::Array(trace)),
                 units: Some("V".to_string()),
                 validators: vec![],
+                aggregations: vec![],
             },
             execution_id: None,
         };
@@ -798,6 +799,7 @@ mod tests {
             )),
             units: Some("V".to_string()),
             validators: vec![],
+            aggregations: vec![],
         };
         let event = StationEvent::PhaseComplete {
             phase_key: "3_sweep".to_string(),
@@ -982,6 +984,7 @@ mod tests {
             measured_value: Some(serde_json::json!(1.0)),
             units: None,
             validators: vec![],
+            aggregations: vec![],
         };
         let event = StationEvent::PhaseComplete {
             phase_key: "3_sweep".to_string(),
@@ -1024,6 +1027,7 @@ mod tests {
                 outcome: "PASS".to_string(),
                 is_decisive: Some(true),
             }],
+            aggregations: vec![],
         };
         let event = StationEvent::PhaseComplete {
             phase_key: "3_sweep".to_string(),

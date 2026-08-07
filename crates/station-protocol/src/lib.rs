@@ -877,6 +877,11 @@ pub enum StudioRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_sha256: Option<String>,
     },
+    /// Create a directory (and any missing parents) under the studio
+    /// root. `WriteFile` already creates the parents a file needs, so
+    /// this covers the one thing it cannot express: an empty directory,
+    /// made before there is a file to put in it.
+    CreateDir { path: String },
     /// Validate the project's procedure definition. `path: None`
     /// validates the root's default procedure file.
     Validate {
@@ -915,6 +920,10 @@ pub enum StudioResponse {
     Written {
         path: String,
         sha256: String,
+    },
+    DirCreated {
+        /// Root-relative path of the directory that now exists.
+        path: String,
     },
     Diagnostics {
         diagnostics: Vec<StudioDiagnostic>,
@@ -1059,6 +1068,48 @@ pub struct StudioSequenceMeasurement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     pub validators: Vec<StudioSequenceValidator>,
+    /// Measurement-level aggregations declared in the YAML.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregations: Vec<StudioSequenceAggregation>,
+    /// Multi-dimensional chart title, when the measurement declares axes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_axis: Option<StudioSequenceAxis>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub y_axis: Vec<StudioSequenceAxis>,
+}
+
+/// Declared aggregation on a measurement or axis. `type` is the free-form
+/// label the test code fills at runtime ("mean", "min", ...); only the
+/// declaration is editable here, values exist only in run results.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceAggregation {
+    #[serde(rename = "type")]
+    pub aggregation_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validators: Vec<StudioSequenceValidator>,
+}
+
+/// One axis of a multi-dimensional measurement as declared in the YAML.
+/// `key` and `legend` are the resolved values (the engine derives one
+/// from the other when only one is written).
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceAxis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregations: Vec<StudioSequenceAggregation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validators: Vec<StudioSequenceValidator>,
 }
 
 /// Display form of a validator: operator + value already rendered to
@@ -1202,6 +1253,32 @@ pub struct RunMeasurement {
     /// Per-validator results as evaluated at phase completion. Populated
     /// when the engine has validator metadata (YAML-defined measurements);
     /// left empty for ad-hoc measurements without declared validators.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validators: Vec<ValidatorResult>,
+    /// Measurement-level aggregations (mean/min/max/...), evaluated at
+    /// phase completion. Axis-level aggregations of multi-dimensional
+    /// measurements travel inside `measured_value` instead — this field
+    /// carries only the ones attached directly to the measurement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregations: Vec<AggregationResult>,
+}
+
+/// One evaluated aggregation attached to a `RunMeasurement`. The type is
+/// a free-form string ("mean", "min", ...) — the engine never computes
+/// values, it only evaluates the validators against the caller-supplied
+/// value and rolls up the outcome.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct AggregationResult {
+    #[serde(rename = "type")]
+    pub aggregation_type: String,
+    /// Caller-supplied value: number, string or boolean.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// `"PASS"` / `"FAIL"` / `"UNSET"` — same vocabulary as the outer
+    /// measurement outcome.
+    pub outcome: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub validators: Vec<ValidatorResult>,
 }
@@ -1820,6 +1897,7 @@ mod tests {
             run_id: None,
             deployment_id: None,
             unit: None,
+            only_phase: None,
         };
         assert_eq!(ev.execution_id(), Some("e"));
     }

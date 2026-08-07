@@ -1014,6 +1014,7 @@ fn extract_run_measurements(phase_event: &serde_json::Value) -> Vec<RunMeasureme
                         measured_value: m.get("measured_value").cloned(),
                         units: json_str(m, "units").map(String::from),
                         validators: extract_validator_results(m),
+                        aggregations: Vec::new(),
                     })
                 })
                 .collect()
