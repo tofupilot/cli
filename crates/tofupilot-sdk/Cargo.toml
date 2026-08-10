@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "2.14.1"
+version = "2.14.2"
 edition = "2021"
 rust-version = "1.75"
 description = "TofuPilot APIv2: TofuPilot REST API for managing runs, units, procedures, and more."
@@ -13,6 +13,7 @@ categories = ["api-bindings"]
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 fastrand = "2"
+log = "0.4"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }

@@ -61,6 +61,19 @@ async fn download_to_file(http: &reqwest::Client, url: &str, dest: impl AsRef<Pa
     Ok(())
 }
 
+/// Route a finalize failure to the `log` facade when a logger is installed
+/// (so applications can filter or capture it), falling back to stderr so the
+/// default configuration still surfaces the only signal that an attachment
+/// will read size 0.
+fn warn_finalize_failed(id: &str, e: &Error) {
+    let msg = format!("attachment {id} uploaded but not finalized (size will read 0): {e}");
+    if log::log_enabled!(log::Level::Warn) {
+        log::warn!("{msg}");
+    } else {
+        eprintln!("tofupilot: {msg}");
+    }
+}
+
 /// Sub-resource for run attachments: `client.runs().attachments().create()` / `.download()`
 pub struct RunAttachments<'a> {
     pub(crate) client: &'a RunsClient<'a>,
@@ -105,10 +118,7 @@ impl<'a> RunAttachments<'a> {
             .send()
             .await
         {
-            eprintln!(
-                "tofupilot: attachment {} uploaded but not finalized (size will read 0): {e}",
-                result.id
-            );
+            warn_finalize_failed(&result.id, &e);
         }
         Ok(result.id)
     }
@@ -168,10 +178,7 @@ impl<'a> UnitAttachments<'a> {
             .send()
             .await
         {
-            eprintln!(
-                "tofupilot: attachment {} uploaded but not finalized (size will read 0): {e}",
-                result.id
-            );
+            warn_finalize_failed(&result.id, &e);
         }
         Ok(result.id)
     }
