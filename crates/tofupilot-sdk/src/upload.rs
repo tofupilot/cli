@@ -91,6 +91,25 @@ impl<'a> RunAttachments<'a> {
             mime,
         )
         .await?;
+        // The PUT stores the bytes but records no metadata; finalize stamps
+        // size and content type from the stored object. Best-effort: the
+        // attachment is already stored and linked, so a metadata failure
+        // must not fail the upload — the caller would retry and duplicate
+        // it. The warning is the signal that size will read 0.
+        if let Err(e) = self
+            .client
+            .client
+            .attachments()
+            .finalize()
+            .id(result.id.as_str())
+            .send()
+            .await
+        {
+            eprintln!(
+                "tofupilot: attachment {} uploaded but not finalized (size will read 0): {e}",
+                result.id
+            );
+        }
         Ok(result.id)
     }
 
@@ -135,6 +154,25 @@ impl<'a> UnitAttachments<'a> {
             mime,
         )
         .await?;
+        // The PUT stores the bytes but records no metadata; finalize stamps
+        // size and content type from the stored object. Best-effort: the
+        // attachment is already stored and linked, so a metadata failure
+        // must not fail the upload — the caller would retry and duplicate
+        // it. The warning is the signal that size will read 0.
+        if let Err(e) = self
+            .client
+            .client
+            .attachments()
+            .finalize()
+            .id(result.id.as_str())
+            .send()
+            .await
+        {
+            eprintln!(
+                "tofupilot: attachment {} uploaded but not finalized (size will read 0): {e}",
+                result.id
+            );
+        }
         Ok(result.id)
     }
 
