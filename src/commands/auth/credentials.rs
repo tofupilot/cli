@@ -24,6 +24,13 @@ pub struct Credentials {
     pub organization_slug: String,
     #[serde(default)]
     pub installation_id: Option<String>,
+    /// Path to an extra CA certificate to trust, for a self-hosted instance
+    /// behind a private or corporate CA. Saved at login so an unattended
+    /// station picks it up without the operator exporting an environment
+    /// variable in whatever spawns the daemon. `serde(default)` keeps
+    /// credential files written by older CLIs readable.
+    #[serde(default)]
+    pub ca_cert: Option<String>,
 }
 
 impl Credentials {
@@ -192,6 +199,42 @@ fn pick_station_first(
     station.or(user)
 }
 
+/// The stored CA to install at process startup, checked across BOTH slots —
+/// station first. The user-first `load()` was used here before, which meant a
+/// machine holding a user login to the public cloud (`ca_cert: None`) and a
+/// station login to a self-hosted private-CA server never installed the
+/// station's CA, and every station request failed TLS verification — the
+/// exact failure `--ca-cert` exists to prevent. Station-first because the
+/// unattended station is what breaks hard without its CA, and installing a CA
+/// EXTENDS the trust store (see `http::set_ca_cert`), so picking one slot
+/// never breaks requests made with the other identity.
+pub fn stored_ca_cert() -> Option<String> {
+    let slot_ca = |c: Credentials| c.ca_cert.filter(|p| !p.is_empty());
+    read_file(&station_credentials_path())
+        .and_then(slot_ca)
+        .or_else(|| read_file(&credentials_path()).and_then(slot_ca))
+}
+
+/// The CA previously stored for `base`, for `login` to inherit when the
+/// operator re-logs in without `--ca-cert`. Checked across BOTH slots (station
+/// first): resolving through the user-first `load()` meant a station token
+/// rotation on a machine that also held a user login read the user slot, saw
+/// no matching base, inherited nothing — and silently rewrote `station.json`
+/// with `ca_cert: None`.
+pub fn stored_ca_for_base(base: &str) -> Option<String> {
+    let base = base.trim_end_matches('/').to_string();
+    let matching = move |c: Credentials| {
+        if c.base() == base {
+            c.ca_cert.filter(|p| !p.is_empty())
+        } else {
+            None
+        }
+    };
+    read_file(&station_credentials_path())
+        .and_then(matching.clone())
+        .or_else(|| read_file(&credentials_path()).and_then(matching))
+}
+
 /// Canonical "not logged in" message. Centralized so a UX tweak lands
 /// in one place across every command that requires auth.
 pub const NOT_LOGGED_IN: &str = "Not logged in. Run `tofupilot login` first.";
@@ -230,6 +273,7 @@ mod tests {
             base_url: base_url.into(),
             organization_slug: "org".into(),
             installation_id: None,
+            ca_cert: None,
         }
     }
 

@@ -226,6 +226,7 @@ mod tests {
             base_url: format!("http://127.0.0.1:{port}"),
             organization_slug: "test".into(),
             installation_id: Some("inst".into()),
+            ca_cert: None,
         }
     }
 

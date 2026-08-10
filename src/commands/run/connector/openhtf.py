@@ -1192,12 +1192,254 @@ def main():
         })
 
         original_init(self, *phases, **kwargs)
-        self.add_output_callbacks(lambda record: _output_callback(record, phase_docstrings))
+        # Kept on the instance so the patched `configure` below can re-add it:
+        # `test.configure(output_callbacks=[...])` REPLACES the callback list,
+        # and losing this one silences every event the CLI depends on
+        # (test_end above all — the run would never be uploaded).
+        self._tofupilot_cli_callback = (
+            lambda record: _output_callback(record, phase_docstrings)
+        )
+        self.add_output_callbacks(self._tofupilot_cli_callback)
         # Stash on the Test instance so the patched `execute` knows
         # whether to wait for `set_unit_resolved`.
         self._tofupilot_identify = not identify_off
 
     _patch_once(htf.Test, "__init__", patched_init)
+
+    # Drop the tofupilot Python upload callback when the CLI is driving.
+    #
+    # A procedure migrating from the self-managed integration still has
+    # `test.add_output_callbacks(upload(...))` in main.py. Left alone, that
+    # callback POSTs the record over HTTP while the CLI uploads the same
+    # execution through its own queue — one test, two runs on the dashboard.
+    # Users cannot be expected to edit every procedure before their first
+    # `tofupilot run`, so the CLI neutralizes it, the same way it replaces
+    # OpenHTF's UserInput plug with its own.
+    original_add_output_callbacks = htf.Test.add_output_callbacks
+
+    _TOFUPILOT_UPLOADER_MODULE = "tofupilot.openhtf"
+
+    def _name_is_tofupilot(name):
+        # Exact package or a submodule of it — a bare prefix test would also
+        # match an unrelated "tofupilot.openhtf_helpers".
+        name = name or ""
+        return name == _TOFUPILOT_UPLOADER_MODULE or name.startswith(
+            _TOFUPILOT_UPLOADER_MODULE + "."
+        )
+
+    def _module_is_tofupilot(obj):
+        return any(
+            _name_is_tofupilot(name)
+            for name in (getattr(obj, "__module__", ""),
+                         getattr(type(obj), "__module__", ""))
+        )
+
+    def _is_tofupilot_uploader(callback, _depth=0):
+        # Match on module rather than class identity: importing tofupilot here
+        # would force a dependency the CLI does not otherwise need, and the
+        # user may be on any version of it.
+        #
+        # Indirection has to be followed, or the check is trivially defeated by
+        # shapes people actually write when migrating: subclassing `upload` to
+        # change a timeout, wrapping it in functools.partial to bind an
+        # api_key, or passing a lambda. Each of those reports the *user's*
+        # module, not tofupilot's.
+        if _depth > 5 or callback is None:
+            return False
+        if _module_is_tofupilot(callback):
+            return True
+        # Bound method -> its instance. functools.partial -> the wrapped
+        # callable. Decorated -> whatever it wrapped.
+        for attr in ("__self__", "func", "__wrapped__"):
+            inner = getattr(callback, attr, None)
+            if inner is not None and inner is not callback:
+                if _is_tofupilot_uploader(inner, _depth + 1):
+                    return True
+        # A subclass defined in user code: the class itself reports the user's
+        # module, but a tofupilot base is still in the MRO.
+        for base in getattr(type(callback), "__mro__", ()):
+            if _name_is_tofupilot(getattr(base, "__module__", "")):
+                return True
+        # A lambda that only delegates — `lambda record: uploader(record)`.
+        # Restricted to exactly that shape on purpose. An earlier version
+        # walked every global a callback referenced, which dropped a user's own
+        # callback merely for MENTIONING `upload` by name (a comparison, a log
+        # line). Silently discarding a real callback is worse than missing an
+        # indirection, so the body must be a single call and nothing else.
+        code = getattr(callback, "__code__", None)
+        is_bare_delegation = (
+            code is not None
+            and getattr(code, "co_name", "") == "<lambda>"
+            and len(getattr(code, "co_names", ()) or ()) <= 1
+            and len(getattr(code, "co_freevars", ()) or ()) <= 1
+        )
+        if is_bare_delegation:
+            for cell in getattr(callback, "__closure__", None) or ():
+                try:
+                    value = cell.cell_contents
+                except ValueError:  # empty cell
+                    continue
+                if value is not callback and _is_tofupilot_uploader(value, _depth + 1):
+                    return True
+            referenced = getattr(callback, "__globals__", None) or {}
+            for name in getattr(code, "co_names", ()):
+                value = referenced.get(name)
+                if value is not None and value is not callback:
+                    if _is_tofupilot_uploader(value, _depth + 1):
+                        return True
+        return False
+
+    def _is_tofupilot_uploader_safe(callback):
+        """Never let the check itself break a run.
+
+        It reflects over arbitrary user objects, and an object whose
+        `__getattr__` raises — a Mock, a lazy proxy, an ORM row — would
+        otherwise propagate out of `add_output_callbacks` and kill the test
+        before a phase ran. Keeping the callback on failure is the safe
+        default: a duplicate run is recoverable, a dead test bench is not.
+        """
+        try:
+            return _is_tofupilot_uploader(callback)
+        except Exception:
+            return False
+
+    def patched_add_output_callbacks(self, *callbacks):
+        kept, dropped = [], []
+        for callback in callbacks:
+            (dropped if _is_tofupilot_uploader_safe(callback) else kept).append(callback)
+        for callback in dropped:
+            _emit({
+                "type": Event.WARNING,
+                "message": (
+                    "Ignored the tofupilot upload callback: the CLI is already "
+                    "uploading this run. Remove "
+                    "`test.add_output_callbacks(upload(...))` from your test to "
+                    "silence this."
+                ),
+            })
+        if kept:
+            return original_add_output_callbacks(self, *kept)
+        return None
+
+    _patch_once(htf.Test, "add_output_callbacks", patched_add_output_callbacks)
+
+    # `test.configure(output_callbacks=[...])` is OpenHTF's other registration
+    # path, and it REPLACES the option — two problems in one call: the
+    # tofupilot uploader in the new list bypasses the filter above, and the
+    # CLI's own JSON-line callback (added in `patched_init`) is thrown away,
+    # after which the CLI never receives `test_end` and the run is lost.
+    # Filter the incoming list the same way, then re-add the CLI callback.
+    original_configure = htf.Test.configure
+
+    def patched_configure(self, **kwargs):
+        callbacks = kwargs.get("output_callbacks")
+        if callbacks is not None:
+            kept = [cb for cb in callbacks if not _is_tofupilot_uploader_safe(cb)]
+            for _ in range(len(callbacks) - len(kept)):
+                _emit({
+                    "type": Event.WARNING,
+                    "message": (
+                        "Ignored the tofupilot upload callback: the CLI is "
+                        "already uploading this run. Remove it from "
+                        "`test.configure(output_callbacks=...)` to silence "
+                        "this."
+                    ),
+                })
+            # Identity check, not `in`: `in` calls user-defined __eq__, and a
+            # hostile object raising there would kill the run (same reason
+            # `_is_tofupilot_uploader_safe` exists).
+            cli_callback = getattr(self, "_tofupilot_cli_callback", None)
+            if cli_callback is not None and not any(
+                cb is cli_callback for cb in kept
+            ):
+                kept.append(cli_callback)
+            kwargs["output_callbacks"] = kept
+        return original_configure(self, **kwargs)
+
+    _patch_once(htf.Test, "configure", patched_configure)
+
+    # Neutralize the uploader at its SOURCE too, not only at registration.
+    # The registration filter above leaves two holes a migrating procedure
+    # actually hits:
+    #
+    #   * `upload()` is constructed before it is registered, and the CLI
+    #     strips TOFUPILOT_API_KEY from the child env (python.rs), so the
+    #     real class raises "Please set TOFUPILOT_API_KEY" inside the client
+    #     constructor — the run dies with a baffling API-key error before a
+    #     phase ran, and the filter never sees a callback at all.
+    #   * `test.configure(output_callbacks=[upload()])` — OpenHTF's other
+    #     documented registration path — never goes through
+    #     `add_output_callbacks`, so the callback survives and one execution
+    #     produces two runs.
+    #
+    # Replacing the class in the imported module closes both: construction
+    # becomes a warning instead of a crash, and an instance registered through
+    # any path does nothing when OpenHTF invokes it. This must happen BEFORE
+    # the user's script runs its imports: `from tofupilot.openhtf import
+    # upload` binds the class object into the user's namespace, and patching
+    # the module afterwards would not rebind it. `find_spec` first so a
+    # procedure that does not use tofupilot never pays the package's import
+    # cost. The registration filter above still matters — it catches the
+    # stand-in (same `__module__`) and older layouts this block misses.
+    _tp_openhtf = None
+    try:
+        if importlib.util.find_spec("tofupilot") is not None:
+            import tofupilot.openhtf as _tp_openhtf
+    except Exception:
+        _tp_openhtf = None
+
+    if _tp_openhtf is not None:
+        class _NeutralizedUpload:
+            """Inert stand-in for `tofupilot.openhtf.upload` under the CLI."""
+
+            def __init__(self, *args, **kwargs):
+                _emit({
+                    "type": Event.WARNING,
+                    "message": (
+                        "Neutralized the tofupilot upload callback: the CLI "
+                        "is already uploading this run. Remove `upload(...)` "
+                        "from your test to silence this."
+                    ),
+                })
+
+            def __call__(self, test_record):
+                return ""
+
+        # The registration filter matches on __module__; claiming the real
+        # module keeps the stand-in inside its net as defense in depth.
+        _NeutralizedUpload.__module__ = "tofupilot.openhtf.upload"
+        _NeutralizedUpload.__name__ = "upload"
+        _NeutralizedUpload.__qualname__ = "upload"
+        _tp_openhtf.upload = _NeutralizedUpload
+        _tp_upload_mod = sys.modules.get("tofupilot.openhtf.upload")
+        if _tp_upload_mod is not None:
+            _tp_upload_mod.upload = _NeutralizedUpload
+
+        # SDKs before 2.15.0 also export the `TofuPilot` context manager,
+        # which constructs the same client (same crash on the stripped API
+        # key) and streamed to the legacy operator UI. Same treatment.
+        if hasattr(_tp_openhtf, "TofuPilot"):
+            class _NeutralizedTofuPilot:
+                def __init__(self, *args, **kwargs):
+                    _emit({
+                        "type": Event.WARNING,
+                        "message": (
+                            "Neutralized the `TofuPilot` context manager: the "
+                            "CLI uploads this run and provides the operator "
+                            "UI. Remove `with TofuPilot(test):` from your "
+                            "test to silence this."
+                        ),
+                    })
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+            _NeutralizedTofuPilot.__module__ = "tofupilot.openhtf"
+            _NeutralizedTofuPilot.__name__ = "TofuPilot"
+            _tp_openhtf.TofuPilot = _NeutralizedTofuPilot
 
     # Wrap `Test.execute` so the framework identify-unit handshake runs
     # before any phase. Reading `set_unit_resolved` here (not in

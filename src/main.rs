@@ -65,6 +65,14 @@ enum Commands {
         /// Setup token from dashboard (headless station login, no browser)
         #[arg(long, conflicts_with = "org")]
         token: Option<String>,
+        /// PEM file holding an extra CA to trust, for a self-hosted instance
+        /// behind a private or corporate CA. Saved with the credentials, so
+        /// later commands and the station daemon reuse it, and reused on a
+        /// re-login to the same server unless overridden. Pass an empty value
+        /// to clear it. Adds to the built-in roots; it never disables
+        /// certificate verification.
+        #[arg(long, value_name = "PATH")]
+        ca_cert: Option<String>,
     },
     /// Show the currently logged-in user
     Whoami,
@@ -361,6 +369,24 @@ async fn main() {
     log::enable_vt();
     install_global_signal_handlers();
     let cli = Cli::parse();
+    // A CA saved at login has to be installed before the shared HTTP client
+    // is first built, which happens lazily on the first request from any
+    // command. An explicit TOFUPILOT_CA_CERT wins, so an operator can
+    // override the stored path without logging in again.
+    //
+    // `login` is excluded: it targets a server the stored credentials may have
+    // nothing to do with, and decides for itself whether to reuse the saved CA
+    // (same server) or start clean. Installing here first would hand a private
+    // CA to a login against a completely different instance.
+    let is_login = matches!(cli.command, Some(Commands::Login { .. }));
+    if !is_login && std::env::var_os(http::CA_CERT_ENV).is_none() {
+        // Both credential slots are consulted (station first), not the
+        // user-first `load()`: a user login without a CA must not shadow a
+        // station's saved CA. See `stored_ca_cert`.
+        if let Some(path) = commands::auth::credentials::stored_ca_cert() {
+            http::set_ca_cert(&path);
+        }
+    }
     let json_mode = cli.json;
 
     match cli.command {
@@ -368,9 +394,15 @@ async fn main() {
             ref url,
             ref org,
             ref token,
+            ref ca_cert,
         }) => {
-            if let Err(e) =
-                commands::auth::login_cmd(url.as_deref(), org.as_deref(), token.as_deref()).await
+            if let Err(e) = commands::auth::login_cmd(
+                url.as_deref(),
+                org.as_deref(),
+                token.as_deref(),
+                ca_cert.as_deref(),
+            )
+            .await
             {
                 log::error(&format!("Login failed: {e}"));
                 std::process::exit(1);

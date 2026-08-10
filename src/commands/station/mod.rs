@@ -1562,7 +1562,7 @@ enum AuthProbeOutcome {
 /// installation has been revoked (typically replaced by a newer login).
 async fn auth_probe(creds: &Credentials) -> AuthProbeOutcome {
     let base = creds.base();
-    let Ok(client) = reqwest::Client::builder()
+    let Ok(client) = crate::http::client_builder()
         .timeout(crate::config::timeouts::AUTH_PROBE)
         .build()
     else {

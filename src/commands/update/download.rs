@@ -29,7 +29,9 @@ pub struct VersionInfo {
 }
 
 pub async fn fetch() -> crate::error::CliResult<VersionInfo> {
-    let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
+    let client = crate::http::client_builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()?;
 
     // Retry the send leg. A reset right after a network switch/wake makes the
     // first `.send()` fail with "error sending request for url" even though the
@@ -135,7 +137,9 @@ pub async fn download_and_stage(info: &VersionInfo, staged: &Path) -> crate::err
     }
     let _ = fs::remove_file(&archive_tmp);
 
-    let client = Client::builder().timeout(DOWNLOAD_TIMEOUT).build()?;
+    let client = crate::http::client_builder()
+        .timeout(DOWNLOAD_TIMEOUT)
+        .build()?;
 
     // Retry the whole archive download, not just the send. A reset can hit
     // either leg (the same network-switch/wake blip the version check retries):

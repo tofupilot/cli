@@ -122,13 +122,44 @@ pub async fn login_cmd(
     base_url: Option<&str>,
     org_slug: Option<&str>,
     token: Option<&str>,
+    ca_cert: Option<&str>,
 ) -> Result<(), CliError> {
     let base = base_url.unwrap_or(DEFAULT_BASE_URL);
-    let client = Client::builder().timeout(timeouts::AUTH_CLIENT).build()?;
+    // Re-logging in without --ca-cert keeps the CA already on file: writing
+    // None would drop a self-hosted station back to the public trust store,
+    // and every later command would fail with an opaque TLS error whose cause
+    // is a flag the operator did not type this time.
+    //
+    // Only inherited for the SAME server, and looked up across BOTH credential
+    // slots (station first) — see `stored_ca_for_base` for why the user-first
+    // `load()` silently wiped a station's CA on token rotation. Passing
+    // --ca-cert "" clears it.
+    let explicit_ca = matches!(ca_cert, Some(p) if !p.is_empty());
+    let stored_ca = credentials::stored_ca_for_base(base);
+    let ca_cert = match ca_cert {
+        Some(path) => Some(path.to_string()),
+        None => stored_ca,
+    }
+    .filter(|p| !p.is_empty());
+    // Install before the first request: a self-hosted login must trust the
+    // private CA during login itself, not only afterwards. Precedence matches
+    // the rest of the CLI and the self-hosting docs: an explicit --ca-cert
+    // typed right now beats everything, but a merely INHERITED stored path
+    // must not beat TOFUPILOT_CA_CERT — an operator who rotated the CA and
+    // exported the new path would otherwise lose to a stale stored one
+    // (main.rs applies the same env-wins rule to the startup install).
+    if let Some(path) = ca_cert.as_deref() {
+        if explicit_ca || std::env::var_os(crate::http::CA_CERT_ENV).is_none() {
+            crate::http::set_ca_cert(path);
+        }
+    }
+    let client = crate::http::client_builder()
+        .timeout(timeouts::AUTH_CLIENT)
+        .build()?;
 
     // Token path: redeem pre-approved setup token (headless station login)
     if let Some(token) = token {
-        return redeem_token(&client, base, token).await;
+        return redeem_token(&client, base, token, ca_cert.as_deref()).await;
     }
 
     // Device flow path: interactive browser login
@@ -208,6 +239,7 @@ pub async fn login_cmd(
         base_url: base.to_string(),
         organization_slug: org.slug.clone(),
         installation_id: key.installation_id,
+        ca_cert: ca_cert.clone(),
     };
     let creds_for_save = creds.clone();
     tokio::task::spawn_blocking(move || credentials::save(&creds_for_save))
@@ -215,7 +247,9 @@ pub async fn login_cmd(
         .map_err(|e| CliError::msg(format!("save task panicked: {e}")))??;
 
     // Step 7: Fetch and cache whoami
-    let whoami_client = Client::builder().timeout(timeouts::AUTH_PROBE).build()?;
+    let whoami_client = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()?;
     if let Ok(cache) = fetch_whoami(&whoami_client, &creds).await {
         save_whoami_cache(&cache);
     }
@@ -282,7 +316,10 @@ pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
         // the cached identity, so a failed refresh costs nothing but the
         // probe wait, and only once per TTL.
         if whoami_cache_is_stale(&cache) {
-            if let Ok(client) = Client::builder().timeout(timeouts::AUTH_PROBE).build() {
+            if let Ok(client) = crate::http::client_builder()
+                .timeout(timeouts::AUTH_PROBE)
+                .build()
+            {
                 if let Ok(fresh) = fetch_whoami(&client, &creds).await {
                     save_whoami_cache(&fresh);
                 }
@@ -293,7 +330,9 @@ pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
 
     // Cold cache: nothing local to show, so fetch from the server. Still
     // falls back to a minimal line if the network is unavailable.
-    let client = Client::builder().timeout(timeouts::AUTH_PROBE).build()?;
+    let client = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()?;
     match fetch_whoami(&client, &creds).await {
         Ok(cache) => {
             save_whoami_cache(&cache);
@@ -357,7 +396,10 @@ pub async fn logout_cmd() -> Result<(), CliError> {
 /// of the server outcome. Warns on non-2xx so lost audit events are visible.
 pub async fn notify_server_logout(creds: &Credentials, uninstalled: bool) {
     let base = creds.base();
-    let Ok(client) = Client::builder().timeout(timeouts::AUTH_PROBE).build() else {
+    let Ok(client) = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()
+    else {
         return;
     };
     let resp = client
@@ -404,7 +446,12 @@ async fn fetch_whoami(client: &Client, creds: &Credentials) -> Result<db::Whoami
     })
 }
 
-async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), CliError> {
+async fn redeem_token(
+    client: &Client,
+    base: &str,
+    token: &str,
+    ca_cert: Option<&str>,
+) -> Result<(), CliError> {
     crate::log::info("Redeeming setup token...");
 
     // Hardware fields required up-front — installation row is inserted
@@ -464,6 +511,7 @@ async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), Cl
         base_url: base.to_string(),
         organization_slug: resp.organization_slug,
         installation_id: resp.installation_id,
+        ca_cert: ca_cert.map(str::to_string),
     };
     // See login fn above — icacls call inside `save` shells out on
     // Windows; offload off the tokio executor.
@@ -473,7 +521,9 @@ async fn redeem_token(client: &Client, base: &str, token: &str) -> Result<(), Cl
         .map_err(|e| CliError::msg(format!("save task panicked: {e}")))??;
 
     // Fetch and cache identity
-    let whoami_client = Client::builder().timeout(timeouts::AUTH_PROBE).build()?;
+    let whoami_client = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()?;
     if let Ok(cache) = fetch_whoami(&whoami_client, &creds).await {
         save_whoami_cache(&cache);
         display_whoami(&cache, false);

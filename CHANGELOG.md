@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0]
+
+### Added
+
+- `tofupilot login --ca-cert /path/to/ca-certificate.pem` for a self-hosted instance
+  behind a private or corporate CA. Until now the server address was
+  configurable while its certificate was not, so a station on an internal CA
+  could not use the CLI at all. The path is saved with the credentials, so
+  later commands and the station daemon reuse it without exporting anything
+  into the service environment; `TOFUPILOT_CA_CERT` overrides it for a single
+  command. The certificate is added to the built-in roots rather than
+  replacing them, so public hosts keep working, and there is no option to
+  disable certificate verification.
+
+  This covers every HTTP call — login, deploy, pull, run upload, the offline
+  queue. It does **not** yet cover the realtime WebSocket: `centrifuge-client`
+  builds its own TLS stack pinned to the bundled Mozilla roots and exposes no
+  way to add one. A station on a private CA therefore runs and uploads
+  normally but stays "offline" on the dashboard, with no live streaming. That
+  needs a fix in `centrifuge-client` before self-hosted stations are fully
+  supported on the CLI.
+
+### Fixed
+
+- A procedure that still carries the Python `upload` callback no longer
+  uploads its run twice. Moving off the self-managed integration used to mean
+  editing every test file first: left in place, the callback POSTed the record
+  while the CLI uploaded the same execution through its own queue, producing
+  two runs with different ids. The CLI now ignores that callback and says so.
+  Any other output callback — `json_factory`, your own — is untouched.
+
 ## [1.1.0]
 
 ### Added
