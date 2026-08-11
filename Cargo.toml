@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -77,6 +77,15 @@ libc = "0.2"
 # CLI runs as a `tofupilot.service` user unit with `WatchdogSec` set.
 # No-op outside systemd (the helper checks `$NOTIFY_SOCKET` itself).
 sd-notify = "0.4"
+# The linux binaries are static musl builds, so getaddrinfo is musl's
+# resolver, which returns EAI_AGAIN when any of its parallel A/AAAA
+# queries goes unanswered (and, on older bundled musl, on any truncated
+# UDP answer) — real DNS environments trigger this while glibc tools on
+# the same host resolve fine. hickory-dns swaps
+# in a pure-Rust resolver for every reqwest client in the binary (feature
+# unification covers the SDK's clients too). Linux-only on purpose: macOS
+# and Windows keep their OS resolver.
+reqwest = { version = "0.12", default-features = false, features = ["hickory-dns"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
