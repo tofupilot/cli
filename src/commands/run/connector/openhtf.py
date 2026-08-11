@@ -1415,9 +1415,12 @@ def main():
         if _tp_upload_mod is not None:
             _tp_upload_mod.upload = _NeutralizedUpload
 
-        # SDKs before 2.15.0 also export the `TofuPilot` context manager,
-        # which constructs the same client (same crash on the stripped API
-        # key) and streamed to the legacy operator UI. Same treatment.
+        # The SDK also exports the `TofuPilot` context manager — today a
+        # deprecated wrapper around the upload callback, in older SDKs the
+        # MQTT streamer for the legacy operator UI. Either constructs a
+        # client (same crash on the stripped API key) and would double-upload
+        # under the CLI, so this guard must stay for as long as the SDK
+        # ships the class. Same treatment.
         if hasattr(_tp_openhtf, "TofuPilot"):
             class _NeutralizedTofuPilot:
                 def __init__(self, *args, **kwargs):
