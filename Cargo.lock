@@ -4011,7 +4011,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tofupilot"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4051,7 +4051,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "tofupilot 2.14.0",
+ "tofupilot 2.14.2",
  "tokio",
  "toml",
  "tower",
@@ -4064,10 +4064,11 @@ dependencies = [
 
 [[package]]
 name = "tofupilot"
-version = "2.14.0"
+version = "2.14.2"
 dependencies = [
  "chrono",
  "fastrand",
+ "log",
  "percent-encoding",
  "reqwest",
  "serde",

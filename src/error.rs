@@ -18,8 +18,12 @@ pub enum CliError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
-    /// HTTP transport error from reqwest.
-    #[error(transparent)]
+    /// HTTP transport error from reqwest. Displayed with its full source
+    /// chain: reqwest's own `Display` stops at "error sending request for url
+    /// (…)", hiding the actual cause (TLS certificate rejection, DNS failure,
+    /// unsupported proxy scheme) — the one detail needed to debug a station
+    /// that cannot connect.
+    #[error("{}", source_chain(.0))]
     Http(#[from] reqwest::Error),
 
     /// A non-success HTTP response, carrying the status for retry
@@ -31,6 +35,18 @@ pub enum CliError {
     /// component errors flow through here with a descriptive prefix.
     #[error("{0}")]
     Message(String),
+}
+
+/// Render an error followed by every `source()` below it, `": "`-separated.
+fn source_chain(top: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = top.to_string();
+    let mut current = top.source();
+    while let Some(cause) = current {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        current = cause.source();
+    }
+    out
 }
 
 impl CliError {
@@ -65,3 +81,50 @@ impl From<&str> for CliError {
 
 /// Convenience alias for fallible CLI internals.
 pub type CliResult<T> = Result<T, CliError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Layer {
+        msg: &'static str,
+        cause: Option<Box<Layer>>,
+    }
+
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.msg)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.cause.as_deref().map(|c| c as _)
+        }
+    }
+
+    #[test]
+    fn source_chain_joins_every_cause() {
+        let err = Layer {
+            msg: "error sending request",
+            cause: Some(Box::new(Layer {
+                msg: "client error (Connect)",
+                cause: Some(Box::new(Layer {
+                    msg: "invalid peer certificate: UnknownIssuer",
+                    cause: None,
+                })),
+            })),
+        };
+        assert_eq!(
+            source_chain(&err),
+            "error sending request: client error (Connect): invalid peer certificate: UnknownIssuer"
+        );
+    }
+
+    #[test]
+    fn source_chain_without_cause_is_the_message_alone() {
+        let err = Layer { msg: "flat", cause: None };
+        assert_eq!(source_chain(&err), "flat");
+    }
+}
