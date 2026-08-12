@@ -1316,6 +1316,10 @@ fn build_run_request(
     data: &RunData,
     procedure_id: &str,
     procedure_dir: &Path,
+    // The procedure file actually being run. Passed explicitly rather
+    // than re-derived from `procedure_dir`: a manifest `entry_point` can
+    // name any `.yaml`, so the file is not always `procedure.yaml`.
+    procedure_yaml: &Path,
     operated_by: Option<&str>,
 ) -> crate::error::CliResult<RunCreateRequest> {
     let outcome = data
@@ -1431,7 +1435,7 @@ fn build_run_request(
         b = b.unit_metadata(unit_md);
     }
 
-    if let Some(version) = super::procedure_version::read_procedure_version(procedure_dir) {
+    if let Some(version) = super::procedure_version::read_yaml_version(procedure_yaml) {
         b = b.procedure_version(version);
     }
 
@@ -2070,7 +2074,13 @@ pub async fn run_yaml_procedure(
 
     // Build RunCreateRequest from accumulated data
     let data = run_data.lock().await;
-    match build_run_request(&data, procedure_id, procedure_dir, operated_by.as_deref()) {
+    match build_run_request(
+        &data,
+        procedure_id,
+        procedure_dir,
+        procedure_yaml,
+        operated_by.as_deref(),
+    ) {
         Ok(request) => {
             let queued = QueuedRun {
                 request,
@@ -2404,7 +2414,14 @@ mod tests {
             ]),
         ));
 
-        let req = build_run_request(&data, "proc-1", tmp.path(), None).unwrap();
+        let req = build_run_request(
+            &data,
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
 
         let rmd = req.metadata.expect("run metadata set");
         assert_eq!(rmd.get("modification"), Some(&serde_json::json!("MOD-42")));
@@ -2460,7 +2477,14 @@ mod tests {
     fn build_run_request_omits_empty_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let data = empty_run_data();
-        let req = build_run_request(&data, "proc-1", tmp.path(), None).unwrap();
+        let req = build_run_request(
+            &data,
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
         assert!(req.metadata.is_none());
         assert!(req.unit_metadata.is_none());
     }

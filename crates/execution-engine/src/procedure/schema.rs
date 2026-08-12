@@ -326,7 +326,11 @@ pub struct ProcedureYaml {
     #[serde(deserialize_with = "serde_trim::string_trim")]
     pub name: String,
 
-    #[serde(deserialize_with = "serde_trim::string_trim")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "serde_trim::string_trim"
+    )]
     pub version: String,
 
     #[serde(
@@ -364,7 +368,11 @@ pub struct ProcedureDefinition {
     #[validate(length(min = 1, max = 100))]
     pub name: String,
 
-    #[validate(length(min = 1, max = 50))]
+    /// Optional label the user bumps by hand. Recorded with each run as
+    /// the `procedure_version`. Empty when the YAML omits it, in which
+    /// case the run is not linked to any version.
+    #[serde(default)]
+    #[validate(length(max = 50))]
     pub version: String,
 
     #[serde(default)]

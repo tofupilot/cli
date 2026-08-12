@@ -409,8 +409,8 @@ async fn handle_upload_run(
     // Rewrite the local marker id ("studio-local") with the procedure
     // the user picked. Safe after the fact: `deployment_id` is the only
     // other procedure-derived field and a studio run has none, while
-    // `procedure_version` came from the procedure directory and stays
-    // the local YAML's version.
+    // `procedure_version` came from the procedure's own file and stays
+    // as-is.
     queued.request.procedure_id = procedure_id.clone();
 
     crate::commands::run::spawn_upload(

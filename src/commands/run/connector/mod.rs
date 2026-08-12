@@ -1466,7 +1466,7 @@ fn build_request(
         b = b.sub_units(sub);
     }
 
-    if let Some(version) = super::procedure_version::read_procedure_version(procedure_dir) {
+    if let Some(version) = super::procedure_version::read_pyproject_version(procedure_dir) {
         b = b.procedure_version(version);
     }
 

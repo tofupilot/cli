@@ -184,6 +184,54 @@ mod tests {
     }
 
     #[test]
+    fn version_may_be_omitted() {
+        let result = load_from_str(
+            r#"
+name: No Version
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        );
+        let def = result.expect("version is optional");
+        assert_eq!(def.version, "");
+    }
+
+    #[test]
+    fn blank_version_loads_as_empty() {
+        let result = load_from_str(
+            r#"
+name: Blank Version
+version: "   "
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        );
+        let def = result.expect("a whitespace-only version trims to empty and still loads");
+        assert_eq!(def.version, "");
+    }
+
+    #[test]
+    fn version_over_50_chars_rejected() {
+        let result = load_from_str(&format!(
+            r#"
+name: Long Version
+version: "{}"
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+            "1".repeat(51)
+        ));
+        let err = result.expect_err("a version over 50 chars must still be rejected");
+        assert!(err.contains("Validation failed"), "unexpected error: {err}");
+    }
+
+    #[test]
     fn station_scope_on_plug_loads() {
         let result = load_from_str(
             r#"
