@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "1.2.2"
+version = "1.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -16,12 +16,30 @@ categories = ["command-line-utilities", "development-tools::testing"]
 name = "tofupilot"
 path = "src/main.rs"
 
+[features]
+default = ["realtime-native-roots", "reqwest-webpki-roots", "reqwest-native-roots"]
+# Aliases onto the shared tokio-tungstenite node so `src/http.rs` can assert
+# the realtime TLS stack at compile time. Enabling the dependency feature here
+# is what makes it observable as a `cfg` in our own crate.
+realtime-native-roots = ["tokio-tungstenite/rustls-tls-native-roots"]
+# Same trick for reqwest's two independent root sets, so `http.rs` can assert
+# HTTP trusts exactly what the realtime WebSocket trusts.
+reqwest-webpki-roots = ["reqwest/rustls-tls"]
+reqwest-native-roots = ["reqwest/rustls-tls-native-roots"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# BOTH root sets, to match the realtime WebSocket exactly. `rustls-tls` alone
+# resolves to webpki roots only; `rustls-tls-native-roots` alone swaps them for
+# the OS store. reqwest tracks the two independently
+# (`tls_built_in_certs_webpki` / `..._native`), so enabling both gives HTTP the
+# same trust the WebSocket has. Leaving them asymmetric means a machine-wide
+# corporate CA brings the station "online" while every upload fails — or a
+# broken system store breaks the public cloud.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
 # Direct dep so the update retry can downcast `reqwest::Error` sources to
 # `hyper::Error` and detect a mid-stream "connection closed before message
 # completed" reset. Load-bearing invariant: this MUST resolve to the SAME
@@ -54,7 +72,43 @@ async-trait = "0.1"
 thiserror = "2"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
-centrifuge-client = { version = "0.1.0-alpha.1", default-features = false, features = ["rustls"] }
+# Pinned to our fork for `ClientConfig::connector`, which lets the realtime
+# WebSocket trust the CA file passed to `tofupilot login --ca-cert` instead of
+# only the roots baked into the build. Upstream has no such hook (it calls
+# `connect_async`, which takes no connector), so without this the flag would
+# cover HTTP but not the realtime link. PR is open upstream; drop the `git`
+# pin for a plain version once it lands in a release.
+# `rev`, not `branch`: a branch pin follows force-pushes, so the build could
+# change under us without a lockfile diff to review.
+centrifuge-client = { git = "https://github.com/tofupilot/centrifuge-rs", rev = "45c2e82bff5c5599ad99725802310c83899cce5c", default-features = false, features = ["rustls"] }
+# Not used directly — exists only to turn on `rustls-tls-native-roots` inside
+# centrifuge-client's tokio-tungstenite via cargo feature unification, so the
+# realtime WebSocket trusts the OS certificate store in addition to the bundled
+# Mozilla roots. This is what lets a self-hosted station behind a private CA
+# (installed machine-wide) open the realtime link; HTTP gets the same CA through
+# `http.rs`. On Linux the loader is `openssl-probe` (filesystem path probing
+# only, no OpenSSL linking) so static musl builds are unaffected. Load-bearing
+# invariant: the version MUST resolve to the SAME tokio-tungstenite node
+# centrifuge-client links (today both are 0.29) — if they ever split into two
+# majors, unification stops and the OS store silently drops out of the trust
+# path. On bumps, `cargo tree -i tokio-tungstenite@<ver>` must show
+# centrifuge-client and tofupilot sharing one node. (axum pulls its own older
+# tokio-tungstenite for the local ws server — separate node, no TLS client,
+# irrelevant here.)
+#
+# Second invariant: `native-tls` must stay OFF on that node. tokio-tungstenite
+# picks the default connector with `cfg(all(__rustls-tls, not(native-tls)))`,
+# so any dependency enabling `native-tls` silently wins the connector, links
+# OpenSSL (breaking static musl) and drops the rustls root store configured
+# here. `realtime_tls_stack_is_rustls_with_native_roots` in src/http.rs fails
+# the build's test run if that ever happens.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["rustls-tls-native-roots", "connect"] }
+# Build the realtime connector that carries the `--ca-cert` bundle. Features
+# must MATCH what tokio-tungstenite already resolves (`ring`, no aws-lc): a
+# second crypto provider would both bloat the binary and fail the musl builds.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+webpki-roots = "0.26"
 ratatui = "0.30"
 ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

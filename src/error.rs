@@ -124,7 +124,10 @@ mod tests {
 
     #[test]
     fn source_chain_without_cause_is_the_message_alone() {
-        let err = Layer { msg: "flat", cause: None };
+        let err = Layer {
+            msg: "flat",
+            cause: None,
+        };
         assert_eq!(source_chain(&err), "flat");
     }
 }

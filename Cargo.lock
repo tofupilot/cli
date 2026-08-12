@@ -449,8 +449,7 @@ dependencies = [
 [[package]]
 name = "centrifuge-client"
 version = "0.1.0-alpha.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4675efbdd912aaccf6dff9b279044a1ff996a66e9ba5493af5a597597f17bcaf"
+source = "git+https://github.com/tofupilot/centrifuge-rs?rev=45c2e82bff5c5599ad99725802310c83899cce5c#45c2e82bff5c5599ad99725802310c83899cce5c"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1605,7 +1604,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -4132,7 +4131,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tofupilot"
-version = "1.2.2"
+version = "1.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4161,6 +4160,8 @@ dependencies = [
  "redb",
  "regex",
  "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "sd-notify",
  "self-replace",
  "semver",
@@ -4174,10 +4175,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tofupilot 2.14.2",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "toml",
  "tower",
  "tower-http",
  "uuid",
+ "webpki-roots 0.26.11",
  "windows-sys 0.59.0",
  "zip",
  "zstd",
@@ -4268,6 +4271,7 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",

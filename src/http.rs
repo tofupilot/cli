@@ -23,14 +23,12 @@ static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// verification stays on: there is deliberately no "accept invalid certs"
 /// escape hatch.
 ///
-/// SCOPE: this covers HTTP only. The realtime link does not use it —
-/// `centrifuge-client` calls `tokio_tungstenite::connect_async` with the
-/// `rustls-tls-webpki-roots` feature, which pins the bundled Mozilla roots and
-/// takes no connector, so there is nowhere to inject a certificate. A station
-/// on a private CA runs and uploads over HTTP but cannot open the WebSocket,
-/// and shows as offline on the dashboard. Fixing that needs
-/// `centrifuge-client` to accept a rustls `ClientConfig` (or a custom
-/// `Connector`) so this certificate can be threaded through to it.
+/// This covers every connection the CLI makes. HTTP goes through the reqwest
+/// builder below; the realtime WebSocket gets the same certificates via
+/// [`realtime_connector`], which centrifuge-client accepts through our forked
+/// `ClientConfig::connector`. The WebSocket additionally trusts the OS
+/// certificate store (`rustls-tls-native-roots`), so a CA installed
+/// machine-wide works even without this file.
 pub const CA_CERT_ENV: &str = "TOFUPILOT_CA_CERT";
 
 /// CA path resolved from stored credentials or `login --ca-cert`, installed
@@ -47,6 +45,13 @@ static CA_CERT_OVERRIDE: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// `client()` snapshots the configuration on first use either way.
 pub fn set_ca_cert(path: &str) {
     let _ = CA_CERT_OVERRIDE.set(std::path::PathBuf::from(path));
+}
+
+/// Whether an extra CA is configured at all. The realtime client uses this to
+/// word a TLS failure: with a CA set the certificate is genuinely untrusted by
+/// it, without one the operator is told the `--ca-cert` flag exists.
+pub fn ca_cert_configured() -> bool {
+    configured_ca_path().is_some_and(|p| !p.as_os_str().is_empty())
 }
 
 /// The CA path in effect: the installed override, else `TOFUPILOT_CA_CERT`.
@@ -107,6 +112,83 @@ fn extra_certs() -> &'static [reqwest::Certificate] {
             Vec::new()
         }
     })
+}
+
+/// TLS connector for the realtime WebSocket, mirroring the trust the HTTP
+/// client gets: bundled Mozilla roots, the OS certificate store, and the
+/// configured CA file. `None` when no CA is configured — tokio-tungstenite
+/// then builds its own default connector, which already covers the first two.
+///
+/// Built once: the station reconnects on every transport drop, and re-reading
+/// plus re-parsing the PEM on each attempt would repeat the same work (and the
+/// same warning) forever.
+static REALTIME_CONNECTOR: OnceLock<Option<tokio_tungstenite::Connector>> = OnceLock::new();
+
+pub fn realtime_connector() -> Option<tokio_tungstenite::Connector> {
+    REALTIME_CONNECTOR
+        .get_or_init(|| {
+            let path = configured_ca_path().filter(|p| !p.as_os_str().is_empty())?;
+
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+            // Same policy as the HTTP path: a broken OS store or an unreadable
+            // CA file degrades to the roots we do have rather than killing the
+            // command, and warns once so the cause is visible.
+            let native = rustls_native_certs::load_native_certs();
+            if !native.errors.is_empty() {
+                crate::log::warn(&format!(
+                    "Could not read the system certificate store ({:?}). \
+                     Continuing with the built-in roots.",
+                    native.errors
+                ));
+            }
+            let (_, ignored) = roots.add_parsable_certificates(native.certs);
+            if ignored > 0 {
+                crate::log::warn(&format!(
+                    "Skipped {ignored} unparsable certificate(s) in the system store."
+                ));
+            }
+
+            // `rustls-pki-types` rather than `rustls-pemfile`: the latter is
+            // unmaintained (RUSTSEC-2025-0134) and is now only a thin wrapper
+            // around this same parser.
+            use rustls::pki_types::pem::PemObject;
+            match rustls::pki_types::CertificateDer::pem_file_iter(&path)
+                .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            {
+                Ok(certs) if certs.is_empty() => {
+                    crate::log::warn(&format!(
+                        "{CA_CERT_ENV}: {} contains no certificates. \
+                         The realtime link will not trust it.",
+                        path.display()
+                    ));
+                }
+                Ok(certs) => {
+                    let (_, ignored) = roots.add_parsable_certificates(certs);
+                    if ignored > 0 {
+                        crate::log::warn(&format!(
+                            "{CA_CERT_ENV}: skipped {ignored} unparsable certificate(s) in {}.",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(message) => {
+                    crate::log::warn(&format!(
+                        "{CA_CERT_ENV}: {message}. The realtime link will not trust it."
+                    ));
+                }
+            }
+
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+                config,
+            )))
+        })
+        .clone()
 }
 
 /// Add the configured extra CA (if any) to a builder. The one shared path for
@@ -182,5 +264,89 @@ pub trait RequestBuilderExt {
 impl RequestBuilderExt for reqwest::RequestBuilder {
     fn bearer(self, token: &str) -> Self {
         self.header("Authorization", format!("Bearer {token}"))
+    }
+}
+
+// The realtime link's TLS stack is decided entirely by feature resolution on
+// the shared `tokio-tungstenite` node (see the dependency comment in
+// Cargo.toml). These assertions fail the build if that resolution ever
+// regresses — a silent regression would either drop the OS trust store (so
+// self-hosted stations behind a private CA stop connecting) or pull OpenSSL
+// into the static musl builds.
+#[cfg(not(feature = "realtime-native-roots"))]
+compile_error!(
+    "the realtime WebSocket must trust the OS certificate store, or self-hosted \
+     stations behind a private CA cannot connect: keep the default \
+     `realtime-native-roots` feature on (see Cargo.toml)"
+);
+
+// HTTP must trust exactly what the realtime WebSocket trusts. reqwest tracks
+// its two root sets independently, so dropping either one leaves the transports
+// disagreeing: without the OS store a machine-wide corporate CA brings the
+// station "online" while every upload fails; without webpki roots the public
+// cloud starts depending on the machine's store.
+#[cfg(not(feature = "reqwest-webpki-roots"))]
+compile_error!(
+    "reqwest lost its webpki roots: public hosts would depend on the OS \
+     certificate store (see Cargo.toml)"
+);
+#[cfg(not(feature = "reqwest-native-roots"))]
+compile_error!(
+    "reqwest lost the OS certificate store: a machine-wide CA would work for \
+     the realtime link but fail every HTTP call (see Cargo.toml)"
+);
+
+#[cfg(test)]
+mod realtime_tls_tests {
+    /// The realtime link's trust store comes from `rustls-native-certs`,
+    /// pulled in by `rustls-tls-native-roots` on the shared
+    /// tokio-tungstenite node. Loading the OS store here proves the crate is
+    /// actually linked and can read this platform's certificates — if the
+    /// feature is ever dropped, the dependency disappears and this stops
+    /// compiling.
+    ///
+    /// Note this cannot catch the other half of the invariant: `native-tls`
+    /// getting enabled elsewhere would silently win the default connector
+    /// (`cfg(all(__rustls-tls, not(native-tls)))`). `Connector` is
+    /// `#[non_exhaustive]`, so no match can detect the extra variant. That
+    /// half stays a review-time concern — see the Cargo.toml comment.
+    #[test]
+    fn realtime_trust_store_loader_is_linked_and_readable() {
+        let result = rustls_native_certs::load_native_certs();
+        assert!(
+            !result.certs.is_empty(),
+            "no OS root certificates loaded (errors: {:?}) — the realtime \
+             link would fall back to bundled roots only, breaking self-hosted \
+             stations behind a private CA",
+            result.errors
+        );
+    }
+}
+
+#[cfg(test)]
+mod realtime_connector_tests {
+    /// `rustls::ClientConfig::builder()` PANICS if it cannot resolve a crypto
+    /// provider from the crate features or the process default. We enable
+    /// exactly one (`ring`), but reqwest also builds rustls configs in this
+    /// binary — if a future dependency pulls in aws-lc as well, resolution
+    /// becomes ambiguous and every station would abort on startup instead of
+    /// failing a connection. Build one here to prove it resolves.
+    #[test]
+    fn building_a_rustls_config_does_not_panic() {
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        assert!(!config.alpn_protocols.iter().any(|p| p.is_empty()));
+    }
+
+    /// No CA configured must leave the connector unset, so tokio-tungstenite
+    /// keeps its own default. Guards against a regression that would force our
+    /// connector on every user, including the public cloud.
+    #[test]
+    fn no_ca_configured_means_no_connector() {
+        if super::configured_ca_path().is_some() {
+            return; // developer machine has TOFUPILOT_CA_CERT set
+        }
+        assert!(super::realtime_connector().is_none());
     }
 }

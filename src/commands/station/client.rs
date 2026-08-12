@@ -56,6 +56,11 @@ impl StreamClient {
     /// (per-run bridge, station-daemon boot loop) could await forever on
     /// an unreachable endpoint. A timeout comes back as `Err`, which each
     /// caller handles with its own policy (warn-and-continue vs retry).
+    ///
+    /// Because a failed handshake never resolves `connect()`, the timeout
+    /// path is also the only place a transport cause (bad TLS certificate,
+    /// refused connection) can be reported — see the event-stream watch in
+    /// [`Self::connect_with_timeout`].
     pub async fn connect(creds: &Credentials) -> crate::error::CliResult<Option<Self>> {
         Self::connect_with_timeout(creds, crate::config::timeouts::REALTIME_CONNECT).await
     }
@@ -91,30 +96,108 @@ impl StreamClient {
             }
         });
 
-        let client_config = ClientConfig::new(&config.url)
+        let mut client_config = ClientConfig::new(&config.url)
             .get_token(get_token)
             .name("tofupilot-cli")
             .version(env!("CARGO_PKG_VERSION"))
             .token(&config.token);
 
+        // Carries the `--ca-cert` bundle so the realtime link trusts the same
+        // certificates as every HTTP call. `None` when none is configured,
+        // which leaves tokio-tungstenite's default connector in place.
+        if let Some(connector) = crate::http::realtime_connector() {
+            client_config = client_config.connector(connector);
+        }
+
         let client = Client::new(client_config);
 
-        let events = client.events().map_err(|e| format!("Events: {e}"))?;
+        let mut events = client.events().map_err(|e| format!("Events: {e}"))?;
+
+        // Watch the event stream during the handshake to capture the transport
+        // error. `connect()` cannot report one: the actor parks the reply in
+        // `connect_waiters` and only ever answers Ok on success (or
+        // ClientDisconnected/ClientClosed) — a TLS failure just retries
+        // internally until our deadline, so the cause reaches us only as
+        // `ClientEvent::Error`.
+        //
+        // Everything else read here is REPLAYED to the listener below, never
+        // dropped: `on_handshake_success` emits the server-sub events (and any
+        // publication batched into the handshake) BEFORE it drains the connect
+        // waiters, and this station has no client-side subscriptions — every
+        // inbound command arrives as a `ServerPublication`. Discarding them
+        // would silently lose commands that raced the handshake.
+        let mut last_error: Option<String> = None;
+        let mut replay: Vec<ClientEvent> = Vec::new();
+        let connected = {
+            let connect = client.connect();
+            tokio::pin!(connect);
+            tokio::time::timeout(handshake_deadline, async {
+                loop {
+                    tokio::select! {
+                        result = &mut connect => return result,
+                        event = events.recv() => match event {
+                            Some(ClientEvent::Error(ctx)) => {
+                                last_error = Some(ctx.error.clone());
+                                replay.push(ClientEvent::Error(ctx));
+                            }
+                            Some(other) => replay.push(other),
+                            // Actor gone: let `connect` resolve the error.
+                            None => return (&mut connect).await,
+                        },
+                    }
+                }
+            })
+            .await
+        };
 
         // On timeout the Err return below drops `client`, which closes the
         // actor's command channel and ends its internal retry loop — no
         // background connect leaks past an Err.
-        match tokio::time::timeout(handshake_deadline, client.connect()).await {
+        match connected {
             Ok(Ok(())) => {}
+            // Terminal (ClientClosed / ClientDisconnected): the connection is
+            // gone and no listener is spawned, so `replay` is dropped on
+            // purpose — there is nowhere to deliver it.
             Ok(Err(e)) => return Err(format!("Connect: {e}").into()),
             Err(_) => {
+                let cause = last_error;
+                // Name a certificate failure for what it is — the generic
+                // "check DNS" text below would send the operator hunting the
+                // wrong problem.
+                if let Some(cause) = cause {
+                    if is_certificate_error(&cause) {
+                        // `ca_cert_configured` only reports whether a PEM file
+                        // was supplied — a CA trusted through the system store
+                        // reads as "not configured" here, so that branch must
+                        // not present `--ca-cert` as the only possible cause.
+                        let hint = if crate::http::ca_cert_configured() {
+                            "the configured CA certificate does not cover it"
+                        } else {
+                            "the certificate may be expired or issued for \
+                             another hostname; if this instance is behind a \
+                             private CA, pass it with \
+                             `tofupilot login --ca-cert <path>`"
+                        };
+                        return Err(format!(
+                            "Connect: the realtime endpoint's TLS certificate \
+                             is not trusted ({cause}) — {hint}."
+                        )
+                        .into());
+                    }
+                    return Err(format!(
+                        "Connect: no answer from the realtime endpoint within \
+                         {}s (last error: {cause})",
+                        handshake_deadline.as_secs()
+                    )
+                    .into());
+                }
                 return Err(format!(
                     "Connect: no answer from the realtime endpoint within {}s \
                      (check DNS for the realtime domain and that WebSockets \
                      are allowed)",
                     handshake_deadline.as_secs()
                 )
-                .into())
+                .into());
             }
         }
 
@@ -122,6 +205,7 @@ impl StreamClient {
         let status_channel_clone = config.channels.status.clone();
         let (msg_tx, msg_rx) = mpsc::channel::<StreamMsg>(64);
         tokio::spawn(run_event_listener(
+            replay,
             events,
             commands_channel,
             status_channel_clone,
@@ -287,13 +371,30 @@ fn station_command_kind(cmd: &StationCommand) -> &'static str {
     }
 }
 
+/// Whether a transport error text is a TLS trust failure. Matches on rustls'
+/// `Display` output (`"invalid peer certificate: UnknownIssuer"`), which
+/// reaches us only as a string inside `ClientEvent::Error` — the typed error
+/// is boxed as `dyn Error` by centrifuge-client and then formatted, so there
+/// is nothing left to downcast.
+fn is_certificate_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("certificate") || lower.contains("unknownissuer")
+}
+
 async fn run_event_listener(
+    // Events observed while watching for a handshake error, replayed here in
+    // arrival order so nothing published during the handshake is lost.
+    replay: Vec<ClientEvent>,
     mut events: mpsc::Receiver<ClientEvent>,
     commands_channel: String,
     status_channel: String,
     msg_tx: mpsc::Sender<StreamMsg>,
 ) {
-    while let Some(event) = events.recv().await {
+    let mut replay = replay.into_iter();
+    while let Some(event) = match replay.next() {
+        Some(event) => Some(event),
+        None => events.recv().await,
+    } {
         // If the station loop dropped its receiver we can't deliver anything;
         // end the listener rather than spinning on silent send errors.
         match event {
@@ -408,4 +509,81 @@ async fn fetch_streaming_config(
         .map_err(|e| format!("Parse streaming config: {e}"))?;
 
     Ok(Some(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The handshake watcher consumes events to find a TLS error, so anything
+    /// else it sees must be replayed — `on_handshake_success` emits server-sub
+    /// events (and publications batched into the handshake) before it resolves
+    /// `connect()`, and this station receives every command as a
+    /// `ServerPublication`. Dropping them loses commands that raced the
+    /// handshake.
+    #[tokio::test]
+    async fn events_seen_during_the_handshake_reach_the_listener() {
+        let (tx, rx) = mpsc::channel::<ClientEvent>(8);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<StreamMsg>(8);
+
+        let command = StationCommand::Run {
+            procedure_id: Some("proc_1".to_string()),
+            reuse_unit: None,
+            operated_by: None,
+            only_phase: None,
+        };
+        let replay = vec![ClientEvent::ServerPublication(ServerPublicationContext {
+            channel: "commands".to_string(),
+            publication: centrifuge_client::Publication {
+                data: serde_json::to_vec(&command).unwrap(),
+                info: None,
+                offset: 0,
+                tags: Default::default(),
+            },
+        })];
+
+        tokio::spawn(run_event_listener(
+            replay,
+            rx,
+            "commands".to_string(),
+            "status".to_string(),
+            msg_tx,
+        ));
+        drop(tx);
+
+        match msg_rx.recv().await {
+            Some(StreamMsg::Command(StationCommand::Run { procedure_id, .. })) => {
+                assert_eq!(procedure_id.as_deref(), Some("proc_1"));
+            }
+            _ => panic!("replayed command never reached the listener"),
+        }
+    }
+
+    use super::is_certificate_error;
+
+    /// Pinned to rustls' real `Display` text: `Error::InvalidCertificate`
+    /// formats as `"invalid peer certificate: {err}"`, and tungstenite wraps
+    /// it again on the way out. If rustls ever rewords these, the operator
+    /// silently goes back to the misleading "check DNS" hint.
+    #[test]
+    fn private_ca_failures_are_recognised_as_certificate_errors() {
+        assert!(is_certificate_error(
+            "IO error: invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(is_certificate_error("invalid peer certificate: Expired"));
+        assert!(is_certificate_error(
+            "invalid peer certificate: NotValidForName"
+        ));
+    }
+
+    #[test]
+    fn unrelated_transport_failures_keep_the_generic_hint() {
+        assert!(!is_certificate_error(
+            "IO error: failed to lookup address information: Name or service not known"
+        ));
+        assert!(!is_certificate_error(
+            "IO error: Connection refused (os error 111)"
+        ));
+        assert!(!is_certificate_error("HTTP error: 403 Forbidden"));
+    }
 }
