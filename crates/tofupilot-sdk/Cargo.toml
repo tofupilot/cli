@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "2.14.2"
+version = "2.15.0"
 edition = "2021"
 rust-version = "1.75"
 description = "TofuPilot APIv2: TofuPilot REST API for managing runs, units, procedures, and more."
@@ -13,9 +13,26 @@ categories = ["api-bindings"]
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 fastrand = "2"
+# Used by the hand-written `upload.rs`, which is not generated — without this
+# every regeneration drops the dependency and the crate stops compiling.
 log = "0.4"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls-no-provider"] }
+# The SDK installs `ring` itself (see `ensure_crypto_provider`): reqwest is on
+# `rustls-no-provider` so embedding applications are not forced onto aws-lc-rs,
+# which needs a C toolchain and does not build for static musl targets.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The client assembles its own root store (see `root_store` in client.rs):
+# reqwest 0.13 verifies through rustls-platform-verifier, which trusts the OS
+# store alone and fails outright when it is empty. These two supply the
+# bundled Mozilla floor and the OS store respectively.
+#
+# webpki-roots 1.x, not 0.26: the latter is a semver-trick shim that re-exports
+# 1.x. rustls-platform-verifier already links 1.x, so this shares that node.
+# (tokio-tungstenite still drags 0.26 into the CLI build; that is its shim, not
+# ours.)
+webpki-roots = "1"
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -26,4 +43,3 @@ tokio = { version = "1", features = ["full", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["ring"] }
-rustls-pemfile = "2"

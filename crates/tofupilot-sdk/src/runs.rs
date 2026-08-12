@@ -89,7 +89,7 @@ impl<'a> RunsClient<'a> {
 /// # async fn main() -> tofupilot::Result<()> {
 /// let client = TofuPilot::new("your-api-key");
 /// let response = client.runs().create()
-///     .outcome("value")
+///     .outcome(tofupilot::types::LogGetOutcome::Pass)
 ///     .procedure_id("value")
 ///     .started_at(chrono::Utc::now())
 ///     .ended_at(chrono::Utc::now())

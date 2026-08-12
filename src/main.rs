@@ -760,10 +760,37 @@ fn getting_started() {
     eprintln!("Run `tofupilot --help` for the full command list.");
 }
 
+/// Apply the configured `--ca-cert` bundle to an SDK config.
+///
+/// Without this the SDK builds its trust store from the public and OS roots
+/// only, so on a self-hosted instance behind a private CA every API call fails
+/// while `login` and the realtime link — both of which go through `http.rs` —
+/// succeed. Warns and continues rather than aborting: the same
+/// misconfiguration degrades to the public roots everywhere else.
+///
+/// Split out of `get_sdk` so it is reachable without stored credentials.
+fn with_configured_ca(config: ClientConfig) -> ClientConfig {
+    let Some(path) = crate::http::configured_ca_path().filter(|p| !p.as_os_str().is_empty()) else {
+        return config;
+    };
+
+    match config.clone().root_certificate_from_pem_file(&path) {
+        Ok(with_ca) => with_ca,
+        Err(e) => {
+            log::warn(&format!(
+                "{}: cannot use {} ({e}). Continuing without it.",
+                crate::http::CA_CERT_ENV,
+                path.display()
+            ));
+            config
+        }
+    }
+}
+
 fn get_sdk() -> crate::error::CliResult<TofuPilot> {
     let creds = commands::auth::credentials::require().map_err(|s| s.to_string())?;
     let config = ClientConfig::new(&creds.api_key).base_url(&creds.base_url);
-    Ok(TofuPilot::with_config(config))
+    Ok(TofuPilot::with_config(with_configured_ca(config)))
 }
 
 /// Common startup: enforce min version, then opt-in auto-update steps.
@@ -806,5 +833,34 @@ fn startup_inner(spawn_background_check: bool) {
         tokio::spawn(async {
             let _ = commands::update::background_check().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod ca_forwarding_tests {
+    use super::*;
+
+    /// The `--ca-cert` bundle must reach the SDK config, not only the CLI's
+    /// own transports. Before this, `login` and the realtime link trusted a
+    /// private CA while every API call through the SDK failed against it.
+    ///
+    /// `ClientConfig` keeps its certificates private, so the count is read
+    /// back off `Debug`, which reports it.
+    #[test]
+    fn the_ca_cert_reaches_the_sdk_config() {
+        let key = rcgen::generate_simple_self_signed(vec!["ca.example".to_string()])
+            .expect("generate ca");
+        let path =
+            std::env::temp_dir().join(format!("tofupilot-sdk-ca-{}.pem", std::process::id()));
+        std::fs::write(&path, key.cert.pem()).expect("write pem");
+        crate::http::set_ca_cert(path.to_str().unwrap());
+
+        let config = with_configured_ca(ClientConfig::new("test_api_key"));
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            format!("{config:?}").contains("1 certificate(s)"),
+            "the configured CA never reached the SDK config: {config:?}"
+        );
     }
 }

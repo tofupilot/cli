@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, OnceLock};
 
-use tofupilot::{Certificate, ClientConfig, TofuPilot};
+use tofupilot::{ClientConfig, TofuPilot};
 
 /// Self-signed cert + key for localhost, generated once per test process.
 fn test_cert() -> &'static (String, String) {
@@ -33,13 +33,17 @@ fn spawn_tls_server_with_delay(delay: std::time::Duration) -> u16 {
     // unless one is installed explicitly.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // `rustls-pki-types` rather than `rustls-pemfile`: the latter is
+    // unmaintained (RUSTSEC-2025-0134) and is now only a thin wrapper around
+    // this same parser.
+    use rustls::pki_types::pem::PemObject;
+
     let (cert_pem, key_pem) = test_cert();
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<_, _>>()
         .expect("parse cert");
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
-        .expect("parse key")
-        .expect("key present");
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .expect("parse key");
 
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -91,8 +95,9 @@ fn config_for(port: u16) -> ClientConfig {
 
 fn ca_config_for(port: u16) -> ClientConfig {
     let (cert_pem, _) = test_cert();
-    let certificate = Certificate::from_pem(cert_pem.as_bytes()).expect("parse pem");
-    config_for(port).add_root_certificate(certificate)
+    config_for(port)
+        .add_root_certificate(cert_pem.as_bytes())
+        .expect("parse pem")
 }
 
 /// Lowercased messages of the whole error chain — reqwest's Display is
@@ -160,7 +165,10 @@ async fn accepts_configured_root_certificate() {
 #[tokio::test]
 async fn builder_timeout_takes_precedence_over_config() {
     let port = spawn_tls_server_with_delay(std::time::Duration::from_secs(3));
-    let client = TofuPilot::with_config(ca_config_for(port)); // config timeout 30s
+    // Retries off: the default 3 add exponential backoff between attempts, so
+    // the wall-clock bound below would be measuring the backoff schedule
+    // rather than which timeout applied.
+    let client = TofuPilot::with_config(ca_config_for(port).max_retries(0));
 
     let started = std::time::Instant::now();
     let err = client
@@ -177,6 +185,9 @@ async fn builder_timeout_takes_precedence_over_config() {
         messages.iter().any(|m| m.contains("timed out") || m.contains("timeout")),
         "expected a timeout error, got: {messages:?}"
     );
+    // The server sleeps 3s; anything well under that proves the 200ms builder
+    // timeout applied rather than the 30s config one. Generous against a
+    // loaded CI box, still far below the alternative.
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "builder timeout was not applied; call took {elapsed:?}"
@@ -188,7 +199,11 @@ async fn builder_timeout_takes_precedence_over_config() {
 #[tokio::test]
 async fn config_timeout_applies_as_fallback() {
     let port = spawn_tls_server_with_delay(std::time::Duration::from_secs(3));
-    let config = ca_config_for(port).timeout(std::time::Duration::from_millis(200));
+    // Retries off for the same reason as the test above: their backoff would
+    // dominate the wall-clock bound.
+    let config = ca_config_for(port)
+        .timeout(std::time::Duration::from_millis(200))
+        .max_retries(0);
     let client = TofuPilot::with_config(config);
 
     let started = std::time::Instant::now();
@@ -211,18 +226,32 @@ async fn config_timeout_applies_as_fallback() {
     );
 }
 
+/// The file path and the in-memory bytes must reach the same trust store, so
+/// this asserts on a handshake rather than on a counter.
 #[tokio::test]
 async fn loads_root_certificate_from_pem_file() {
+    let port = spawn_tls_server();
     let (cert_pem, _) = test_cert();
     let path = std::env::temp_dir().join(format!("tofupilot-test-ca-{}.pem", std::process::id()));
     std::fs::write(&path, cert_pem).expect("write pem");
 
-    let config = config_for(0)
+    let config = config_for(port)
         .root_certificate_from_pem_file(&path)
         .expect("load pem from disk");
-
     let _ = std::fs::remove_file(&path);
-    assert_eq!(config.root_certificates.len(), 1);
+
+    let err = TofuPilot::with_config(config)
+        .procedures()
+        .list()
+        .send()
+        .await
+        .expect_err("the stub server never returns a valid payload");
+
+    let messages = error_chain(&err);
+    assert!(
+        !messages.iter().any(|m| m.contains("certificate") || m.contains("unknownissuer")),
+        "the CA loaded from disk was not trusted: {messages:?}"
+    );
 }
 
 #[tokio::test]
@@ -232,4 +261,90 @@ async fn pem_file_error_is_surfaced() {
         .expect_err("missing file should error");
 
     assert!(matches!(err, tofupilot::Error::Io(_)), "expected Io error, got: {err}");
+}
+
+/// PEM that parses as a file but holds no certificate must be rejected at
+/// configuration time. Accepting it would build a client that silently trusts
+/// nothing extra, and the CA failure would surface much later as a handshake
+/// error against the real server.
+#[tokio::test]
+async fn empty_pem_is_rejected() {
+    let err = config_for(0)
+        .add_root_certificate(b"not a certificate")
+        .expect_err("PEM without certificates should error");
+
+    assert!(
+        matches!(err, tofupilot::Error::Validation(_)),
+        "expected Validation error, got: {err}"
+    );
+}
+
+/// A bundle (root + intermediate) is the shape a corporate PKI ships, and the
+/// server's CA is deliberately the LAST entry: an implementation that stops
+/// after the first certificate parses would still fail the handshake here.
+#[tokio::test]
+async fn pem_bundle_trusts_every_certificate() {
+    let port = spawn_tls_server();
+    let (cert_pem, _) = test_cert();
+
+    let unrelated = rcgen::generate_simple_self_signed(vec!["unrelated.example".to_string()])
+        .expect("generate unrelated cert")
+        .cert
+        .pem();
+    let bundle = format!("{unrelated}{cert_pem}");
+
+    let config = config_for(port)
+        .add_root_certificate(bundle.as_bytes())
+        .expect("parse bundle");
+
+    let err = TofuPilot::with_config(config)
+        .procedures()
+        .list()
+        .send()
+        .await
+        .expect_err("the stub server never returns a valid payload");
+
+    let messages = error_chain(&err);
+    assert!(
+        !messages.iter().any(|m| m.contains("certificate") || m.contains("unknownissuer")),
+        "the last certificate in the bundle was not trusted: {messages:?}"
+    );
+}
+
+/// The regression this design exists to prevent: public HTTPS must keep
+/// working when the OS trust store is empty.
+///
+/// reqwest 0.13 verifies through rustls-platform-verifier, which on Unix
+/// trusts the OS store ALONE and fails with "No CA certificates were loaded
+/// from the system" when it is empty — a slim container without
+/// `ca-certificates` would lose every call. `client.rs` supplies its own store
+/// with the bundled Mozilla roots as a floor precisely so that cannot happen.
+///
+/// `SSL_CERT_FILE` pointed at an empty file is how the Linux loader
+/// (`openssl-probe`) sees "no system certificates". On macOS the keychain
+/// still answers, so there this asserts the floor holds rather than that the
+/// store is truly empty.
+#[tokio::test]
+#[ignore = "network"]
+async fn public_https_works_without_a_system_store() {
+    let empty = std::env::temp_dir().join(format!("tofupilot-empty-ca-{}.pem", std::process::id()));
+    std::fs::write(&empty, b"").expect("write empty ca file");
+    std::env::set_var("SSL_CERT_FILE", &empty);
+
+    let client = TofuPilot::with_config(ClientConfig::new("test_api_key"));
+    let result = client.procedures().list().send().await;
+
+    let _ = std::fs::remove_file(&empty);
+
+    // A 401 from the real API is a success for this test: the TLS handshake
+    // completed. Only a transport/TLS failure means the trust floor was lost.
+    if let Err(err) = &result {
+        let messages = error_chain(err);
+        assert!(
+            !messages.iter().any(|m| {
+                m.contains("certificate") || m.contains("ca certificates") || m.contains("tls")
+            }),
+            "public HTTPS hit a trust failure with an empty OS store: {messages:?}"
+        );
+    }
 }

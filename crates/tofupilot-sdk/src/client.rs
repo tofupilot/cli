@@ -52,6 +52,79 @@ pub struct TofuPilot {
     headers: reqwest::header::HeaderMap,
 }
 
+/// Install `ring` as the process-wide rustls provider, once.
+///
+/// The crate builds reqwest with `rustls-no-provider` so that no crypto
+/// backend is forced on the binary embedding this SDK; reqwest then panics
+/// when it builds a client with nothing installed. Doing it here means
+/// `TofuPilot::new(..)` works with no setup, while an application that has
+/// already installed its own provider keeps it — `install_default` only
+/// succeeds for the first caller and the error is deliberately ignored.
+fn ensure_crypto_provider() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// Connect timeout for presigned storage transfers.
+///
+/// Only the connect phase is bounded. A read-idle timeout would look right but
+/// breaks uploads: `upload_to_presigned_url` sends a fully-buffered body, so
+/// the client writes for the whole transfer and reads nothing until the
+/// response arrives — a large attachment on a slow station link is progressing
+/// normally yet produces no read event for minutes. Callers that need an
+/// overall budget set one per request.
+const EXTERNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The bundled Mozilla roots plus the machine's certificate store.
+///
+/// Built explicitly because reqwest 0.13 verifies through
+/// `rustls-platform-verifier`, which on Unix trusts the OS store ALONE and
+/// fails when it is empty — a slim container without `ca-certificates` would
+/// lose every HTTPS call. 0.12 shipped webpki roots as a floor; this restores
+/// it. A broken OS store degrades to the bundled roots rather than failing.
+///
+/// Cached: `load_native_certs` hits the filesystem (and the keychain on
+/// macOS), which is far too slow to repeat per client.
+fn base_root_store() -> &'static rustls::RootCertStore {
+    static BASE: std::sync::OnceLock<rustls::RootCertStore> = std::sync::OnceLock::new();
+    BASE.get_or_init(|| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+        let native = rustls_native_certs::load_native_certs();
+        for error in &native.errors {
+            log::warn!("could not read the system certificate store: {error}");
+        }
+        let (_, ignored) = roots.add_parsable_certificates(native.certs);
+        if ignored > 0 {
+            log::warn!("skipped {ignored} unparsable certificate(s) in the system store");
+        }
+
+        roots
+    })
+}
+
+/// The cached base store plus whatever the caller configured.
+fn root_store(config: &ClientConfig) -> rustls::RootCertStore {
+    let mut roots = base_root_store().clone();
+    let (_, ignored) = roots.add_parsable_certificates(config.root_certificates.iter().cloned());
+    if ignored > 0 {
+        log::warn!("skipped {ignored} unusable configured root certificate(s)");
+    }
+    roots
+}
+
+/// The rustls configuration the clients are built from.
+fn tls_config(config: &ClientConfig) -> rustls::ClientConfig {
+    ensure_crypto_provider();
+    rustls::ClientConfig::builder()
+        .with_root_certificates(root_store(config))
+        .with_no_client_auth()
+}
+
 impl TofuPilot {
     /// Create a new client with the given API key.
     pub fn new(api_key: impl Into<String>) -> Self {
@@ -60,11 +133,9 @@ impl TofuPilot {
 
     /// Create a new client with full configuration.
     pub fn with_config(config: ClientConfig) -> Self {
-        let mut builder = reqwest::Client::builder().timeout(config.timeout);
-        for certificate in &config.root_certificates {
-            builder = builder.add_root_certificate(certificate.clone());
-        }
-        let http = builder
+        let http = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .tls_backend_preconfigured(tls_config(&config))
             .build()
             .expect("failed to build HTTP client");
 
@@ -74,19 +145,23 @@ impl TofuPilot {
     /// Create a new client from an existing `reqwest::Client`.
     ///
     /// For transport settings the config does not cover, such as client
-    /// certificates or a proxy. The supplied client owns its TLS setup:
-    /// `config.root_certificates` is not applied to it. Base URL, timeout,
-    /// retries, hooks, and authentication still come from the config — auth
-    /// and timeout are applied per request, so the client needs no
-    /// credentials of its own.
+    /// certificates or a proxy. The supplied client owns its TLS setup, so a
+    /// certificate added to the config is NOT applied to it. Base URL,
+    /// timeout, retries, hooks, and authentication still come from the config.
+    ///
+    /// The separate client for presigned attachment URLs is still built here
+    /// and does trust the config's certificates — that storage host sits
+    /// behind the same CA on self-hosted deployments. A caller whose own
+    /// client carries trust the config lacks must add it to the config too, or
+    /// attachment transfers fail while API calls succeed.
     pub fn with_client(config: ClientConfig, http: reqwest::Client) -> Self {
-        // Presigned attachment URLs point at the instance's storage, which
-        // sits behind the same CA on self-hosted deployments.
-        let mut external = reqwest::Client::builder();
-        for certificate in &config.root_certificates {
-            external = external.add_root_certificate(certificate.clone());
-        }
-        let http_external = external
+        // Presigned storage transfers are not given `config.timeout`: that is an
+        // overall budget suited to API calls, and it would cut large attachment
+        // transfers mid-flight. A connect timeout still fails a dead endpoint
+        // rather than hanging on the handshake forever.
+        let http_external = reqwest::Client::builder()
+            .connect_timeout(EXTERNAL_CONNECT_TIMEOUT)
+            .tls_backend_preconfigured(tls_config(&config))
             .build()
             .expect("failed to build external HTTP client");
 
@@ -274,5 +349,62 @@ impl TofuPilot {
             status: 0,
             body: "max retries exceeded".to_string(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod trust_floor_tests {
+    use super::*;
+
+    /// The bundled Mozilla roots are the floor `root_store` must keep when the
+    /// OS store is empty — the slim-container regression this design exists to
+    /// prevent. reqwest 0.13's own verifier hard-fails there instead.
+    #[test]
+    fn bundled_roots_survive_an_empty_system_store() {
+        let bundled: std::collections::BTreeSet<_> = webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .map(|anchor| anchor.subject.as_ref().to_vec())
+            .collect();
+        let store: std::collections::BTreeSet<_> = root_store(&ClientConfig::new("test"))
+            .roots
+            .iter()
+            .map(|anchor| anchor.subject.as_ref().to_vec())
+            .collect();
+
+        // Compared by subject, not by count: on a developer machine the OS
+        // store alone is large enough to satisfy a length check even with the
+        // bundled roots dropped entirely.
+        let missing = bundled.difference(&store).count();
+        assert_eq!(
+            missing, 0,
+            "{missing} of the {} bundled Mozilla roots are absent from the store \
+             — the built-in floor was lost",
+            bundled.len()
+        );
+    }
+
+    /// Every certificate in a bundle must reach the store, not only the first.
+    #[test]
+    fn configured_certificates_reach_the_store() {
+        let base = root_store(&ClientConfig::new("test")).len();
+
+        let one = rcgen::generate_simple_self_signed(vec!["a.example".to_string()])
+            .expect("generate cert")
+            .cert
+            .pem();
+        let two = rcgen::generate_simple_self_signed(vec!["b.example".to_string()])
+            .expect("generate cert")
+            .cert
+            .pem();
+
+        let config = ClientConfig::new("test")
+            .add_root_certificate(format!("{one}{two}").as_bytes())
+            .expect("parse bundle");
+
+        assert_eq!(
+            root_store(&config).len(),
+            base + 2,
+            "both certificates in the bundle should have been added"
+        );
     }
 }

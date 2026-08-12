@@ -188,7 +188,7 @@ async fn get_procedure_includes_recent_runs() {
         .part_number(format!("PART-RR-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();

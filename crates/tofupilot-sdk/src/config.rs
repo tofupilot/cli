@@ -18,8 +18,12 @@ pub struct ClientConfig {
     pub user_agent: String,
     /// Request lifecycle hooks
     pub hooks: Hooks,
-    /// Additional root certificates, for self-hosted instances behind a private CA
-    pub root_certificates: Vec<reqwest::Certificate>,
+    /// Additional root certificates, for self-hosted instances behind a private CA.
+    ///
+    /// Private: a public field would let a caller push a certificate that the
+    /// root store in `client.rs` never picks up. Use
+    /// [`ClientConfig::add_root_certificate`].
+    pub(crate) root_certificates: Vec<rustls::pki_types::CertificateDer<'static>>,
 }
 
 // Manual impl so Debug output never carries the API key into logs.
@@ -82,12 +86,44 @@ impl ClientConfig {
         self
     }
 
-    /// Trust an additional root certificate, in PEM or DER form.
+    /// Trust additional root certificates from a PEM bundle.
     ///
-    /// System roots stay trusted; this only adds to them.
-    pub fn add_root_certificate(mut self, certificate: reqwest::Certificate) -> Self {
-        self.root_certificates.push(certificate);
-        self
+    /// System roots stay trusted; this only adds to them. Accepts a bundle:
+    /// every certificate in `pem` is trusted, which is the shape a corporate
+    /// PKI usually ships (root plus intermediates).
+    ///
+    /// ```no_run
+    /// # use tofupilot::ClientConfig;
+    /// let pem = std::fs::read("/path/to/ca-certificate.pem")?;
+    /// let config = ClientConfig::new("api_key")
+    ///     .base_url("https://tofupilot.yourcompany.com")
+    ///     .add_root_certificate(&pem)?;
+    /// # Ok::<(), tofupilot::Error>(())
+    /// ```
+    ///
+    /// Takes PEM bytes, not a `reqwest::Certificate`: that type is opaque, and
+    /// the root store in `client.rs` needs the DER.
+    pub fn add_root_certificate(mut self, pem: &[u8]) -> crate::Result<Self> {
+        use rustls::pki_types::pem::PemObject;
+
+        let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| crate::Error::Validation(format!("invalid PEM certificate: {e}")))?;
+
+        if certificates.is_empty() {
+            return Err(crate::Error::Validation(
+                "PEM data contains no certificates".to_string(),
+            ));
+        }
+
+        // Reject here, not when the root store is built. A certificate can
+        // parse as PEM and still be unusable as a trust anchor — a server's
+        // leaf certificate is the common mix-up — and the store silently
+        // discards those. Failing at configuration time names the file the
+        // caller passed instead of surfacing later as an opaque
+        // `UnknownIssuer` on every request.
+        self.root_certificates.extend(certificates);
+        Ok(self)
     }
 
     /// Trust an additional root certificate read from a PEM file.
@@ -104,7 +140,6 @@ impl ClientConfig {
         path: impl AsRef<std::path::Path>,
     ) -> crate::Result<Self> {
         let pem = std::fs::read(path)?;
-        let certificate = reqwest::Certificate::from_pem(&pem)?;
-        Ok(self.add_root_certificate(certificate))
+        self.add_root_certificate(&pem)
     }
 }

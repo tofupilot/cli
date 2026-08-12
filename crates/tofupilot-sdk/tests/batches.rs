@@ -16,7 +16,7 @@ async fn create_batch_via_run(uid_val: &str) -> String {
         .batch_number(&batch_number)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();

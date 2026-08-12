@@ -74,7 +74,7 @@ pub async fn create_test_run(uid_val: &str) -> RunCreateResponse {
         .part_number(format!("PART-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .expect("failed to create test run")

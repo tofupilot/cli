@@ -55,86 +55,39 @@ pub fn ca_cert_configured() -> bool {
 }
 
 /// The CA path in effect: the installed override, else `TOFUPILOT_CA_CERT`.
-fn configured_ca_path() -> Option<std::path::PathBuf> {
+pub(crate) fn configured_ca_path() -> Option<std::path::PathBuf> {
     if let Some(path) = CA_CERT_OVERRIDE.get() {
         return Some(path.clone());
     }
     std::env::var_os(CA_CERT_ENV).map(std::path::PathBuf::from)
 }
 
-/// Load the configured extra root certificate, if any.
+/// The trust anchors every TLS connection in this process uses: the bundled
+/// Mozilla roots, the machine's certificate store, and the `--ca-cert` bundle
+/// when one is configured.
 ///
-/// A PEM bundle may hold several certificates (leaf + intermediates + root),
-/// so every certificate in the file is added. A missing or malformed file is
-/// an `Err` so callers can name the real cause up front — they log it as a
-/// warning and continue on the public trust store, where a self-hosted
-/// station then fails its requests with a TLS error the warning explains.
-fn extra_root_certificates() -> Result<Vec<reqwest::Certificate>, String> {
-    let Some(path) = configured_ca_path() else {
-        return Ok(Vec::new());
-    };
-    if path.as_os_str().is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let pem = std::fs::read(&path)
-        .map_err(|e| format!("{CA_CERT_ENV}: cannot read {}: {e}", path.display()))?;
-
-    let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| {
-        format!(
-            "{CA_CERT_ENV}: {} is not a valid PEM bundle: {e}",
-            path.display()
-        )
-    })?;
-
-    if certs.is_empty() {
-        return Err(format!(
-            "{CA_CERT_ENV}: {} contains no certificates",
-            path.display()
-        ));
-    }
-    Ok(certs)
-}
-
-/// Parsed extra roots, resolved once per process. Parsing on every call had
-/// the station's 5-minute auth probe re-reading and re-parsing the PEM file
-/// forever, and repeated the same warning on every misconfigured call. A
-/// parse failure resolves to an empty list after one warning — the fallback
-/// is the public trust store, so a self-hosted station then fails its
-/// requests with a TLS error the warning explains.
-static EXTRA_CERTS: OnceLock<Vec<reqwest::Certificate>> = OnceLock::new();
-
-fn extra_certs() -> &'static [reqwest::Certificate] {
-    EXTRA_CERTS.get_or_init(|| match extra_root_certificates() {
-        Ok(certs) => certs,
-        Err(message) => {
-            crate::log::warn(&format!("{message}. Continuing without it."));
-            Vec::new()
-        }
-    })
-}
-
-/// TLS connector for the realtime WebSocket, mirroring the trust the HTTP
-/// client gets: bundled Mozilla roots, the OS certificate store, and the
-/// configured CA file. `None` when no CA is configured — tokio-tungstenite
-/// then builds its own default connector, which already covers the first two.
+/// Built here rather than left to the TLS stacks because reqwest 0.13 and
+/// tokio-tungstenite disagree about defaults: reqwest on `rustls-no-provider`
+/// verifies through `rustls-platform-verifier`, which on Linux trusts the OS
+/// store ALONE and hard-fails when it is empty — a slim container without
+/// `ca-certificates` would lose every HTTPS call. Feeding both transports one
+/// explicitly-built store keeps them identical and keeps the bundled roots as
+/// a floor.
 ///
-/// Built once: the station reconnects on every transport drop, and re-reading
-/// plus re-parsing the PEM on each attempt would repeat the same work (and the
-/// same warning) forever.
-static REALTIME_CONNECTOR: OnceLock<Option<tokio_tungstenite::Connector>> = OnceLock::new();
+/// Resolved once: the station reconnects on every transport drop, and
+/// re-reading the OS store and re-parsing the PEM per attempt would repeat the
+/// same work, and the same warnings, forever.
+static ROOT_STORE: OnceLock<std::sync::Arc<rustls::RootCertStore>> = OnceLock::new();
 
-pub fn realtime_connector() -> Option<tokio_tungstenite::Connector> {
-    REALTIME_CONNECTOR
+fn root_store() -> std::sync::Arc<rustls::RootCertStore> {
+    ROOT_STORE
         .get_or_init(|| {
-            let path = configured_ca_path().filter(|p| !p.as_os_str().is_empty())?;
-
             let mut roots = rustls::RootCertStore::empty();
             roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-            // Same policy as the HTTP path: a broken OS store or an unreadable
-            // CA file degrades to the roots we do have rather than killing the
-            // command, and warns once so the cause is visible.
+            // A broken OS store or an unreadable CA file degrades to the roots
+            // already loaded rather than killing the command, and warns once so
+            // the cause is visible.
             let native = rustls_native_certs::load_native_certs();
             if !native.errors.is_empty() {
                 crate::log::warn(&format!(
@@ -150,54 +103,71 @@ pub fn realtime_connector() -> Option<tokio_tungstenite::Connector> {
                 ));
             }
 
-            // `rustls-pki-types` rather than `rustls-pemfile`: the latter is
-            // unmaintained (RUSTSEC-2025-0134) and is now only a thin wrapper
-            // around this same parser.
-            use rustls::pki_types::pem::PemObject;
-            match rustls::pki_types::CertificateDer::pem_file_iter(&path)
-                .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))
-            {
-                Ok(certs) if certs.is_empty() => {
-                    crate::log::warn(&format!(
-                        "{CA_CERT_ENV}: {} contains no certificates. \
-                         The realtime link will not trust it.",
-                        path.display()
-                    ));
-                }
-                Ok(certs) => {
-                    let (_, ignored) = roots.add_parsable_certificates(certs);
-                    if ignored > 0 {
+            if let Some(path) = configured_ca_path().filter(|p| !p.as_os_str().is_empty()) {
+                // `rustls-pki-types` rather than `rustls-pemfile`: the latter is
+                // unmaintained (RUSTSEC-2025-0134) and is now only a thin
+                // wrapper around this same parser.
+                use rustls::pki_types::pem::PemObject;
+                match rustls::pki_types::CertificateDer::pem_file_iter(&path)
+                    .and_then(|iter| iter.collect::<Result<Vec<_>, _>>())
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))
+                {
+                    Ok(certs) if certs.is_empty() => {
                         crate::log::warn(&format!(
-                            "{CA_CERT_ENV}: skipped {ignored} unparsable certificate(s) in {}.",
+                            "{CA_CERT_ENV}: {} contains no certificates. \
+                             Continuing without it.",
                             path.display()
                         ));
                     }
-                }
-                Err(message) => {
-                    crate::log::warn(&format!(
-                        "{CA_CERT_ENV}: {message}. The realtime link will not trust it."
-                    ));
+                    Ok(certs) => {
+                        let (_, ignored) = roots.add_parsable_certificates(certs);
+                        if ignored > 0 {
+                            crate::log::warn(&format!(
+                                "{CA_CERT_ENV}: skipped {ignored} unparsable certificate(s) in {}.",
+                                path.display()
+                            ));
+                        }
+                    }
+                    Err(message) => {
+                        crate::log::warn(&format!(
+                            "{CA_CERT_ENV}: {message}. Continuing without it."
+                        ));
+                    }
                 }
             }
 
-            let config = rustls::ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
-                config,
-            )))
+            std::sync::Arc::new(roots)
         })
         .clone()
 }
 
+/// The rustls configuration both transports are built from.
+fn tls_config() -> rustls::ClientConfig {
+    ensure_crypto_provider();
+    rustls::ClientConfig::builder()
+        .with_root_certificates(root_store())
+        .with_no_client_auth()
+}
+
+/// TLS connector for the realtime WebSocket, carrying exactly the trust the
+/// HTTP client has.
+static REALTIME_CONNECTOR: OnceLock<tokio_tungstenite::Connector> = OnceLock::new();
+
+pub fn realtime_connector() -> Option<tokio_tungstenite::Connector> {
+    Some(
+        REALTIME_CONNECTOR
+            .get_or_init(|| tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(tls_config())))
+            .clone(),
+    )
+}
+
 /// Add the configured extra CA (if any) to a builder. The one shared path for
 /// `client()` and `client_builder()`, so the two can never drift.
-fn with_extra_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    for cert in extra_certs() {
-        builder = builder.add_root_certificate(cert.clone());
-    }
-    builder
+fn with_extra_roots(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    // `tls_backend_preconfigured`, not the older `use_preconfigured_tls`: the
+    // latter is documented as deprecated in reqwest 0.13 but carries no
+    // `#[deprecated]` attribute, so `-D warnings` would never flag it.
+    builder.tls_backend_preconfigured(tls_config())
 }
 
 /// TCP connect must complete in 30s. A stalled SYN/TLS handshake
@@ -214,10 +184,33 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// upstream that stops feeding bytes gets cut.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Install `ring` as the process-wide rustls provider, once.
+///
+/// reqwest is built on `rustls-no-provider` — the plain `rustls` feature
+/// pulls `aws-lc-rs`, which needs a C toolchain and does not build for the
+/// static musl targets the Linux stations ship as. That leaves reqwest with
+/// no provider of its own: it calls `CryptoProvider::get_default()` and
+/// panics if nothing is installed, so this must run before the first client
+/// or connector is built.
+///
+/// Called from every construction site rather than from `main`, because the
+/// binary is not the only entry point — tests build clients directly, and a
+/// panic there is the same panic a user would get.
+///
+/// `install_default` succeeds at most once per process; a second call losing
+/// the race is expected and ignored.
+pub(crate) fn ensure_crypto_provider() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Shared `reqwest::Client`. Cloning is cheap — it's an `Arc` under
 /// the hood — so callers should clone freely if they need an owned
 /// handle.
 pub fn client() -> &'static reqwest::Client {
+    ensure_crypto_provider();
     CLIENT.get_or_init(|| {
         let base = || {
             reqwest::Client::builder()
@@ -251,6 +244,7 @@ pub fn client() -> &'static reqwest::Client {
 /// and fail on a self-hosted instance while the shared client succeeded,
 /// which is a maddening thing to debug.
 pub fn client_builder() -> reqwest::ClientBuilder {
+    ensure_crypto_provider();
     with_extra_roots(reqwest::Client::builder())
 }
 
@@ -280,20 +274,16 @@ compile_error!(
      `realtime-native-roots` feature on (see Cargo.toml)"
 );
 
-// HTTP must trust exactly what the realtime WebSocket trusts. reqwest tracks
-// its two root sets independently, so dropping either one leaves the transports
-// disagreeing: without the OS store a machine-wide corporate CA brings the
-// station "online" while every upload fails; without webpki roots the public
-// cloud starts depending on the machine's store.
-#[cfg(not(feature = "reqwest-webpki-roots"))]
+// reqwest must build no TLS stack of its own. The plain `rustls` feature both
+// links aws-lc-rs (breaking the static musl builds) and verifies through
+// rustls-platform-verifier, which on Linux trusts the OS store ALONE — a slim
+// image without `ca-certificates` would then fail every HTTPS call. `http.rs`
+// hands reqwest an explicit root store instead; this pins that arrangement.
+#[cfg(not(feature = "reqwest-no-provider"))]
 compile_error!(
-    "reqwest lost its webpki roots: public hosts would depend on the OS \
-     certificate store (see Cargo.toml)"
-);
-#[cfg(not(feature = "reqwest-native-roots"))]
-compile_error!(
-    "reqwest lost the OS certificate store: a machine-wide CA would work for \
-     the realtime link but fail every HTTP call (see Cargo.toml)"
+    "reqwest must stay on `rustls-no-provider` so `http.rs` supplies the root \
+     store: the alternative links aws-lc-rs and drops the bundled roots (see \
+     Cargo.toml)"
 );
 
 #[cfg(test)]
@@ -339,14 +329,85 @@ mod realtime_connector_tests {
         assert!(!config.alpn_protocols.iter().any(|p| p.is_empty()));
     }
 
-    /// No CA configured must leave the connector unset, so tokio-tungstenite
-    /// keeps its own default. Guards against a regression that would force our
-    /// connector on every user, including the public cloud.
+    /// The realtime link always gets our connector now, with or without a CA
+    /// file. Leaving it unset would hand the WebSocket back to
+    /// tokio-tungstenite's own defaults, which resolve a different root set
+    /// than the explicit store `http.rs` gives reqwest — the two transports
+    /// would silently disagree about what is trusted.
     #[test]
-    fn no_ca_configured_means_no_connector() {
-        if super::configured_ca_path().is_some() {
-            return; // developer machine has TOFUPILOT_CA_CERT set
-        }
-        assert!(super::realtime_connector().is_none());
+    fn the_realtime_link_always_uses_our_root_store() {
+        assert!(super::realtime_connector().is_some());
+    }
+}
+
+#[cfg(test)]
+mod trust_floor_tests {
+    /// The bundled Mozilla roots must survive an empty OS trust store.
+    /// reqwest 0.13's default verifier (rustls-platform-verifier) hard-fails
+    /// on Linux when the system store is empty — a slim container without
+    /// `ca-certificates` would lose every HTTPS call. `http.rs` supplies its
+    /// own store precisely so that cannot happen; this pins the floor.
+    #[test]
+    fn bundled_roots_survive_an_empty_system_store() {
+        let bundled: std::collections::BTreeSet<_> = webpki_roots::TLS_SERVER_ROOTS
+            .iter()
+            .map(|anchor| anchor.subject.as_ref().to_vec())
+            .collect();
+        let store: std::collections::BTreeSet<_> = super::root_store()
+            .roots
+            .iter()
+            .map(|anchor| anchor.subject.as_ref().to_vec())
+            .collect();
+
+        // Compared by subject, not by count: the OS store alone holds more
+        // anchors than the bundled set, so a length check passes even with the
+        // bundled roots dropped entirely.
+        let missing = bundled.difference(&store).count();
+        assert_eq!(
+            missing,
+            0,
+            "{missing} of the {} bundled Mozilla roots are absent from the store \
+             — the built-in floor was lost",
+            bundled.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_trust_tests {
+    /// Public HTTPS must work with the OS store emptied — the slim-container
+    /// regression this design exists to prevent. `SSL_CERT_FILE` pointed at an
+    /// empty file is how `openssl-probe` (the Linux loader) sees "no system
+    /// certificates"; on macOS the keychain still answers, so this asserts the
+    /// floor holds rather than that the store is truly empty.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn public_https_works_without_a_system_store() {
+        let empty = std::env::temp_dir().join("tofupilot-empty-ca.pem");
+        std::fs::write(&empty, b"").unwrap();
+        std::env::set_var("SSL_CERT_FILE", &empty);
+        let res = super::client()
+            .get("https://www.tofupilot.app")
+            .send()
+            .await;
+        assert!(
+            res.is_ok(),
+            "public HTTPS failed with an empty OS store: {res:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_ca_tests {
+    /// The `--ca-cert` chain must verify on the HTTP transport, against a
+    /// server presenting leaf+intermediate while the client trusts only the
+    /// root — the shape a corporate PKI actually deploys.
+    #[tokio::test]
+    #[ignore = "needs the local chain fixture"]
+    async fn private_ca_chain_verifies_over_http() {
+        let ca = std::env::var("TOFUPILOT_CA_CERT").expect("fixture path");
+        assert!(!ca.is_empty());
+        let res = super::client().get("https://127.0.0.1:8444/").send().await;
+        assert!(res.is_ok(), "private CA chain rejected on HTTP: {res:?}");
     }
 }

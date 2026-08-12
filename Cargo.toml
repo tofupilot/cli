@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 rust-version = "1.85"
 description = "TofuPilot CLI: run, deploy, and manage test procedures from the terminal."
@@ -17,15 +17,16 @@ name = "tofupilot"
 path = "src/main.rs"
 
 [features]
-default = ["realtime-native-roots", "reqwest-webpki-roots", "reqwest-native-roots"]
+default = ["realtime-native-roots", "reqwest-no-provider"]
 # Aliases onto the shared tokio-tungstenite node so `src/http.rs` can assert
 # the realtime TLS stack at compile time. Enabling the dependency feature here
 # is what makes it observable as a `cfg` in our own crate.
 realtime-native-roots = ["tokio-tungstenite/rustls-tls-native-roots"]
-# Same trick for reqwest's two independent root sets, so `http.rs` can assert
-# HTTP trusts exactly what the realtime WebSocket trusts.
-reqwest-webpki-roots = ["reqwest/rustls-tls"]
-reqwest-native-roots = ["reqwest/rustls-tls-native-roots"]
+# reqwest must stay on `rustls-no-provider`: the plain `rustls` feature pulls
+# aws-lc-rs (C toolchain, no static musl) and routes verification through
+# rustls-platform-verifier, which on Linux trusts the OS store alone. `http.rs`
+# feeds it an explicit root store instead, and asserts this feature is on.
+reqwest-no-provider = ["reqwest/rustls-no-provider"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -39,7 +40,7 @@ serde_json = "1"
 # same trust the WebSocket has. Leaving them asymmetric means a machine-wide
 # corporate CA brings the station "online" while every upload fails — or a
 # broken system store breaks the public cloud.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls-no-provider", "stream"] }
 # Direct dep so the update retry can downcast `reqwest::Error` sources to
 # `hyper::Error` and detect a mid-stream "connection closed before message
 # completed" reset. Load-bearing invariant: this MUST resolve to the SAME
@@ -108,9 +109,9 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["r
 # second crypto provider would both bloat the binary and fail the musl builds.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
-webpki-roots = "0.26"
+webpki-roots = "1"
 ratatui = "0.30"
-ratatui-image = { version = "10", default-features = false, features = ["crossterm", "image-defaults"] }
+ratatui-image = { version = "10", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
@@ -139,13 +140,16 @@ sd-notify = "0.4"
 # in a pure-Rust resolver for every reqwest client in the binary (feature
 # unification covers the SDK's clients too). Linux-only on purpose: macOS
 # and Windows keep their OS resolver.
-reqwest = { version = "0.12", default-features = false, features = ["hickory-dns"] }
+reqwest = { version = "0.13", default-features = false, features = ["hickory-dns"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Generates a throwaway CA at test runtime for the SDK CA-forwarding test, so
+# no fixture is committed and nothing expires.
+rcgen = "0.13"
 # `test-util` enables tokio's paused clock (`start_paused`) used by the
 # startup-stall watchdog tests. Merged with the `full` feature set from the
 # main dependency above; not pulled into non-test builds.

@@ -329,6 +329,8 @@ pub enum Provider {
     Github,
     #[serde(rename = "gitlab")]
     Gitlab,
+    #[serde(rename = "bitbucket")]
+    Bitbucket,
 }
 
 impl std::fmt::Display for Provider {
@@ -336,6 +338,7 @@ impl std::fmt::Display for Provider {
         match self {
             Self::Github => write!(f, "github"),
             Self::Gitlab => write!(f, "gitlab"),
+            Self::Bitbucket => write!(f, "bitbucket"),
         }
     }
 }

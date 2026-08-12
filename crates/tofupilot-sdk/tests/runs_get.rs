@@ -34,23 +34,23 @@ async fn get_run_includes_phases_and_measurements() {
         .part_number(format!("PART-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .phases(vec![
             RunCreatePhases::builder()
                 .name("init_phase")
-                .outcome(PhasesOutcome::Pass)
+                .outcome(PhaseGetOutcome::Pass)
                 .started_at(now - chrono::Duration::minutes(5))
                 .ended_at(now - chrono::Duration::minutes(3))
                 .measurements(vec![
                     RunCreateMeasurements::builder()
                         .name("boot_time_ms")
-                        .outcome(ValidatorsOutcome::Pass)
+                        .outcome(Outcome::Pass)
                         .measured_value(serde_json::json!(120.5))
                         .build()
                         .unwrap(),
                     RunCreateMeasurements::builder()
                         .name("memory_mb")
-                        .outcome(ValidatorsOutcome::Pass)
+                        .outcome(Outcome::Pass)
                         .measured_value(serde_json::json!(256))
                         .build()
                         .unwrap(),
@@ -59,12 +59,12 @@ async fn get_run_includes_phases_and_measurements() {
                 .unwrap(),
             RunCreatePhases::builder()
                 .name("stress_phase")
-                .outcome(PhasesOutcome::Pass)
+                .outcome(PhaseGetOutcome::Pass)
                 .started_at(now - chrono::Duration::minutes(3))
                 .ended_at(now)
                 .measurements(vec![RunCreateMeasurements::builder()
                     .name("cpu_temp")
-                    .outcome(ValidatorsOutcome::Pass)
+                    .outcome(Outcome::Pass)
                     .measured_value(serde_json::json!(65.2))
                     .build()
                     .unwrap()])
@@ -108,7 +108,7 @@ async fn get_run_includes_logs() {
         .part_number(format!("PART-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .logs(vec![
             RunCreateLogs {
                 level: Level::Info,

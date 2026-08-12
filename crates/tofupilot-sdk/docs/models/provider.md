@@ -8,3 +8,4 @@ Git provider
 | --- | --- |
 | `Provider::Github` | `github` |
 | `Provider::Gitlab` | `gitlab` |
+| `Provider::Bitbucket` | `bitbucket` |

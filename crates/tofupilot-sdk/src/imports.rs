@@ -46,7 +46,7 @@ impl<'a> ImportsClient<'a> {
 /// # async fn main() -> tofupilot::Result<()> {
 /// let client = TofuPilot::new("your-api-key");
 /// let response = client.imports().structured()
-///     .items("value")
+///     .items(vec![])
 ///     .send()
 ///     .await?;
 /// # Ok(())

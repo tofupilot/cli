@@ -8,33 +8,14 @@ version = 2
 # action (transitive, no upstream fix yet) are listed explicitly below so a NEW
 # unmaintained crate still trips the gate.
 ignore = [
-    # `paste` is unmaintained (RUSTSEC-2024-0436). Pulled transitively by
-    # `specta` (-> station-protocol) and `rav1e`/`ravif` (-> image). No direct
-    # fix available until those upstreams migrate; it is a proc-macro with no
-    # runtime attack surface. Revisit when specta/image drop it.
+    # `paste` is unmaintained (RUSTSEC-2024-0436). Now reaches us only through
+    # `specta` (-> station-protocol), which is hard-pinned at =1.0.5; the only
+    # newer release is a 2.0 release candidate, not worth the churn for a
+    # proc-macro with no runtime attack surface. The other path (image's AVIF
+    # encoder, via ravif -> rav1e) is gone: `ratatui-image` no longer gets
+    # `image-defaults`, which had turned every codec back on. Revisit when
+    # specta 2.0 is stable.
     "RUSTSEC-2024-0436",
-    # `proc-macro-error2` is unmaintained (RUSTSEC-2026-0173). Pulled
-    # transitively by `validator_derive` (-> validator -> execution-engine).
-    # Compile-time-only proc-macro with no runtime attack surface; no upstream
-    # fix yet. Revisit when validator drops it.
-    "RUSTSEC-2026-0173",
-    # `hickory-proto` 0.25.2 DoS advisories: an unbounded loop in NSEC3
-    # validation (RUSTSEC-2026-0118) and O(n²) CPU in message encoding
-    # (RUSTSEC-2026-0119). Both need >= 0.26.1; no patched 0.25.x exists, and
-    # `hickory-resolver` 0.25.2 pins `^0.25`, so the tree cannot reach it while
-    # reqwest is on 0.12. Reaching a fix means moving BOTH `apps/cli` and
-    # `clients/rust` to reqwest 0.13 (which requires `hickory-resolver ^0.26`)
-    # on the `rustls-no-provider` feature — plain `rustls` there implies
-    # aws-lc-rs, which breaks the static musl builds. Bumping only the CLI
-    # leaves the vulnerable copy in the tree via the SDK.
-    #
-    # Exposure until then: both are denial-of-service on DNS parsing, reached
-    # only through responses from the resolver the station is configured to
-    # use. Neither is RCE or disclosure.
-    #
-    # REMOVE these two entries as part of the reqwest 0.13 upgrade.
-    "RUSTSEC-2026-0118",
-    "RUSTSEC-2026-0119",
 ]
 
 [licenses]

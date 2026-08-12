@@ -19,15 +19,15 @@ async fn create_with_aggregation(
         .part_number(format!("PART-A-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .phases(vec![RunCreatePhases::builder()
             .name("agg_phase")
-            .outcome(PhasesOutcome::Pass)
+            .outcome(PhaseGetOutcome::Pass)
             .started_at(now - chrono::Duration::minutes(5))
             .ended_at(now - chrono::Duration::minutes(3))
             .measurements(vec![RunCreateMeasurements::builder()
                 .name(meas_name)
-                .outcome(ValidatorsOutcome::Pass)
+                .outcome(Outcome::Pass)
                 .measured_value(serde_json::json!(measured))
                 .aggregations(aggregations)
                 .build()
@@ -51,7 +51,7 @@ async fn aggregation_type_avg() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("avg")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -78,7 +78,7 @@ async fn aggregation_type_min() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("min")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -104,7 +104,7 @@ async fn aggregation_type_max() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("max")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -130,7 +130,7 @@ async fn aggregation_type_sum() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("sum")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -156,7 +156,7 @@ async fn aggregation_type_count() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("count")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -182,7 +182,7 @@ async fn aggregation_type_std() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("std")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -208,7 +208,7 @@ async fn aggregation_type_median() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("median")
             .value(serde_json::json!(42.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -235,7 +235,7 @@ async fn multiple_aggregations_on_single_measurement() {
             RunCreateMeasurementsAggregations::builder()
                 .r#type("avg")
                 .value(serde_json::json!(72.3))
-                .outcome("PASS")
+                .outcome(Outcome::Pass)
                 .build()
                 .unwrap(),
             RunCreateMeasurementsAggregations::builder()
@@ -276,15 +276,15 @@ async fn aggregation_with_string_value() {
         .part_number(format!("PART-A-{u}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .phases(vec![RunCreatePhases::builder()
             .name("str_agg_phase")
-            .outcome(PhasesOutcome::Pass)
+            .outcome(PhaseGetOutcome::Pass)
             .started_at(now - chrono::Duration::minutes(5))
             .ended_at(now - chrono::Duration::minutes(3))
             .measurements(vec![RunCreateMeasurements::builder()
                 .name("status_mode")
-                .outcome(ValidatorsOutcome::Pass)
+                .outcome(Outcome::Pass)
                 .measured_value(serde_json::json!("nominal"))
                 .aggregations(vec![RunCreateMeasurementsAggregations::builder()
                     .r#type("mode")
@@ -316,15 +316,15 @@ async fn aggregation_with_boolean_value() {
         .part_number(format!("PART-A-{u}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .phases(vec![RunCreatePhases::builder()
             .name("bool_agg_phase")
-            .outcome(PhasesOutcome::Pass)
+            .outcome(PhaseGetOutcome::Pass)
             .started_at(now - chrono::Duration::minutes(5))
             .ended_at(now - chrono::Duration::minutes(3))
             .measurements(vec![RunCreateMeasurements::builder()
                 .name("all_pass")
-                .outcome(ValidatorsOutcome::Pass)
+                .outcome(Outcome::Pass)
                 .measured_value(serde_json::json!(true))
                 .aggregations(vec![RunCreateMeasurementsAggregations::builder()
                     .r#type("all")
@@ -352,18 +352,18 @@ async fn aggregation_with_validators() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("avg")
             .value(serde_json::json!(72.3))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .validators(vec![
                 RunCreateMeasurementsAggregationsValidators::builder()
                     .operator(">=")
                     .expected_value(serde_json::json!(60.0))
-                    .outcome("PASS")
+                    .outcome(Outcome::Pass)
                     .build()
                     .unwrap(),
                 RunCreateMeasurementsAggregationsValidators::builder()
                     .operator("<=")
                     .expected_value(serde_json::json!(90.0))
-                    .outcome("PASS")
+                    .outcome(Outcome::Pass)
                     .build()
                     .unwrap(),
             ])
@@ -396,7 +396,7 @@ async fn aggregation_outcome_pass() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("avg")
             .value(serde_json::json!(50.0))
-            .outcome("PASS")
+            .outcome(Outcome::Pass)
             .build()
             .unwrap()],
     )
@@ -406,7 +406,7 @@ async fn aggregation_outcome_pass() {
         .aggregations
         .clone();
     if let NullableField::Value(a) = aggs {
-        assert_eq!(Some("PASS".to_string()), a[0].outcome);
+        assert_eq!(Some(Outcome::Pass), a[0].outcome);
     } else {
         panic!("expected aggregations");
     }
@@ -426,20 +426,20 @@ async fn aggregation_outcome_fail() {
         .part_number(format!("PART-A-{u}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Fail)
+        .outcome(LogGetOutcome::Fail)
         .phases(vec![RunCreatePhases::builder()
             .name("fail_agg")
-            .outcome(PhasesOutcome::Fail)
+            .outcome(PhaseGetOutcome::Fail)
             .started_at(now - chrono::Duration::minutes(5))
             .ended_at(now - chrono::Duration::minutes(3))
             .measurements(vec![RunCreateMeasurements::builder()
                 .name("agg_fail")
-                .outcome(ValidatorsOutcome::Fail)
+                .outcome(Outcome::Fail)
                 .measured_value(serde_json::json!(50.0))
                 .aggregations(vec![RunCreateMeasurementsAggregations::builder()
                     .r#type("avg")
                     .value(serde_json::json!(50.0))
-                    .outcome("FAIL")
+                    .outcome(Outcome::Fail)
                     .build()
                     .unwrap()])
                 .build()
@@ -455,7 +455,7 @@ async fn aggregation_outcome_fail() {
         .aggregations
         .clone();
     if let NullableField::Value(a) = aggs {
-        assert_eq!(Some("FAIL".to_string()), a[0].outcome);
+        assert_eq!(Some(Outcome::Fail), a[0].outcome);
     } else {
         panic!("expected aggregations");
     }
@@ -513,11 +513,11 @@ async fn aggregation_validator_with_is_decisive() {
         vec![RunCreateMeasurementsAggregations::builder()
             .r#type("avg")
             .value(serde_json::json!(72.0))
-            .outcome("FAIL")
+            .outcome(Outcome::Fail)
             .validators(vec![RunCreateMeasurementsAggregationsValidators::builder()
                 .operator(">=")
                 .expected_value(serde_json::json!(80.0))
-                .outcome("FAIL")
+                .outcome(Outcome::Fail)
                 .is_decisive(false)
                 .build()
                 .unwrap()])

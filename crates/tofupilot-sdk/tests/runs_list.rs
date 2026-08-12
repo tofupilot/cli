@@ -32,7 +32,7 @@ async fn list_runs_filter_by_outcome() {
         .part_number(&part)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -45,7 +45,7 @@ async fn list_runs_filter_by_outcome() {
         .part_number(&part)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Fail)
+        .outcome(LogGetOutcome::Fail)
         .send()
         .await
         .unwrap();
@@ -53,14 +53,14 @@ async fn list_runs_filter_by_outcome() {
     let result = client()
         .runs()
         .list()
-        .outcomes(vec![Outcome::Pass])
+        .outcomes(vec![LogGetOutcome::Pass])
         .part_numbers(vec![part])
         .send()
         .await
         .unwrap();
 
     assert!(!result.data.is_empty());
-    assert!(result.data.iter().all(|r| r.outcome == Outcome::Pass));
+    assert!(result.data.iter().all(|r| r.outcome == LogGetOutcome::Pass));
     assert!(result.data.iter().any(|r| r.id == pass_run.id));
 }
 
@@ -79,7 +79,7 @@ async fn list_runs_filter_by_serial_number() {
         .part_number(format!("PART-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -111,7 +111,7 @@ async fn list_runs_pagination() {
             .part_number(&part)
             .started_at(now - chrono::Duration::minutes(5))
             .ended_at(now)
-            .outcome(Outcome::Pass)
+            .outcome(LogGetOutcome::Pass)
             .send()
             .await
             .unwrap();
@@ -164,7 +164,7 @@ async fn list_runs_filter_by_procedure_id() {
         .part_number(format!("PART-FPI-{uid_val}"))
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -231,7 +231,7 @@ async fn list_runs_sort_order() {
             .part_number(&part)
             .started_at(now - chrono::Duration::minutes(10 - i))
             .ended_at(now - chrono::Duration::minutes(5 - i))
-            .outcome(Outcome::Pass)
+            .outcome(LogGetOutcome::Pass)
             .send()
             .await
             .unwrap();
@@ -311,7 +311,7 @@ async fn list_runs_filter_by_duration_range() {
         .part_number(&part)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now - chrono::Duration::minutes(3))
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -344,7 +344,7 @@ async fn list_runs_filter_by_ended_at() {
         .part_number(&part)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now - chrono::Duration::minutes(3))
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -377,7 +377,7 @@ async fn list_runs_filter_by_created_at() {
         .part_number(&part)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -430,7 +430,7 @@ async fn list_runs_filter_by_revision_numbers() {
         .revision_number(&rev)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -464,7 +464,7 @@ async fn list_runs_filter_by_procedure_versions() {
         .procedure_version(&version)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
@@ -498,7 +498,7 @@ async fn list_runs_filter_by_batch_numbers() {
         .batch_number(&batch)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(Outcome::Pass)
+        .outcome(LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();

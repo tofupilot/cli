@@ -453,7 +453,7 @@ async fn list_units_filter_by_batch_numbers() {
         .batch_number(&batch_number)
         .started_at(now - chrono::Duration::minutes(5))
         .ended_at(now)
-        .outcome(tofupilot::types::Outcome::Pass)
+        .outcome(tofupilot::types::LogGetOutcome::Pass)
         .send()
         .await
         .unwrap();
