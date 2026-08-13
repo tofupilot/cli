@@ -63,6 +63,20 @@ const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Write cap, matching the read cap.
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 
+/// Binary resources live under this subtree only. Confining
+/// `write_resource` keeps binary payloads from ever replacing a
+/// procedure source file.
+const RESOURCE_DIR: &str = "resources";
+/// Extensions `write_resource` accepts: integration assets a phase
+/// consumes at runtime (reference audio, calibration tables, firmware
+/// images, reference pictures). Text sources stay on `write_file`.
+const RESOURCE_EXTENSIONS: &[&str] = &[
+    "wav", "mp3", "csv", "tsv", "bin", "hex", "dat", "png", "jpg", "jpeg", "webp", "bmp",
+];
+/// Decoded-size cap for `write_resource`. Firmware images and audio
+/// references are MBs; procedure sources stay under `MAX_WRITE_BYTES`.
+const MAX_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Studio configuration installed by `tofupilot studio` after
 /// `Server::start`. Absent on every other invocation, which keeps the
 /// whole RPC surface 403.
@@ -271,6 +285,12 @@ async fn dispatch(config: &StudioConfig, request: StudioRequest) -> StudioRespon
         } => write_file(&config.root, &path, &content, expected_sha256.as_deref()).await,
         StudioRequest::CreateDir { path } => create_dir(&config.root, &path).await,
         StudioRequest::Validate { path } => validate(&config.root, path.as_deref()).await,
+        StudioRequest::ValidateContent { path, content } => validate_content(&path, content).await,
+        StudioRequest::WriteResource {
+            path,
+            content_base64,
+            overwrite,
+        } => write_resource(&config.root, &path, &content_base64, overwrite).await,
         StudioRequest::GetSequence {} => get_sequence(&config.root).await,
     }
 }
@@ -658,12 +678,23 @@ async fn write_file(
         }
     }
 
-    // Atomic-ish write: temp file in the same directory, then rename.
-    // A crash mid-write leaves the original intact. The rename
-    // replaces the inode, so the temp file is CREATED with the
-    // original's permission bits (unix) — chmod-after-write would
-    // leave the new content world-readable (umask default) for a
-    // window, and a crash in that window would strand it that way.
+    if let Err(e) = atomic_write(root, &full, content.as_bytes()).await {
+        return e;
+    }
+    crate::log::info(&format!("studio: wrote {}", full.display()));
+    StudioResponse::Written {
+        path: rel.to_string_lossy().replace('\\', "/"),
+        sha256: sha256_hex(content.as_bytes()),
+    }
+}
+
+/// Atomic-ish write: temp file in the same directory, then rename.
+/// A crash mid-write leaves the original intact. The rename
+/// replaces the inode, so the temp file is CREATED with the
+/// original's permission bits (unix) — chmod-after-write would
+/// leave the new content world-readable (umask default) for a
+/// window, and a crash in that window would strand it that way.
+async fn atomic_write(root: &Path, full: &Path, bytes: &[u8]) -> Result<(), StudioResponse> {
     let parent = full.parent().unwrap_or(root);
     let tmp = parent.join(format!(
         ".tofupilot-studio-write-{}.tmp",
@@ -672,30 +703,29 @@ async fn write_file(
     let mut opts = tokio::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
-    if let Ok(meta) = tokio::fs::metadata(&full).await {
+    if let Ok(meta) = tokio::fs::metadata(full).await {
         use std::os::unix::fs::PermissionsExt;
         opts.mode(meta.permissions().mode() & 0o7777);
     }
     let write_result = async {
         use tokio::io::AsyncWriteExt;
         let mut f = opts.open(&tmp).await?;
-        f.write_all(content.as_bytes()).await?;
+        f.write_all(bytes).await?;
         f.flush().await
     }
     .await;
     if let Err(e) = write_result {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return err(StudioErrorCode::Internal, format!("write failed: {e}"));
+        return Err(err(StudioErrorCode::Internal, format!("write failed: {e}")));
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &full).await {
+    if let Err(e) = tokio::fs::rename(&tmp, full).await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return err(StudioErrorCode::Internal, format!("rename failed: {e}"));
+        return Err(err(
+            StudioErrorCode::Internal,
+            format!("rename failed: {e}"),
+        ));
     }
-    crate::log::info(&format!("studio: wrote {}", full.display()));
-    StudioResponse::Written {
-        path: rel.to_string_lossy().replace('\\', "/"),
-        sha256: sha256_hex(content.as_bytes()),
-    }
+    Ok(())
 }
 
 async fn create_dir(root: &Path, path: &str) -> StudioResponse {
@@ -833,6 +863,154 @@ async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
     StudioResponse::Diagnostics { diagnostics }
 }
 
+/// Validate proposed procedure content without touching the disk. The
+/// loader chain after the file read is purely structural
+/// (`load_procedure_definition_from_str`), so no temp file is needed;
+/// the target file need not exist yet. `path` keeps the addressing
+/// rules of `validate` (clamped, YAML-only) so a proposal is refused
+/// exactly where a disk validation of the same path would be.
+async fn validate_content(path: &str, content: String) -> StudioResponse {
+    let rel = match clamp_rel(path) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if !matches!(
+        rel.extension().and_then(|e| e.to_str()),
+        Some("yaml") | Some("yml")
+    ) {
+        return err(StudioErrorCode::Invalid, "not a procedure YAML file");
+    }
+    if content.len() > MAX_WRITE_BYTES {
+        return err(
+            StudioErrorCode::TooLarge,
+            format!("content is {} bytes (cap {MAX_WRITE_BYTES})", content.len()),
+        );
+    }
+    // Blocking thread for symmetry with `validate`: parsing large YAML
+    // is CPU-bound work that should not sit on the async executor.
+    let result = tokio::task::spawn_blocking(move || {
+        execution_engine::procedure::loader::load_procedure_definition_from_str(&content)
+    })
+    .await;
+    let diagnostics = match result {
+        Ok(Ok(_)) => Vec::new(),
+        Ok(Err(message)) => vec![StudioDiagnostic {
+            severity: StudioDiagnosticSeverity::Error,
+            message,
+            path: None,
+        }],
+        Err(join_err) => vec![StudioDiagnostic {
+            severity: StudioDiagnosticSeverity::Error,
+            message: format!("validation task failed: {join_err}"),
+            path: None,
+        }],
+    };
+    StudioResponse::Diagnostics { diagnostics }
+}
+
+/// Write a binary integration resource (base64 payload) under
+/// `resources/`. Confinement + allowlist + cap keep this op from ever
+/// replacing a procedure source: sources go through `write_file`
+/// (text, approval-gated), resources through here. There is no diff to
+/// review on a binary, so replacing an existing resource requires the
+/// explicit `overwrite` flag — the refusal carries the existing file's
+/// sha256 so the caller can tell an identical re-upload from a clobber.
+async fn write_resource(
+    root: &Path,
+    path: &str,
+    content_base64: &str,
+    overwrite: bool,
+) -> StudioResponse {
+    let rel = match clamp_rel(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !rel.starts_with(RESOURCE_DIR) {
+        return err(
+            StudioErrorCode::Forbidden,
+            format!("resources must live under {RESOURCE_DIR}/"),
+        );
+    }
+    if !matches!(
+        rel.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some(ext) if RESOURCE_EXTENSIONS.contains(&ext)
+    ) {
+        return err(StudioErrorCode::Forbidden, "not an allowed resource type");
+    }
+    // Cap the encoded payload before decoding: base64 inflates 4/3, so
+    // this bounds the decode allocation too.
+    if content_base64.len() > MAX_RESOURCE_BYTES / 3 * 4 + 4 {
+        return err(
+            StudioErrorCode::TooLarge,
+            format!("resource exceeds the {MAX_RESOURCE_BYTES} byte cap"),
+        );
+    }
+    use base64::Engine;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(content_base64) else {
+        return err(
+            StudioErrorCode::Invalid,
+            "content_base64 is not valid base64",
+        );
+    };
+    if bytes.len() > MAX_RESOURCE_BYTES {
+        return err(
+            StudioErrorCode::TooLarge,
+            format!(
+                "resource is {} bytes (cap {MAX_RESOURCE_BYTES})",
+                bytes.len()
+            ),
+        );
+    }
+    // Same parent auto-creation as write_file: resources/ typically
+    // does not exist before the first upload. Every component already
+    // passed clamp_rel, so creation stays under the canonical root.
+    if let Some(parent_rel) = rel.parent() {
+        if !parent_rel.as_os_str().is_empty() {
+            if let Err(e) = tokio::fs::create_dir_all(root.join(parent_rel)).await {
+                return err(
+                    StudioErrorCode::Internal,
+                    format!("cannot create parent directory: {e}"),
+                );
+            }
+        }
+    }
+    let full = match resolve_for_write(root, &rel).await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // require_text = false: this is the one binary write of the
+    // surface; the allowlist above is its extension policy.
+    if let Err(e) = check_canonical_policy(root, &full, false) {
+        return e;
+    }
+    if !overwrite {
+        if let Ok(existing) = tokio::fs::read(&full).await {
+            return err(
+                StudioErrorCode::Conflict,
+                format!(
+                    "resource already exists (sha256 {}); re-send with overwrite to replace it",
+                    sha256_hex(&existing)
+                ),
+            );
+        }
+    }
+    if let Err(e) = atomic_write(root, &full, &bytes).await {
+        return e;
+    }
+    crate::log::info(&format!(
+        "studio: wrote resource {} ({} bytes)",
+        full.display(),
+        bytes.len()
+    ));
+    StudioResponse::Written {
+        path: rel.to_string_lossy().replace('\\', "/"),
+        sha256: sha256_hex(&bytes),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,6 +1032,107 @@ mod tests {
         assert!(clamp_rel("../..").is_err());
         let ok = clamp_rel("../phases/main.py").unwrap();
         assert_eq!(ok, PathBuf::from("phases/main.py"));
+    }
+
+    #[tokio::test]
+    async fn validate_content_checks_a_proposal_without_touching_disk() {
+        // A minimal valid procedure passes with no diagnostics.
+        let valid = "name: A\nmain:\n  - name: P1\n";
+        let ok = validate_content("procedure.yaml", valid.to_string()).await;
+        let StudioResponse::Diagnostics { diagnostics } = ok else {
+            panic!("expected Diagnostics, got {ok:?}");
+        };
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+
+        // A schema violation is reported as a diagnostic, not an error.
+        let invalid = "name: A\nmain: []\n";
+        let bad = validate_content("procedure.yaml", invalid.to_string()).await;
+        let StudioResponse::Diagnostics { diagnostics } = bad else {
+            panic!("expected Diagnostics, got {bad:?}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+
+        // Non-YAML targets are refused like `validate` refuses them.
+        let refused = validate_content("phases/main.py", "x = 1".to_string()).await;
+        assert!(matches!(
+            refused,
+            StudioResponse::Error {
+                code: StudioErrorCode::Invalid,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn write_resource_confines_allowlists_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        use base64::Engine;
+        let payload: Vec<u8> = vec![0u8, 159, 146, 150]; // invalid UTF-8 on purpose
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+
+        // Roundtrip: parent dir auto-created, bytes land verbatim.
+        let w = write_resource(root, "resources/ref/cal.bin", &b64, false).await;
+        let StudioResponse::Written { path, sha256 } = w else {
+            panic!("expected Written, got {w:?}");
+        };
+        assert_eq!(path, "resources/ref/cal.bin");
+        let on_disk = std::fs::read(root.join("resources/ref/cal.bin")).unwrap();
+        assert_eq!(on_disk, payload);
+        assert_eq!(sha256, sha256_hex(&payload));
+
+        // Re-upload without overwrite: refused with a Conflict that
+        // carries the existing sha, and the bytes are untouched.
+        let other = base64::engine::general_purpose::STANDARD.encode(b"other bytes");
+        let clash = write_resource(root, "resources/ref/cal.bin", &other, false).await;
+        let StudioResponse::Error { code, message } = clash else {
+            panic!("expected Error, got {clash:?}");
+        };
+        assert!(matches!(code, StudioErrorCode::Conflict));
+        assert!(message.contains(&sha256_hex(&payload)));
+        assert_eq!(
+            std::fs::read(root.join("resources/ref/cal.bin")).unwrap(),
+            payload
+        );
+
+        // Explicit overwrite replaces the bytes.
+        let replaced = write_resource(root, "resources/ref/cal.bin", &other, true).await;
+        assert!(matches!(replaced, StudioResponse::Written { .. }));
+        assert_eq!(
+            std::fs::read(root.join("resources/ref/cal.bin")).unwrap(),
+            b"other bytes"
+        );
+
+        // Outside resources/: refused, even with an allowed extension.
+        let outside = write_resource(root, "firmware.bin", &b64, false).await;
+        assert!(matches!(
+            outside,
+            StudioResponse::Error {
+                code: StudioErrorCode::Forbidden,
+                ..
+            }
+        ));
+
+        // Disallowed extension: a binary payload must not become a
+        // procedure source.
+        let source = write_resource(root, "resources/procedure.yaml", &b64, false).await;
+        assert!(matches!(
+            source,
+            StudioResponse::Error {
+                code: StudioErrorCode::Forbidden,
+                ..
+            }
+        ));
+
+        // Invalid base64 is a typed Invalid, not a daemon error.
+        let garbage = write_resource(root, "resources/x.bin", "not-base64!!", false).await;
+        assert!(matches!(
+            garbage,
+            StudioResponse::Error {
+                code: StudioErrorCode::Invalid,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

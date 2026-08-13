@@ -29,6 +29,7 @@ realtime-native-roots = ["tokio-tungstenite/rustls-tls-native-roots"]
 reqwest-no-provider = ["reqwest/rustls-no-provider"]
 
 [dependencies]
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

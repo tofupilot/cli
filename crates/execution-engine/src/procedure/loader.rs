@@ -35,8 +35,17 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     let content = std::fs::read_to_string(file_path)
         .map_err(|e| format!("Failed to read {}: {}", file_path.display(), e))?;
 
+    load_procedure_definition_from_str(&content)
+}
+
+/// Same parse + validation chain as `load_procedure_definition`, on
+/// content that is not (or not yet) on disk. Validation is purely
+/// structural — nothing after the file read touches the filesystem —
+/// so proposed content can be checked before it is written.
+#[must_use = "procedure definition should be checked for validation errors"]
+pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefinition, String> {
     let raw: ProcedureYaml =
-        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
+        serde_yaml::from_str(content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
 
     let procedure_def = ProcedureDefinition::from(raw);
 

@@ -888,6 +888,27 @@ pub enum StudioRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// Validate proposed procedure content WITHOUT writing it to disk.
+    /// `path` is where the file would live (it carries the extension
+    /// check and, later, relative resolution); the target need not
+    /// exist. Lets a client surface diagnostics on a proposal before
+    /// asking the user to approve the write. Replies `Diagnostics`.
+    ValidateContent { path: String, content: String },
+    /// Write a binary project resource from a base64 payload. Confined
+    /// to the `resources/` subtree, extension-allowlisted and
+    /// size-capped by the daemon; resource bytes never transit through
+    /// a model. Unlike `write_file` there is no diff to review, so the
+    /// guard is coarser: an existing target is refused with
+    /// `Error { code: Conflict }` (message carries its sha256) unless
+    /// `overwrite` is set — what sits in `resources/` is what a running
+    /// procedure reads off the bench, and must not vanish on a filename
+    /// collision. Replies `Written` with the sha256 of the decoded bytes.
+    WriteResource {
+        path: String,
+        content_base64: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
     /// Structured view of the project's procedure, parsed by the
     /// engine's real loader. This is the single source the sequence
     /// tree / inspector consume — clients never parse YAML themselves.
