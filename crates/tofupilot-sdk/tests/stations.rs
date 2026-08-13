@@ -69,11 +69,21 @@ async fn list_stations_with_search_query() {
 
 #[tokio::test]
 async fn list_stations_pagination() {
-    for _ in 0..3 {
-        create_station(&uid()).await;
+    // Paginate only within this test's stations, so concurrent suites can't shift pages.
+    let uid_val = uid();
+    for i in 0..3 {
+        create_station(&format!("PG-{uid_val}-{i}")).await;
     }
 
-    let page1 = client().stations().list().limit(1).send().await.unwrap();
+    let search = format!("Station-PG-{uid_val}");
+    let page1 = client()
+        .stations()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(1, page1.data.len());
     assert!(page1.meta.has_more);
@@ -82,6 +92,7 @@ async fn list_stations_pagination() {
     let page2 = client()
         .stations()
         .list()
+        .search_query(&search)
         .limit(1)
         .cursor(cursor)
         .send()
@@ -151,19 +162,21 @@ async fn update_station_nonexistent_returns_not_found() {
 }
 
 #[tokio::test]
-async fn create_station_duplicate_name_returns_conflict() {
+async fn create_station_duplicate_name_creates_distinct_station() {
+    // Names are not unique — stations are identified by id.
     let uid_val = uid();
-    let (_, name) = create_station(&uid_val).await;
+    let (first_id, name) = create_station(&uid_val).await;
     let proc_id = procedure_id().await;
 
-    let result = client()
+    let second = client()
         .stations()
         .create()
         .name(&name)
         .procedure_id(proc_id)
         .send()
-        .await;
-    assert!(matches!(result, Err(tofupilot::Error::Conflict(_))));
+        .await
+        .unwrap();
+    assert_ne!(first_id, second.id);
 }
 
 #[tokio::test]

@@ -6194,7 +6194,7 @@ pub struct RunGetResponse {
     pub procedure: RunGetProcedure,
     /// Unit under test information.
     pub unit: RunGetUnit,
-    /// Array of execution phases in this run. Only returned if `all` or `phases` is included.
+    /// Array of execution phases in this run, ordered by start time, then by name and retry attempt for phases that share one. Retry attempts of a phase therefore always appear in attempt order. Only returned if `all` or `phases` is included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phases: Option<Vec<RunGetPhases>>,
     /// Files attached to this run, including both regular attachments and test reports. Only returned if `all` or `attachments` is included.

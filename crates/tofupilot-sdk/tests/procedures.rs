@@ -78,32 +78,42 @@ async fn list_procedures_with_search_query() {
 
 #[tokio::test]
 async fn list_procedures_pagination() {
-    for _ in 0..3 {
+    // Paginate only within this test's procedures, so concurrent suites can't shift pages.
+    let uid_val = uid();
+    for i in 0..3 {
         client()
             .procedures()
             .create()
-            .name(format!("Proc Pg {}", uid()))
+            .name(format!("Proc Pg {uid_val} {i}"))
             .send()
             .await
             .unwrap();
     }
 
-    let page1 = client().procedures().list().limit(1).send().await.unwrap();
+    let search = format!("Proc Pg {uid_val}");
+    let page1 = client()
+        .procedures()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(page1.data.len(), 1);
+    assert!(page1.meta.has_more);
 
-    if page1.meta.has_more {
-        let cursor = *page1.meta.next_cursor.as_ref().unwrap() as f64;
-        let page2 = client()
-            .procedures()
-            .list()
-            .limit(1)
-            .cursor(cursor)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(page2.data.len(), 1);
-        assert_ne!(page1.data[0].id, page2.data[0].id);
-    }
+    let cursor = *page1.meta.next_cursor.as_ref().unwrap() as f64;
+    let page2 = client()
+        .procedures()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .cursor(cursor)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.data.len(), 1);
+    assert_ne!(page1.data[0].id, page2.data[0].id);
 }
 
 #[tokio::test]

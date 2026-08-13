@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use tofupilot::config::ClientConfig;
 use tofupilot::types::*;
@@ -7,9 +8,54 @@ use tofupilot::TofuPilot;
 
 static CLIENT: OnceLock<TofuPilot> = OnceLock::new();
 static PROCEDURE_ID: OnceLock<String> = OnceLock::new();
+static TAG: OnceLock<String> = OnceLock::new();
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Marks every name this run creates as belonging to this CI run.
+///
+/// The suites share one org, so clients/e2e-cleanup.py deletes by tag rather
+/// than by age: untagged entities are never touched, which puts a concurrent
+/// job's data and anything a human seeded out of reach by construction.
+pub fn tag() -> &'static str {
+    TAG.get_or_init(|| {
+        load_env();
+        std::env::var("E2E_TAG").unwrap_or_else(|_| {
+            // Local runs need a tag of their own: with a counter, a fixed tag
+            // would make two runs in a row produce exactly the same names.
+            // Ten characters, like CI's, so a fragment costs the same either way.
+            format!("e2el{}", &uuid::Uuid::new_v4().simple().to_string()[..6])
+        })
+    })
+}
+
+/// A name fragment no other run — and no other name in this run — produces.
+///
+/// The "r" marks the rust suite; python, C++ and C# use "p", "c" and "s".
+/// See clients/python-speakeasy/tests/e2e_tag.py for why uniqueness inside a
+/// run is a counter and not a uuid, and for the 60-character budget the four
+/// suites share.
 pub fn uid() -> String {
-    uuid::Uuid::new_v4().to_string()
+    format!(
+        "{}r{}",
+        tag(),
+        base36(COUNTER.fetch_add(1, Ordering::Relaxed))
+    )
+}
+
+/// Widens past three characters rather than wrapping: past 46 656 names a
+/// fragment grows, which is visible, instead of repeating one, which is not.
+fn base36(mut n: usize) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push(DIGITS[n % 36]);
+        n /= 36;
+    }
+    while out.len() < 3 {
+        out.push(b'0');
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base36 digits are ascii")
 }
 
 fn load_env() {

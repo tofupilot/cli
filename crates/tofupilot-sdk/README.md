@@ -1,5 +1,7 @@
 # TofuPilot Rust SDK
 
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/upview/9cf95bbfdc6673eab6720bd37e0b60b9/raw/rust-client-tests.json)](https://github.com/tofupilot/rust)
+
 Rust SDK for the [TofuPilot](https://tofupilot.com) REST API. Async, typed, with retries and request lifecycle hooks.
 
 ## Installation

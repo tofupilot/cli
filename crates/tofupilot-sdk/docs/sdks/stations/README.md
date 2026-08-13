@@ -51,7 +51,6 @@ async fn main() -> tofupilot::Result<()> {
 | --- | --- | --- |
 | `Error::Unauthorized` | 401 | application/json |
 | `Error::Forbidden` | 403 | application/json |
-| `Error::Conflict` | 409 | application/json |
 | `Error::InternalServerError` | 500 | application/json |
 | `Error::UnexpectedStatus` | 4XX, 5XX | \*/\* |
 
@@ -100,7 +99,7 @@ async fn main() -> tofupilot::Result<()> {
 
 ## get_current
 
-Get the station the request is authenticated as, with its linked procedures and connection status.
+Get the station the request is authenticated as, with its linked procedures.
 
 ### Example Usage
 
@@ -140,7 +139,7 @@ async fn main() -> tofupilot::Result<()> {
 
 ## get
 
-Get a station by ID, with its linked procedures, connection status, and recent activity.
+Get a station by ID, with its linked procedures and recent activity.
 
 ### Example Usage
 
@@ -222,7 +221,6 @@ async fn main() -> tofupilot::Result<()> {
 | --- | --- | --- |
 | `Error::Unauthorized` | 401 | application/json |
 | `Error::NotFound` | 404 | application/json |
-| `Error::Conflict` | 409 | application/json |
 | `Error::InternalServerError` | 500 | application/json |
 | `Error::UnexpectedStatus` | 4XX, 5XX | \*/\* |
 

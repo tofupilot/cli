@@ -104,26 +104,37 @@ async fn list_batches_with_number_filter() {
 
 #[tokio::test]
 async fn list_batches_pagination() {
-    for _ in 0..3 {
-        create_batch_via_run(&uid()).await;
+    // Paginate only within this test's batches, so concurrent suites can't shift pages.
+    let uid_val = uid();
+    for i in 0..3 {
+        create_batch_via_run(&format!("PG-{uid_val}-{i}")).await;
     }
 
-    let page1 = client().batches().list().limit(1).send().await.unwrap();
+    let search = format!("BATCH-PG-{uid_val}");
+    let page1 = client()
+        .batches()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(1, page1.data.len());
-    if page1.meta.has_more {
-        let cursor = *page1.meta.next_cursor.as_ref().unwrap();
-        let page2 = client()
-            .batches()
-            .list()
-            .limit(1)
-            .cursor(cursor)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(1, page2.data.len());
-        assert_ne!(page1.data[0].id, page2.data[0].id);
-    }
+    assert!(page1.meta.has_more);
+
+    let cursor = *page1.meta.next_cursor.as_ref().unwrap();
+    let page2 = client()
+        .batches()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .cursor(cursor)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(1, page2.data.len());
+    assert_ne!(page1.data[0].id, page2.data[0].id);
 }
 
 #[tokio::test]

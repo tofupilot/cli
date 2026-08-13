@@ -140,11 +140,21 @@ async fn list_units_filter_by_part_number() {
 
 #[tokio::test]
 async fn list_units_pagination() {
+    // Paginate only within this test's units, so concurrent suites can't shift pages.
+    let mut serials = Vec::new();
     for i in 0..3 {
-        create_part_and_unit(&format!("PAG{i}")).await;
+        let (_, serial) = create_part_and_unit(&format!("PAG{i}")).await;
+        serials.push(serial);
     }
 
-    let page1 = client().units().list().limit(1).send().await.unwrap();
+    let page1 = client()
+        .units()
+        .list()
+        .serial_numbers(serials.clone())
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(1, page1.data.len());
     assert!(page1.meta.has_more);
@@ -153,6 +163,7 @@ async fn list_units_pagination() {
     let page2 = client()
         .units()
         .list()
+        .serial_numbers(serials)
         .limit(1)
         .cursor(cursor)
         .send()

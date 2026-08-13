@@ -87,34 +87,43 @@ async fn list_parts_with_search_query() {
 
 #[tokio::test]
 async fn list_parts_pagination() {
-    for _ in 0..3 {
-        let u = uid();
+    // Paginate only within this test's parts, so concurrent suites can't shift pages.
+    let uid_val = uid();
+    for i in 0..3 {
         client()
             .parts()
             .create()
-            .number(format!("PART-PG-{u}"))
-            .name(format!("Part Pg {u}"))
+            .number(format!("PART-PG-{uid_val}-{i}"))
+            .name(format!("Part Pg {uid_val} {i}"))
             .send()
             .await
             .unwrap();
     }
 
-    let page1 = client().parts().list().limit(1).send().await.unwrap();
+    let search = format!("PART-PG-{uid_val}");
+    let page1 = client()
+        .parts()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(1, page1.data.len());
+    assert!(page1.meta.has_more);
 
-    if page1.meta.has_more {
-        let cursor = *page1.meta.next_cursor.as_ref().unwrap();
-        let page2 = client()
-            .parts()
-            .list()
-            .limit(1)
-            .cursor(cursor)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(1, page2.data.len());
-        assert_ne!(page1.data[0].id, page2.data[0].id);
-    }
+    let cursor = *page1.meta.next_cursor.as_ref().unwrap();
+    let page2 = client()
+        .parts()
+        .list()
+        .search_query(&search)
+        .limit(1)
+        .cursor(cursor)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(1, page2.data.len());
+    assert_ne!(page1.data[0].id, page2.data[0].id);
 }
 
 #[tokio::test]

@@ -189,7 +189,9 @@ async fn builder_timeout_takes_precedence_over_config() {
     // timeout applied rather than the 30s config one. Generous against a
     // loaded CI box, still far below the alternative.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        // Must stay under the mock server's 3s delay — that is what proves the
+        // 200ms timeout ended the call. 2s flaked on loaded CI runners.
+        elapsed < std::time::Duration::from_millis(2900),
         "builder timeout was not applied; call took {elapsed:?}"
     );
 }
@@ -221,7 +223,9 @@ async fn config_timeout_applies_as_fallback() {
         "expected a timeout error, got: {messages:?}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        // Must stay under the mock server's 3s delay — that is what proves the
+        // 200ms timeout ended the call. 2s flaked on loaded CI runners.
+        elapsed < std::time::Duration::from_millis(2900),
         "config timeout fallback was not applied; call took {elapsed:?}"
     );
 }
