@@ -1602,6 +1602,40 @@ pub async fn run_yaml_procedure(
         }
     };
 
+    // Loading is structural: a dangling `python:` reference passes it and
+    // then fails mid-run — an unreadable tp_worker traceback for a phase,
+    // a silently omitted plug argument for a plug. Refuse to start instead,
+    // with every unresolvable reference named. Refs resolve against
+    // `procedure_dir` (the package dir the orchestrator hands the worker),
+    // NOT the YAML's parent — they differ for a nested `entry_point`. On a
+    // partial run only the target's dependency closure gates — plugs not at
+    // all, since the runtime narrows the plug set by introspection; an
+    // invalid target skips the gate entirely so initialization reports the
+    // target problem instead of an unrelated dangling ref.
+    let main_filter = only_phase.as_deref().map(|target| {
+        execution_engine::orchestrator::partial_main_phase_set(&procedure_def, target)
+    });
+    let ref_problems = match &main_filter {
+        Some(Err(_)) => Vec::new(),
+        Some(Ok(set)) => procedure_def.resolve_python_refs(procedure_dir, Some(set)),
+        None => procedure_def.resolve_python_refs(procedure_dir, None),
+    };
+    if !ref_problems.is_empty() {
+        emit_crash(
+            &event_tx,
+            &agent,
+            procedure_id,
+            execution_id,
+            "load_error",
+            1,
+            format!(
+                "Procedure has Python references that cannot be resolved:\n{}",
+                ref_problems.join("\n")
+            ),
+        );
+        return (1, None);
+    }
+
     // Debug mode forces a single worker so the fixed debug port doesn't
     // collide across the pool.
     let worker_count = if debug.enabled {

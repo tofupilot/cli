@@ -75,7 +75,7 @@ fn seed_project(root: &std::path::Path) {
     std::fs::create_dir(root.join("phases")).unwrap();
     std::fs::write(
         root.join("procedure.yaml"),
-        "name: Demo\nversion: 1.0.0\nmain:\n  - name: Check\n    python: phases.main.check\n",
+        "name: Demo\nversion: 1.0.0\nmain:\n  - name: Check\n    python: phases.main:check\n",
     )
     .unwrap();
     std::fs::write(
@@ -207,7 +207,7 @@ async fn rpc_file_roundtrip_and_conflict() {
     let write = serde_json::json!({
         "op": "write_file",
         "path": "procedure.yaml",
-        "content": "name: Demo2\nversion: 1.0.0\nmain:\n  - name: Check\n    python: phases.main.check\n",
+        "content": "name: Demo2\nversion: 1.0.0\nmain:\n  - name: Check\n    python: phases.main:check\n",
         "expected_sha256": sha,
     });
     let (_, written) = rpc(&server, Some(&token), &write.to_string()).await;

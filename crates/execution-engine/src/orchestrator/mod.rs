@@ -22,6 +22,9 @@ use crate::worker::Worker;
 
 // Re-export ExecutionStrategy from schema instead of duplicating
 pub use crate::procedure::schema::ExecutionStrategy;
+// The partial-run dependency closure, shared with the CLI's pre-run
+// ref gate so both filter the same phase set.
+pub use initialization::partial_main_phase_set;
 
 #[derive(Debug)]
 pub struct JobCompletionEvent {

@@ -24,7 +24,7 @@ PROCEDURE = """name: Demo
 version: 1.0.0
 main:
   - name: Check
-    python: phases.main.check
+    python: phases.main:check
 """
 
 checks = 0
@@ -129,6 +129,29 @@ def main():
 
         diags = rpc(port, token, {"op": "validate"})
         check("clean procedure validates", diags["diagnostics"] == [], str(diags))
+
+        # Dangling tree-bound ref (the 2026-08-13 incident spelling: every
+        # dot is a directory, so this targets phases/main/check.py) must
+        # surface as an error diagnostic, then restore the clean file.
+        current = rpc(port, token, {"op": "read_file", "path": "procedure.yaml"})
+        bad = rpc(port, token, {
+            "op": "write_file", "path": "procedure.yaml",
+            "content": current["content"].replace("phases.main:check", "phases.main.check"),
+            "expected_sha256": current["sha256"],
+        })
+        check("dangling ref write ok", bad["result"] == "written", str(bad))
+        diags = rpc(port, token, {"op": "validate"})
+        check("dangling python ref flagged",
+              len(diags["diagnostics"]) == 1
+              and "Python file not found" in diags["diagnostics"][0]["message"],
+              str(diags))
+        cur = rpc(port, token, {"op": "read_file", "path": "procedure.yaml"})
+        restore = rpc(port, token, {
+            "op": "write_file", "path": "procedure.yaml",
+            "content": current["content"],
+            "expected_sha256": cur["sha256"],
+        })
+        check("clean procedure restored", restore["result"] == "written", str(restore))
 
         dotfile = rpc(port, token, {"op": "read_file", "path": ".env"})
         check("dotfile refused", dotfile["code"] == "forbidden", str(dotfile))

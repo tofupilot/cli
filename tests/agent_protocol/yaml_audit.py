@@ -175,8 +175,10 @@ check("Y6 parallel workers", events, rc, expect_pass=True,
       expect_plan_phases=["init", "v", "i", "t"])
 
 events, rc = drive("/tmp/yaml_test7")
+# Since the pre-run python-ref gate, a tree-bound dangling ref is refused
+# before any phase starts: run_crashed, not phase_finished ERROR.
 check("Y7 missing phase module", events, rc, expect_pass=False,
-      expect_phase_error=True)
+      expect_crashed=True)
 
 events, rc = drive("/tmp/yaml_test8")
 check("Y8 YAML syntax error", events, rc, expect_pass=False,
@@ -304,7 +306,9 @@ events, rc = drive("/tmp/yaml_test26")
 check("Y26p plug state persists", events, rc, expect_pass=True)
 
 events, rc = drive("/tmp/yaml_test27")
-check("Y27p plug missing module", events, rc, expect_pass=False, expect_phase_error=True)
+# Full run: every declared plug file is required by the pre-run gate, so
+# the missing module is refused before any phase starts.
+check("Y27p plug missing module", events, rc, expect_pass=False, expect_crashed=True)
 
 # Y42: config from procedure.yaml reaches the plug __init__ as kwargs. Each
 # plug key gets its own config, so va==5.0 and vb==3.3 only hold if the

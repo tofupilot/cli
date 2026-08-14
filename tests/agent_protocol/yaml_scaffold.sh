@@ -106,7 +106,7 @@ def $p(log):
 PY
 done
 
-# Y7: missing phase module → crash at phase runtime or schema validation
+# Y7: missing phase module → refused by the pre-run python-ref gate (load_error crash)
 mk /tmp/yaml_test7
 cat > /tmp/yaml_test7/procedure.yaml <<'YAML'
 name: Y7 Missing Module

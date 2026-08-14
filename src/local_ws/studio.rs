@@ -841,14 +841,28 @@ async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
             }
         },
     };
-    // Loader runs on a blocking thread: it does synchronous file IO
-    // and (for YAML procedures) walks referenced Python modules.
+    // Loader runs on a blocking thread: it does synchronous file IO,
+    // and on success every `python:` reference is resolved against the
+    // procedure directory. Structural loading alone lets a dangling ref
+    // through, and it then fails only mid-run (tp_worker traceback for
+    // a phase, silently omitted plug) — this op validates the project
+    // as it is on disk, so here the missing file is an error.
     let result = tokio::task::spawn_blocking(move || {
-        execution_engine::procedure::loader::load_procedure_definition(&yaml_path)
+        execution_engine::procedure::loader::load_procedure_definition(&yaml_path).map(|def| {
+            let procedure_dir = yaml_path.parent().unwrap_or(Path::new("."));
+            def.resolve_python_refs(procedure_dir, None)
+        })
     })
     .await;
     let diagnostics = match result {
-        Ok(Ok(_)) => Vec::new(),
+        Ok(Ok(ref_problems)) => ref_problems
+            .into_iter()
+            .map(|message| StudioDiagnostic {
+                severity: StudioDiagnosticSeverity::Error,
+                message,
+                path: None,
+            })
+            .collect(),
         Ok(Err(message)) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
             message,
@@ -869,6 +883,13 @@ async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
 /// the target file need not exist yet. `path` keeps the addressing
 /// rules of `validate` (clamped, YAML-only) so a proposal is refused
 /// exactly where a disk validation of the same path would be.
+///
+/// Deliberately does NOT resolve `python:` references: proposed YAML
+/// legitimately precedes the modules it references (the agent writes
+/// procedure.yaml before the phase/plug files in one edit sequence),
+/// and the browser pre-validation hook auto-rejects on ANY diagnostic
+/// — flagging a not-yet-written module here would reject valid edits.
+/// The disk-based `validate` catches dangling refs once writes land.
 async fn validate_content(path: &str, content: String) -> StudioResponse {
     let rel = match clamp_rel(path) {
         Ok(r) => r,
@@ -1032,6 +1053,58 @@ mod tests {
         assert!(clamp_rel("../..").is_err());
         let ok = clamp_rel("../phases/main.py").unwrap();
         assert_eq!(ok, PathBuf::from("phases/main.py"));
+    }
+
+    #[tokio::test]
+    async fn validate_flags_dangling_python_refs_but_validate_content_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        // macOS: temp dirs live behind a /var -> /private/var symlink and
+        // the handler canonicalizes, so the root must be canonical too.
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("phases")).unwrap();
+        std::fs::write(
+            root.join("phases/main.py"),
+            "def check(measurements):\n    measurements.x = 1\n",
+        )
+        .unwrap();
+        // The 2026-08-13 incident spelling: every dot is a directory, so
+        // this resolves to phases/main/check.py (missing) while the author
+        // meant check() in phases/main.py.
+        let dangling = "name: A\nmain:\n  - key: p1\n    name: P1\n    python: phases.main.check\n";
+        std::fs::write(root.join("procedure.yaml"), dangling).unwrap();
+
+        let res = validate(&root, None).await;
+        let StudioResponse::Diagnostics { diagnostics } = res else {
+            panic!("expected Diagnostics, got {res:?}");
+        };
+        assert_eq!(diagnostics.len(), 1, "unexpected: {diagnostics:?}");
+        assert_eq!(diagnostics[0].severity, StudioDiagnosticSeverity::Error);
+        assert!(
+            diagnostics[0].message.contains("Python file not found"),
+            "unexpected message: {}",
+            diagnostics[0].message
+        );
+
+        // Same content through validate_content: silent by contract — a
+        // proposal's referenced modules may not be written yet, and the
+        // browser hook auto-rejects on any diagnostic.
+        let ok = validate_content("procedure.yaml", dangling.to_string()).await;
+        let StudioResponse::Diagnostics { diagnostics } = ok else {
+            panic!("expected Diagnostics, got {ok:?}");
+        };
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+
+        // The correct ':' spelling validates clean on disk.
+        std::fs::write(
+            root.join("procedure.yaml"),
+            dangling.replace("phases.main.check", "phases.main:check"),
+        )
+        .unwrap();
+        let res = validate(&root, None).await;
+        let StudioResponse::Diagnostics { diagnostics } = res else {
+            panic!("expected Diagnostics, got {res:?}");
+        };
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
     }
 
     #[tokio::test]

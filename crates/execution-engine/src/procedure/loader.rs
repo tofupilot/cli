@@ -287,6 +287,118 @@ main:
     }
 
     #[test]
+    fn resolve_python_refs_reports_dangling_refs_loading_lets_through() {
+        let dir = std::env::temp_dir().join(format!("tp-loader-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("phases")).unwrap();
+        std::fs::create_dir_all(dir.join("plugs")).unwrap();
+        std::fs::write(dir.join("phases/main.py"), "def check():\n    pass\n").unwrap();
+        std::fs::write(dir.join("plugs/psu.py"), "class PSU:\n    pass\n").unwrap();
+        let path = dir.join("procedure.yaml");
+        // Both refs use the dotted-callable spelling of the 2026-08-13
+        // incident: every dot is a directory, so they resolve to
+        // plugs/psu/PSU.py and phases/main/check.py — neither exists.
+        std::fs::write(
+            &path,
+            r#"
+name: Dangling Refs
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu.PSU
+main:
+  - key: p1
+    name: P1
+    python: phases.main.check
+"#,
+        )
+        .unwrap();
+
+        let def = load_procedure_definition(&path)
+            .expect("structural loading must let dangling refs through");
+        let problems = def.resolve_python_refs(&dir, None);
+        assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
+        assert!(problems[0].starts_with("Plug `psu`"), "got: {}", problems[0]);
+        assert!(problems[1].starts_with("Phase `p1`"), "got: {}", problems[1]);
+        for p in &problems {
+            assert!(p.contains("Python file not found"), "got: {p}");
+        }
+
+        // The ':' spelling resolves both against the same files.
+        std::fs::write(
+            &path,
+            r#"
+name: Resolving Refs
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PSU
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+"#,
+        )
+        .unwrap();
+        let def = load_procedure_definition(&path).expect("valid procedure");
+        assert!(def.resolve_python_refs(&dir, None).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_python_refs_mirrors_the_runtime_not_stricter() {
+        let dir = std::env::temp_dir().join(format!("tp-loader-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("phases")).unwrap();
+        std::fs::write(dir.join("phases/ok.py"), "def ok():\n    pass\n").unwrap();
+        let path = dir.join("procedure.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: Runtime Parity
+plugs:
+  - name: DMM
+    key: dmm
+    python: plugs.dmm:DMM
+main:
+  - key: ok
+    name: OK
+    python: phases.ok
+  - key: wheel
+    name: Wheel
+    python: shared.phases:check
+  - key: off_
+    name: Off
+    python: phases.gone
+    enabled: false
+  - key: broken
+    name: Broken
+    python: phases.gone
+"#,
+        )
+        .unwrap();
+        let def = load_procedure_definition(&path).expect("valid procedure");
+
+        // `shared.phases:check` has no `shared/` dir in the tree, so it may
+        // resolve through tp_worker's importlib fallback (workspace wheel):
+        // not the gate's call. `phases.gone` IS tree-bound (phases/ exists)
+        // but its phase is disabled — no job, no gate. On a full run the
+        // dangling `plugs/dmm.py` gates too: every declared plug is built.
+        let problems = def.resolve_python_refs(&dir, None);
+        assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
+        assert!(problems[0].starts_with("Plug `dmm`"), "got: {}", problems[0]);
+        assert!(problems[1].starts_with("Phase `broken`"), "got: {}", problems[1]);
+
+        // Partial run on `ok`: `broken` is outside the dependency closure,
+        // and plugs don't gate at all (the runtime narrows the plug set by
+        // signature introspection, so `dmm` would never be built) — the
+        // same procedure starts.
+        let filter: std::collections::HashSet<String> = ["ok".to_string()].into_iter().collect();
+        assert!(def.resolve_python_refs(&dir, Some(&filter)).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn legacy_phase_scope_all_still_loads() {
         let result = load_from_str(
             r#"

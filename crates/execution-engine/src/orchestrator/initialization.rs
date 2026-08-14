@@ -605,7 +605,7 @@ fn union_required_plugs(
 /// Errors when the target key is unknown or names a setup/teardown phase.
 /// Dependencies on unknown keys are tolerated, exactly like the job-graph
 /// builder tolerates them.
-fn partial_main_phase_set(
+pub fn partial_main_phase_set(
     procedure: &crate::procedure::schema::ProcedureDefinition,
     target: &str,
 ) -> Result<HashSet<String>, String> {

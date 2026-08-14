@@ -972,15 +972,12 @@ impl PythonSpec {
         &self.0
     }
 
-    /// Parse the spec and resolve to (file_path, callable_name)
-    ///
-    /// # Arguments
-    /// * `project_dir` - Root directory of the project
-    ///
-    /// # Returns
-    /// * `Ok((PathBuf, String))` - Resolved file path and callable name (function or class)
-    /// * `Err(String)` - Validation or resolution error
-    pub fn parse(&self, project_dir: &Path) -> Result<(PathBuf, String), String> {
+    /// Resolve the spec to (file_path, callable_name) WITHOUT requiring
+    /// the file on disk. Split from `parse` so `resolve_python_refs` can
+    /// decide what a missing file means (a tree-bound spec is broken, a
+    /// bare dot-syntax one may still import from site-packages) without
+    /// duplicating the grammar.
+    pub fn resolve_path(&self, project_dir: &Path) -> Result<(PathBuf, String), String> {
         let spec = self.0.trim();
 
         // Validate not empty
@@ -1074,6 +1071,20 @@ impl PythonSpec {
                 .to_string()
         };
 
+        Ok((file_path, callable_name))
+    }
+
+    /// Parse the spec and resolve to (file_path, callable_name)
+    ///
+    /// # Arguments
+    /// * `project_dir` - Root directory of the project
+    ///
+    /// # Returns
+    /// * `Ok((PathBuf, String))` - Resolved file path and callable name (function or class)
+    /// * `Err(String)` - Validation or resolution error
+    pub fn parse(&self, project_dir: &Path) -> Result<(PathBuf, String), String> {
+        let (file_path, callable_name) = self.resolve_path(project_dir)?;
+
         // Validate file exists
         if !file_path.exists() {
             return Err(format!("Python file not found: {}", file_path.display()));
@@ -1085,6 +1096,33 @@ impl PythonSpec {
         }
 
         Ok((file_path, callable_name))
+    }
+
+    /// True when the spec can only resolve inside the procedure tree:
+    /// file-path syntax (`/` or `\`), a `~` or leading-dot prefix, or dot
+    /// syntax whose first segment exists as a directory in the tree — the
+    /// procedure dir is on the worker's sys.path, so such an import binds
+    /// in-tree and a missing file is authoritative. A bare dot-syntax spec
+    /// with no matching in-tree directory may still resolve through
+    /// tp_worker's importlib fallback (workspace wheels in site-packages),
+    /// which cannot be checked statically. That includes a single-segment
+    /// spec (`python: check`): with no dot there is no parent directory to
+    /// probe, so unless a directory of the same name happens to exist it is
+    /// never tree-bound and a typo there is left to the runtime.
+    pub fn is_tree_bound(&self, project_dir: &Path) -> bool {
+        let spec = self.0.trim();
+        let path_part = spec.split(':').next().unwrap_or(spec).trim();
+        if path_part.contains('/')
+            || path_part.contains('\\')
+            || path_part.starts_with('~')
+            || path_part.starts_with('.')
+        {
+            return true;
+        }
+        match path_part.split('.').next() {
+            Some(first) if !first.is_empty() => project_dir.join(first).is_dir(),
+            _ => true,
+        }
     }
 
     /// Get the callable name (for display purposes, doesn't validate)
@@ -1372,6 +1410,76 @@ impl ProcedureDefinition {
     /// Get all phases with their stages for execution (calls standardized iterator)
     pub fn get_all_phases_with_stage_scope(&self) -> Vec<(StageScope, &PhaseDefinition)> {
         self.iter_phases_with_stage().collect()
+    }
+
+    /// Resolve every `python:` reference against the procedure directory
+    /// and return one message per reference that provably cannot load.
+    ///
+    /// Loading is purely structural (no disk access), so a dangling
+    /// reference passes `load_procedure_definition` and would otherwise
+    /// surface mid-run — as a tp_worker traceback for a phase, or as a
+    /// silently omitted plug (`get_plug_configs_for_job` only logs).
+    /// Callers decide the consequence: the studio daemon turns these
+    /// into diagnostics, the run engine refuses to start.
+    ///
+    /// Mirrors what actually happens at run time, no stricter:
+    /// - Plugs go through `parse` at job build (`to_config_json`), so on a
+    ///   full run every declared plug file is genuinely required on disk.
+    ///   On a partial run (`main_filter` given) plugs are NOT gated at all:
+    ///   the runtime narrows the plug set via async Python signature
+    ///   introspection (`union_required_plugs`), which a synchronous gate
+    ///   cannot reproduce — gating them all would refuse runs the runtime
+    ///   would start (the mid-authoring "play one phase" loop in Studio).
+    ///   `validate` still reports every missing plug file, and a plug the
+    ///   partial run actually needs still fails at job build as before.
+    /// - Phases are loaded by tp_worker, which falls back to importlib
+    ///   for bare dot syntax (workspace wheels) — a missing file is only
+    ///   an error when the spec is tree-bound (`is_tree_bound`).
+    /// - Phases the orchestrator never turns into a job don't gate:
+    ///   `should_skip()` ones, and main phases outside `main_filter`
+    ///   (a partial run's dependency closure) when one is given.
+    pub fn resolve_python_refs(
+        &self,
+        procedure_dir: &Path,
+        main_filter: Option<&HashSet<String>>,
+    ) -> Vec<String> {
+        let mut problems = Vec::new();
+        if main_filter.is_none() {
+            for plug in &self.plugs {
+                if let Err(e) = plug.python.parse(procedure_dir) {
+                    problems.push(format!("Plug `{}`: {}", plug.key, e));
+                }
+            }
+        }
+        for (stage, phase) in self.iter_phases_with_stage() {
+            if phase.should_skip() {
+                continue;
+            }
+            if let Some(filter) = main_filter {
+                if matches!(stage, StageScope::Main) && !filter.contains(&phase.key) {
+                    continue;
+                }
+            }
+            let Some(spec) = &phase.python else { continue };
+            match spec.resolve_path(procedure_dir) {
+                Err(e) => problems.push(format!("Phase `{}`: {}", phase.key, e)),
+                Ok((file, callable)) => {
+                    if !crate::python::is_valid_python_identifier(&callable) {
+                        problems.push(format!(
+                            "Phase `{}`: Invalid Python identifier: '{}'",
+                            phase.key, callable
+                        ));
+                    } else if !file.exists() && spec.is_tree_bound(procedure_dir) {
+                        problems.push(format!(
+                            "Phase `{}`: Python file not found: {}",
+                            phase.key,
+                            file.display()
+                        ));
+                    }
+                }
+            }
+        }
+        problems
     }
 
     /// Get all phases as a flat list with stage, scope, and keys populated (for frontend serialization)
