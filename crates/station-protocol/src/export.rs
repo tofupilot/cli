@@ -39,6 +39,8 @@ fn main() {
         specta::ts::export::<PresenceDraft>(&config).unwrap(),
         specta::ts::export::<StudioRequest>(&config).unwrap(),
         specta::ts::export::<StudioResponse>(&config).unwrap(),
+        specta::ts::export::<StudioProject>(&config).unwrap(),
+        specta::ts::export::<StudioProcedure>(&config).unwrap(),
         specta::ts::export::<StudioFileEntry>(&config).unwrap(),
         specta::ts::export::<StudioEntryKind>(&config).unwrap(),
         specta::ts::export::<StudioDiagnostic>(&config).unwrap(),
@@ -62,10 +64,17 @@ fn main() {
     }
 
     // Internal codegen tool: emits the TypeScript bindings for these wire
-    // types. Output dir is taken from STATION_PROTOCOL_TS_OUT (the monorepo
-    // points it at packages/shared/types/generated); defaults to the current
-    // directory so a standalone run never writes outside the checkout.
-    let out_dir = std::env::var("STATION_PROTOCOL_TS_OUT").unwrap_or_else(|_| ".".to_string());
+    // types. Output dir: STATION_PROTOCOL_TS_OUT when set, else the ONE
+    // tracked location, resolved from the crate's own directory so the
+    // bare `cargo run --bin export-types` does the right thing from any
+    // cwd. The old default (".") wrote a stray copy next to the crate
+    // that the CI gate then never diffed — a gate that could not fail.
+    let out_dir = std::env::var("STATION_PROTOCOL_TS_OUT").unwrap_or_else(|_| {
+        format!(
+            "{}/../../packages/shared/types/generated",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    });
     let out_dir = std::path::Path::new(&out_dir);
     std::fs::create_dir_all(out_dir).expect("create output dir");
     std::fs::write(out_dir.join("station-protocol.ts"), &output).expect("write TS types");

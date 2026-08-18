@@ -498,6 +498,82 @@ struct AppState {
     /// Studio surface configuration. `None` (surface off, requests
     /// 403) unless `tofupilot studio` enabled it with a project root.
     studio: Arc<Mutex<Option<studio::StudioConfig>>>,
+    /// Set while the studio dispatcher has a run in flight. Only the
+    /// dispatcher knows: `procedure_dir` stays populated after a run
+    /// ends, so it cannot answer "is one running now".
+    studio_run_active: Arc<std::sync::atomic::AtomicBool>,
+    /// Generation stamp for `studio_run_active`. Bumped every time the
+    /// dispatcher pins the flag for a NEW run; each event pump captures
+    /// the generation at attach time and only CLEARS the flag if it
+    /// still owns the current one. Without it, "Run again" defeated the
+    /// eager pin: the cancelled prior run's terminal event (or its
+    /// channel closing) cleared the flag while the replacement run was
+    /// still provisioning its venv or parked at the identify prompt.
+    studio_run_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Where `pick_project` sends its folder-dialog jobs. The dialog
+    /// must run on the process's MAIN thread (AppKit requirement — rfd
+    /// panics anywhere else in a non-windowed process), and axum
+    /// handlers run on tokio workers, so the handler posts a job here
+    /// and `tofupilot studio`'s foreground loop — the code `block_on`
+    /// polls on the main thread — shows the dialog and answers on the
+    /// job's oneshot. `None` on every other daemon: the op reports
+    /// itself unavailable instead of hanging.
+    studio_dialog_tx: Arc<Mutex<Option<mpsc::Sender<StudioDialogJob>>>>,
+    /// A dialog choice that holds no procedure, parked instead of
+    /// granted: almost always a mis-click, and a grant is permanent
+    /// full read/write. `ConfirmPick` grants it (single-use);
+    /// `DiscardPick` drops it (the human said no); and EVERY new
+    /// `PickProject` clears it on entry, so a stale offer never
+    /// survives the dialog interaction that created it. The path only
+    /// ever comes from the native dialog — never from the browser —
+    /// which is what keeps the dialog the one door to a new root.
+    studio_pending_pick: Arc<Mutex<Option<PathBuf>>>,
+    /// True while a native folder dialog is on screen. Set by
+    /// `pick_project` (compare-exchange, so only one wins) and cleared
+    /// by the JOB's Drop on the host side — see `StudioDialogJob`.
+    studio_dialog_open: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// One folder-dialog request: the reply channel `pick_project` waits
+/// on (`None` = the human dismissed the dialog), plus the one-dialog
+/// gate. The gate travels WITH the job and releases in `Drop`, so it
+/// opens exactly when the host loop is done with the dialog — never
+/// earlier. The failure this shape exists for: the page's 120s give-up
+/// aborts the request future, and a gate held by that future would
+/// release while the native panel is still on screen, letting a second
+/// request queue behind a window the human still has to answer (and
+/// the first human choice would land on a dropped receiver).
+pub struct StudioDialogJob {
+    reply: Option<tokio::sync::oneshot::Sender<Option<PathBuf>>>,
+    open_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StudioDialogJob {
+    pub(crate) fn new(
+        reply: tokio::sync::oneshot::Sender<Option<PathBuf>>,
+        open_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            reply: Some(reply),
+            open_flag,
+        }
+    }
+
+    /// Deliver the human's choice. Consumes the job; the gate releases
+    /// in the ensuing Drop — i.e. after the dialog closed.
+    pub fn send(mut self, choice: Option<PathBuf>) -> Result<(), Option<PathBuf>> {
+        match self.reply.take() {
+            Some(tx) => tx.send(choice),
+            None => Err(choice),
+        }
+    }
+}
+
+impl Drop for StudioDialogJob {
+    fn drop(&mut self) {
+        self.open_flag
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// How the server picks its port.
@@ -756,6 +832,11 @@ impl Server {
             attachment_dir: Arc::new(Mutex::new(None)),
             session_token,
             studio: Arc::new(Mutex::new(None)),
+            studio_run_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            studio_run_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            studio_dialog_tx: Arc::new(Mutex::new(None)),
+            studio_pending_pick: Arc::new(Mutex::new(None)),
+            studio_dialog_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         /// Origins allowed to call `/studio/rpc`: the dashboard this
@@ -908,10 +989,24 @@ impl Server {
     /// the typed `Unsupported` error); it exists so remote hosts can
     /// gate UI without a probe once capability sets grow.
     pub async fn enable_studio(&self, root: PathBuf) -> std::io::Result<()> {
-        // Canonicalize once here; every RPC path check builds on this
-        // root being canonical (see `StudioConfig::root`).
+        self.enable_studio_with_recents(root, crate::commands::studio_recents::recents_path())
+            .await
+    }
+
+    /// `enable_studio`, with the session's recents file named
+    /// explicitly. Exists for the tests: the default location is under
+    /// the real `~/.tofupilot`, and a test that switches projects would
+    /// otherwise reshuffle the developer's own recents list.
+    pub async fn enable_studio_with_recents(
+        &self,
+        root: PathBuf,
+        recents_file: PathBuf,
+    ) -> std::io::Result<()> {
+        // Canonicalize once here; every RPC path check builds on the
+        // granted roots being canonical (see `GrantedRoot::path`).
         let root = tokio::fs::canonicalize(root).await?;
-        *self.state.studio.lock().await = Some(studio::StudioConfig { root });
+        *self.state.studio.lock().await =
+            Some(studio::StudioConfig::with_recents_file(root, recents_file));
         let mut hello = self.state.hello.lock().await;
         // `partial_run`: the studio dispatcher honors `Run.only_phase`.
         // Not advisory — an older daemon ignores the field and runs the
@@ -995,6 +1090,49 @@ impl Server {
     /// to the run's cancel token.
     pub async fn set_station_cmd_sink(&self, tx: mpsc::Sender<StationCommand>) {
         *self.state.station_cmd_tx.lock().await = Some(tx);
+    }
+
+    /// Directory the studio run dispatcher should execute: the active
+    /// procedure's own directory in a multi-procedure project, else the
+    /// project root. Read at dispatch time rather than captured at
+    /// launch, so a procedure switched in the UI is the one that runs.
+    /// `None` when the studio surface is off (no studio session).
+    pub async fn studio_run_dir(&self) -> Option<PathBuf> {
+        self.state
+            .studio
+            .lock()
+            .await
+            .as_ref()
+            .map(|config| config.active_procedure_dir())
+    }
+
+    /// Install the folder-dialog host for `pick_project`. Only
+    /// `tofupilot studio` calls this, from its foreground loop — the
+    /// receiving end MUST be polled on the process's main thread,
+    /// because that is where the native dialog is legal to open (see
+    /// `AppState::studio_dialog_tx`).
+    pub async fn set_studio_dialog_host(&self, tx: mpsc::Sender<StudioDialogJob>) {
+        *self.state.studio_dialog_tx.lock().await = Some(tx);
+    }
+
+    /// Pin (or release) the run-in-flight flag directly. The run
+    /// dispatcher calls this the moment it ACCEPTS a Run command:
+    /// `RunStarted` only fires after venv bootstrap, python resolution
+    /// and the identify prompt, so the event edge alone leaves that
+    /// whole pre-run window unguarded — a project switch there reloads
+    /// the page onto project B while the engine boots project A. The
+    /// event-pump edges stay as the backstop that eventually clears it.
+    pub fn set_studio_run_active(&self, active: bool) {
+        if active {
+            // A new pin invalidates every older pump's right to clear:
+            // see `studio_run_generation`.
+            self.state
+                .studio_run_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        self.state
+            .studio_run_active
+            .store(active, std::sync::atomic::Ordering::Release);
     }
 
     /// Synchronously drop the attached kiosk window if any, killing
@@ -1223,11 +1361,37 @@ impl Server {
         let stamped_tx = self.state.seq_broadcast.clone();
         let counter = self.state.seq_counter.clone();
         let attachment_dir = self.state.attachment_dir.clone();
+        let run_active = self.state.studio_run_active.clone();
+        // This pump may only CLEAR the flag while it owns the current
+        // generation: a "Run again" pins a new generation before
+        // cancelling this run, and this run's terminal event must not
+        // unpin the replacement's bootstrap window.
+        let run_generation = self.state.studio_run_generation.clone();
+        let pump_generation = run_generation.load(Ordering::Acquire);
+        let owns_pin = move |generation: &std::sync::atomic::AtomicU64| {
+            generation.load(Ordering::Acquire) == pump_generation
+        };
         let mut rx = event_tx.subscribe();
         let pump_handle = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
+                        // The run's own lifecycle is the only honest
+                        // source for "is one in flight": the studio
+                        // dispatcher keeps its `RunHandle` after the run
+                        // ends, and `procedure_dir` is never cleared, so
+                        // neither can answer it. Read by `open_project`.
+                        match &event {
+                            StationEvent::RunStarted { .. } => {
+                                run_active.store(true, Ordering::Release)
+                            }
+                            StationEvent::RunComplete { .. } | StationEvent::RunCrashed { .. }
+                                if owns_pin(&run_generation) =>
+                            {
+                                run_active.store(false, Ordering::Release)
+                            }
+                            _ => {}
+                        }
                         // Learn the run's attachment dir from the first
                         // `AttachmentAdded` that carries an absolute path —
                         // its parent is the engine's report dir, the root
@@ -1262,8 +1426,34 @@ impl Server {
                         h.lagged = true;
                         // last_seq stays so live consumers don't
                         // re-emit an event that already shipped.
+                        // The dropped frames may include the terminal
+                        // `RunComplete`: a lagged pump can no longer
+                        // prove a run is live, and a stale `true` turns
+                        // every project/procedure switch into a
+                        // permanent `Busy` that only a daemon restart
+                        // clears. Err toward re-allowing the switch:
+                        // the worst case is one under-guarded switch
+                        // during a run that survived the lag, against
+                        // a stranded session on the other side. Still
+                        // generation-gated: an OLD lagged pump has no
+                        // say over the replacement run's pin.
+                        if owns_pin(&run_generation) {
+                            run_active.store(false, Ordering::Release);
+                        }
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Sender gone = the attachment is over; if the
+                        // terminal event never arrived (aborted run,
+                        // dropped engine), the flag must not outlive
+                        // the channel that fed it. Generation-gated:
+                        // the cancelled prior run's channel closing is
+                        // exactly how "Run again" used to unpin the
+                        // replacement's bootstrap window.
+                        if owns_pin(&run_generation) {
+                            run_active.store(false, Ordering::Release);
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -1840,7 +2030,13 @@ async fn files_handler(
     let run_dir = state.procedure_dir.lock().await.clone();
     let root = match run_dir {
         Some(dir) => dir,
-        None => match state.studio.lock().await.as_ref().map(|s| s.root.clone()) {
+        None => match state
+            .studio
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| s.active().to_path_buf())
+        {
             Some(root) => root,
             None => return StatusCode::NOT_FOUND.into_response(),
         },

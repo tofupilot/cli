@@ -30,10 +30,10 @@ use axum::{
 use sha2::{Digest, Sha256};
 use station_protocol::{
     StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
-    StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation, StudioSequenceAxis,
-    StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug, StudioSequenceRetry,
-    StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit, StudioSequenceUnitField,
-    StudioSequenceValidator,
+    StudioProject, StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation,
+    StudioSequenceAxis, StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug,
+    StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit,
+    StudioSequenceUnitField, StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -77,15 +77,178 @@ const RESOURCE_EXTENSIONS: &[&str] = &[
 /// references are MBs; procedure sources stay under `MAX_WRITE_BYTES`.
 const MAX_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 
+/// How deep procedure discovery walks below the project root. A repo
+/// with one procedure per subdirectory needs 1; the extra levels cover
+/// a `procedures/<name>/` grouping. Bounded because the open folder can
+/// be anything a human picked in the dialog — a home directory or
+/// Downloads must not turn `project_info` into a full-disk walk.
+const MAX_PROCEDURE_DEPTH: usize = 3;
+/// Cap on procedures reported. Far above any real bench repo; exists so
+/// a pathological tree cannot produce an unbounded reply.
+const MAX_PROCEDURES: usize = 64;
+
+/// A project root a human deliberately handed to this session, either
+/// by launching `tofupilot studio` there or by picking it in the OS
+/// folder dialog. The browser can never mint one: it may only select
+/// among roots already in this list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantedRoot {
+    /// Canonicalized at grant time, so `starts_with` confinement is
+    /// sound and no request has to re-walk the realpath.
+    pub path: PathBuf,
+    /// The directory's own name, for the project switcher.
+    pub name: String,
+}
+
+impl GrantedRoot {
+    /// `path` should be canonical — `enable_studio` and the picker
+    /// canonicalize before calling. `with_recents_file` is the third
+    /// caller and feeds paths straight from JSON WITHOUT canonicalizing:
+    /// that fails closed (every resolver rejects a non-canonical root),
+    /// but it means this constructor cannot assume canonicality — only
+    /// the resolvers' checks make the invariant hold.
+    fn new(path: PathBuf) -> Self {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+        Self { path, name }
+    }
+}
+
 /// Studio configuration installed by `tofupilot studio` after
 /// `Server::start`. Absent on every other invocation, which keeps the
 /// whole RPC surface 403.
 #[derive(Clone)]
 pub struct StudioConfig {
-    /// Canonicalized project root (`enable_studio` canonicalizes).
-    /// Storing it canonical lets every request skip re-walking the
-    /// root's realpath and makes `starts_with` confinement sound.
-    pub root: PathBuf,
+    /// Granted roots, most recently opened first. The head is the
+    /// active project, so "most recent" and "active" cannot drift
+    /// apart the way a separate index would.
+    ///
+    /// INVARIANT: never empty. `new` seeds it and nothing removes the
+    /// last entry, so `active()` is total.
+    granted: Vec<GrantedRoot>,
+    /// Where this session reads and writes its recents. A field rather
+    /// than a call to `studio_recents::recents_path()` at each use: the
+    /// location is part of the daemon's configuration, and a test that
+    /// exercises a project switch must not rewrite the developer's own
+    /// `~/.tofupilot/studio-recents.json`.
+    recents_file: PathBuf,
+    /// Root-relative path of the procedure the session is working on,
+    /// `None` until one is chosen (or when the project holds none).
+    /// A hint rather than an authority: `project_info` re-discovers on
+    /// every call and drops this if the file is gone, so a deleted or
+    /// renamed procedure cannot leave the session pointing at nothing.
+    active_procedure: Option<PathBuf>,
+}
+
+impl StudioConfig {
+    /// Seeds the granted set with `root` at the head, followed by the
+    /// previously opened projects found in `recents_file`.
+    ///
+    /// Past roots count as granted: each was designated by a human at
+    /// least once, and re-asking on every launch would rebuild exactly
+    /// the friction the switcher removes. What a past root does NOT
+    /// grant is anything new — only the folder dialog does that.
+    ///
+    /// What this convenience now costs, stated honestly: since the
+    /// surface gained delete/move/copy, a session token reaches the
+    /// last MAX_RECENTS trees the operator ever opened, not just the
+    /// one they launched. Two caps keep that acceptable: deletes go to
+    /// the OS trash (recoverable), and the token is ephemeral,
+    /// loopback-bound and Origin-allow-listed. Revisit if either cap
+    /// weakens.
+    pub fn with_recents_file(root: PathBuf, recents_file: PathBuf) -> Self {
+        let mut granted = vec![GrantedRoot::new(root)];
+        for past in crate::commands::studio_recents::existing_from(&recents_file) {
+            if !granted.iter().any(|g| g.path == past) {
+                granted.push(GrantedRoot::new(past));
+            }
+        }
+        Self {
+            granted,
+            recents_file,
+            active_procedure: None,
+        }
+    }
+
+    /// The project every file operation is confined to.
+    pub fn active(&self) -> &Path {
+        &self.granted[0].path
+    }
+
+    /// Roots the switcher may offer, active first.
+    pub fn granted(&self) -> &[GrantedRoot] {
+        &self.granted
+    }
+
+    /// Promote an already-granted root to active.
+    ///
+    /// Returns `None` for anything not in the set — the check is
+    /// membership, never a filesystem lookup, so a caller holding the
+    /// session token cannot use this to learn what exists on the host.
+    pub fn activate(&mut self, path: &Path) -> Option<GrantedRoot> {
+        let index = self.granted.iter().position(|g| g.path == path)?;
+        let root = self.granted.remove(index);
+        self.granted.insert(0, root.clone());
+        // The selection is root-relative, so it means something else
+        // under a different root — carrying it over would silently
+        // point the session at another project's file of the same name.
+        self.active_procedure = None;
+        Some(root)
+    }
+
+    /// The procedure the session is working on, root-relative.
+    pub fn active_procedure(&self) -> Option<&Path> {
+        self.active_procedure.as_deref()
+    }
+
+    /// Directory a run should execute: the active procedure's holding
+    /// directory, or the root itself when none is selected (the shape
+    /// every single-procedure project has).
+    pub fn active_procedure_dir(&self) -> PathBuf {
+        let root = self.active();
+        match self
+            .active_procedure
+            .as_deref()
+            .and_then(|rel| rel.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            Some(parent) => root.join(parent),
+            None => root.to_path_buf(),
+        }
+    }
+
+    /// Point the session at `rel` (root-relative). Callers must have
+    /// checked it against discovery first — this is bookkeeping, not
+    /// the authorization step.
+    pub fn set_active_procedure(&mut self, rel: PathBuf) {
+        self.active_procedure = Some(rel);
+    }
+
+    /// Drop a selection that discovery no longer reports (deleted or
+    /// renamed procedure), so the session falls back to the first one
+    /// found instead of pointing at a file that is gone.
+    pub fn forget_active_procedure(&mut self) {
+        self.active_procedure = None;
+    }
+
+    /// Add a new root to the granted set and make it active — or, when
+    /// it is already granted, just promote it. The ONLY caller is
+    /// `pick_project`, carrying a path a human chose in the OS folder
+    /// dialog: this method growing the set is exactly the capability
+    /// the dialog exists to gate. `path` must be canonical, like every
+    /// other entry (the caller canonicalizes).
+    pub fn grant(&mut self, path: PathBuf) -> GrantedRoot {
+        if let Some(existing) = self.activate(&path) {
+            return existing;
+        }
+        let root = GrantedRoot::new(path);
+        self.granted.insert(0, root.clone());
+        self.active_procedure = None;
+        root
+    }
 }
 
 fn err(code: StudioErrorCode, message: impl Into<String>) -> StudioResponse {
@@ -182,8 +345,9 @@ fn check_canonical_policy(
 
 /// Resolve `rel` under the canonical `root` for READ access: the
 /// target must exist and canonicalize inside the root (symlink-escape
-/// safe). `root` is already canonical (see `StudioConfig::root`), so
-/// only the target is walked.
+/// safe). `root` is already canonical (every granted root is stored
+/// canonicalized — see `StudioConfig::grant`), so only the target is
+/// walked.
 async fn resolve_existing(canon_root: &Path, rel: &Path) -> Result<PathBuf, StudioResponse> {
     let full = canon_root.join(rel);
     let Ok(canon_full) = tokio::fs::canonicalize(&full).await else {
@@ -193,6 +357,28 @@ async fn resolve_existing(canon_root: &Path, rel: &Path) -> Result<PathBuf, Stud
         return Err(err(StudioErrorCode::Forbidden, "path escapes studio root"));
     }
     Ok(canon_full)
+}
+
+/// Refuse when `rel`'s FINAL component is itself a symlink.
+/// `resolve_existing` canonicalizes through it, so a destructive op
+/// would land on the pointee while the reply names the link — a
+/// project pinning `procedure.yaml -> procedures/v2.yaml` would lose
+/// `procedures/v2.yaml` and keep a dangling link. Checked on the
+/// un-canonicalized path: `symlink_metadata` follows intermediate
+/// links but not the last component, and where intermediates land is
+/// already the canonical policy's job. Not reachable from the sidebar
+/// today (`list_files` skips symlinks), so this guards direct callers.
+async fn refuse_final_symlink(canon_root: &Path, rel: &Path) -> Result<(), StudioResponse> {
+    let full = canon_root.join(rel);
+    if let Ok(meta) = tokio::fs::symlink_metadata(&full).await {
+        if meta.file_type().is_symlink() {
+            return Err(err(
+                StudioErrorCode::Forbidden,
+                "the entry is a symlink; Studio refuses to touch its target through it",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `rel` under the canonical `root` for WRITE access. The file
@@ -253,7 +439,7 @@ pub(super) async fn rpc_handler(
         }
     };
 
-    let reply = dispatch(&config, request).await;
+    let reply = dispatch(&state, &config, request).await;
     Json(reply).into_response()
 }
 
@@ -273,37 +459,324 @@ pub(super) fn token_matches(presented: &str, actual: &str) -> bool {
     Sha256::digest(presented.as_bytes()) == Sha256::digest(actual.as_bytes())
 }
 
-async fn dispatch(config: &StudioConfig, request: StudioRequest) -> StudioResponse {
+/// `config` is a snapshot taken at authorization. Ops that only read
+/// the filesystem work off it; the two that change which project is
+/// active go back through `state`, because the snapshot is a clone and
+/// writing to it would be lost.
+async fn dispatch(
+    state: &AppState,
+    config: &StudioConfig,
+    request: StudioRequest,
+) -> StudioResponse {
+    let root = config.active();
     match request {
-        StudioRequest::ProjectInfo {} => project_info(&config.root).await,
-        StudioRequest::ListFiles { dir } => list_files(&config.root, dir.as_deref()).await,
-        StudioRequest::ReadFile { path } => read_file(&config.root, &path).await,
+        StudioRequest::ListProjects {} => list_projects(config).await,
+        StudioRequest::OpenProject { path } => open_project(state, &path).await,
+        StudioRequest::OpenProcedure { path } => open_procedure(state, root, &path).await,
+        StudioRequest::PickProject {} => pick_project(state).await,
+        StudioRequest::ConfirmPick {} => confirm_pick(state).await,
+        StudioRequest::DiscardPick {} => discard_pick(state).await,
+        StudioRequest::ProjectInfo {} => project_info(state, root).await,
+        StudioRequest::ListFiles { dir } => list_files(root, dir.as_deref()).await,
+        StudioRequest::ReadFile { path } => read_file(root, &path).await,
         StudioRequest::WriteFile {
             path,
             content,
             expected_sha256,
-        } => write_file(&config.root, &path, &content, expected_sha256.as_deref()).await,
-        StudioRequest::CreateDir { path } => create_dir(&config.root, &path).await,
-        StudioRequest::Validate { path } => validate(&config.root, path.as_deref()).await,
+        } => write_file(root, &path, &content, expected_sha256.as_deref()).await,
+        StudioRequest::CreateDir { path } => create_dir(root, &path).await,
+        StudioRequest::DeleteEntry { path } => delete_entry(root, &path).await,
+        StudioRequest::MoveEntry { from, to } => move_entry(root, &from, &to).await,
+        StudioRequest::CopyEntry { from, to } => copy_entry(root, &from, &to).await,
+        StudioRequest::Validate { path } => validate(config, root, path.as_deref()).await,
         StudioRequest::ValidateContent { path, content } => validate_content(&path, content).await,
         StudioRequest::WriteResource {
             path,
             content_base64,
             overwrite,
-        } => write_resource(&config.root, &path, &content_base64, overwrite).await,
-        StudioRequest::GetSequence {} => get_sequence(&config.root).await,
+        } => write_resource(root, &path, &content_base64, overwrite).await,
+        StudioRequest::GetSequence {} => get_sequence(config, root).await,
     }
 }
 
-/// Parse the project's procedure with the engine loader and project it
-/// into the display model. One parser for validation, execution, and
-/// UI — the web never re-derives structure from YAML text.
-async fn get_sequence(root: &Path) -> StudioResponse {
-    let Some(yaml_path) = crate::commands::run::engine::find_procedure_yaml(root) else {
+fn to_wire(root: &GrantedRoot) -> StudioProject {
+    StudioProject {
+        path: root.path.display().to_string(),
+        name: root.name.clone(),
+    }
+}
+
+/// The switcher's list. Roots whose directory has vanished are dropped
+/// from the reply but kept in the granted set: a disconnected network
+/// share should not permanently forget a project. The stats run in
+/// spawn_blocking for the same reason: a recents entry on a vanished
+/// SMB/NFS mount blocks `is_dir()` for the mount's timeout, and doing
+/// that on a tokio worker parks the runtime exactly when the switcher
+/// is open on "Loading…".
+async fn list_projects(config: &StudioConfig) -> StudioResponse {
+    let active = config.active().display().to_string();
+    let granted: Vec<GrantedRoot> = config.granted().to_vec();
+    let projects = match tokio::task::spawn_blocking(move || {
+        granted
+            .iter()
+            .filter(|g| g.path.is_dir())
+            .map(to_wire)
+            .collect()
+    })
+    .await
+    {
+        Ok(projects) => projects,
+        // A panicked stat task is a failure to report, not an empty
+        // account: defaulting here made the switcher claim the session
+        // holds no projects at all.
+        Err(join_err) => {
+            return err(
+                StudioErrorCode::Internal,
+                format!("could not stat the granted roots: {join_err}"),
+            )
+        }
+    };
+    StudioResponse::Projects { projects, active }
+}
+
+/// Switch the active project. Selection only — see `StudioConfig::activate`.
+async fn open_project(state: &AppState, path: &str) -> StudioResponse {
+    // A run pins the root it started against (the dispatcher captured
+    // it), so moving the active project mid-run would leave the engine
+    // and the UI describing two different projects.
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         return err(
-            StudioErrorCode::NotFound,
-            "no procedure.yaml found in the studio root",
+            StudioErrorCode::Busy,
+            "a run is in progress; stop it before switching project",
         );
+    }
+
+    let mut guard = state.studio.lock().await;
+    let Some(config) = guard.as_mut() else {
+        return err(StudioErrorCode::Forbidden, "studio surface is not enabled");
+    };
+    match config.activate(Path::new(path)) {
+        Some(root) => {
+            // Persist so the next launch reopens it, and so the head of
+            // the recents file and the head of the granted set agree.
+            crate::commands::studio_recents::record_in_or_warn(&config.recents_file, &root.path);
+            StudioResponse::Opened {
+                project: to_wire(&root),
+            }
+        }
+        // Deliberately the same answer for "never granted" and "does
+        // not exist": the reply must not tell a token holder which
+        // paths are real.
+        None => err(
+            StudioErrorCode::Forbidden,
+            "not an opened project; pick the folder first",
+        ),
+    }
+}
+
+/// Grant a NEW root, through the OS folder dialog on the daemon's own
+/// machine. The page only triggers the dialog; the choice — and with it
+/// the grant — belongs to the human at the machine, through a window
+/// no browser message can drive.
+async fn pick_project(state: &AppState) -> StudioResponse {
+    let busy_msg = "a run is in progress; stop it before opening a project";
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return err(StudioErrorCode::Busy, busy_msg);
+    }
+    // Opening a fresh dialog invalidates any stale parked offer FIRST,
+    // on every exit of this function including Cancelled: a pending
+    // pick must never outlive the dialog interaction that created it,
+    // or a later bare `confirm_pick` grants a folder whose warning the
+    // human may never have answered.
+    *state.studio_pending_pick.lock().await = None;
+
+    // One dialog at a time — reentrance, not security (two Studio tabs
+    // or a double-click must not stack OS windows). The gate is an
+    // atomic OWNED BY THE JOB: it releases in the job's Drop on the
+    // host side, i.e. only once the native panel actually closed. A
+    // gate held by this request future would release when the page's
+    // 120s give-up aborts it — while the panel is still on screen —
+    // letting a second dialog queue behind a window the human still
+    // has to answer.
+    if state
+        .studio_dialog_open
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return err(StudioErrorCode::Busy, "a folder dialog is already open");
+    }
+    // From here every early return must clear the flag itself: the job
+    // that would otherwise own it has not been created yet.
+    let host = state.studio_dialog_tx.lock().await;
+    let Some(tx) = host.as_ref() else {
+        // No host loop was installed (not a `tofupilot studio`
+        // process). Typed refusal, not a hang.
+        state
+            .studio_dialog_open
+            .store(false, std::sync::atomic::Ordering::Release);
+        return err(
+            StudioErrorCode::Unsupported,
+            "this daemon cannot open a folder dialog",
+        );
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let job = crate::local_ws::StudioDialogJob::new(reply_tx, state.studio_dialog_open.clone());
+    if tx.send(job).await.is_err() {
+        // The send moved the job in and dropped it on failure, which
+        // already cleared the flag — nothing more to unwind.
+        return err(StudioErrorCode::Internal, "the dialog host is gone");
+    }
+    drop(host);
+    let picked = match reply_rx.await {
+        Ok(choice) => choice,
+        Err(_) => {
+            return err(
+                StudioErrorCode::Internal,
+                "the dialog host dropped the request",
+            )
+        }
+    };
+
+    let Some(path) = picked else {
+        return err(StudioErrorCode::Cancelled, "no folder was chosen");
+    };
+    // The dialog returns a real path, but canonicalize anyway: every
+    // entry in the granted set must be canonical for `starts_with`
+    // confinement to hold, aliases and symlinks included.
+    let canon = match tokio::fs::canonicalize(&path).await {
+        Ok(c) => c,
+        Err(e) => {
+            return err(
+                StudioErrorCode::Internal,
+                format!("could not resolve the picked folder: {e}"),
+            )
+        }
+    };
+
+    // Re-check: a run may have started while the dialog sat open. A
+    // pick is an open, and opens are refused mid-run — grant nothing
+    // rather than leave a granted-but-inactive root nobody asked for.
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return err(StudioErrorCode::Busy, busy_msg);
+    }
+
+    // A folder with no procedure is almost always a mis-click ($HOME,
+    // Documents), and a grant is permanent full read/write for every
+    // file op INCLUDING the agent's read tool. Park it and make the
+    // page ask a second, explicit yes — the launch path applies the
+    // same rule (`resolve_without_path` gates on a procedure existing).
+    // Not a refusal: opening an empty folder to create a procedure in
+    // it is a supported flow, it just does not happen by accident.
+    if discover_procedures(&canon).await.is_empty() {
+        let name = canon
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| canon.to_string_lossy().into_owned());
+        *state.studio_pending_pick.lock().await = Some(canon.clone());
+        return StudioResponse::PickedEmpty {
+            path: canon.to_string_lossy().into_owned(),
+            name,
+        };
+    }
+    *state.studio_pending_pick.lock().await = None;
+
+    grant_and_open(state, canon).await
+}
+
+/// Grant the folder the last dialog picked, after `PickedEmpty`. No
+/// path in the request on purpose: the browser must never name a root,
+/// so this can only confirm what the human already chose in the native
+/// dialog — the daemon holds that choice in `studio_pending_pick`.
+async fn confirm_pick(state: &AppState) -> StudioResponse {
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return err(
+            StudioErrorCode::Busy,
+            "a run is in progress; stop it before switching projects",
+        );
+    }
+    // take(): a confirmation is single-use, whether it succeeds or the
+    // grant below refuses — replaying it must not re-grant.
+    let Some(canon) = state.studio_pending_pick.lock().await.take() else {
+        return err(
+            StudioErrorCode::Invalid,
+            "no folder pick is awaiting confirmation",
+        );
+    };
+    grant_and_open(state, canon).await
+}
+
+/// The human declined the `PickedEmpty` warning: drop the parked path.
+/// A no-op when nothing is parked — declining twice, or after a newer
+/// pick already replaced the offer, must not error.
+async fn discard_pick(state: &AppState) -> StudioResponse {
+    *state.studio_pending_pick.lock().await = None;
+    StudioResponse::PickDiscarded {}
+}
+
+/// The shared tail of both grant paths: insert the canonical root at
+/// the head of the granted set, persist it to the recents file, and
+/// answer `Opened`.
+async fn grant_and_open(state: &AppState, canon: PathBuf) -> StudioResponse {
+    let mut guard = state.studio.lock().await;
+    let Some(config) = guard.as_mut() else {
+        return err(StudioErrorCode::Forbidden, "studio surface is not enabled");
+    };
+    let root = config.grant(canon);
+    crate::commands::studio_recents::record_in_or_warn(&config.recents_file, &root.path);
+    StudioResponse::Opened {
+        project: to_wire(&root),
+    }
+}
+
+/// Absolute path of the procedure the session is working on: the
+/// selected one, else the root's own. Confined like every other path —
+/// the selection came from discovery under this root, and the canonical
+/// check refuses a symlink that leaves it.
+async fn active_procedure_yaml(
+    config: &StudioConfig,
+    root: &Path,
+) -> Result<PathBuf, StudioResponse> {
+    let candidate = match config.active_procedure() {
+        Some(rel) => root.join(rel),
+        None => crate::commands::run::engine::find_procedure_yaml(root).ok_or_else(|| {
+            err(
+                StudioErrorCode::NotFound,
+                "no procedure found in the active project",
+            )
+        })?,
+    };
+    let canon = tokio::fs::canonicalize(&candidate).await.map_err(|_| {
+        err(
+            StudioErrorCode::NotFound,
+            "no procedure found in the active project",
+        )
+    })?;
+    check_canonical_policy(root, &canon, true)?;
+    Ok(canon)
+}
+
+async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
+    let yaml_path = match active_procedure_yaml(config, root).await {
+        Ok(p) => p,
+        Err(e) => return e,
     };
     let loaded = tokio::task::spawn_blocking(move || {
         execution_engine::procedure::loader::load_procedure_definition(&yaml_path)
@@ -490,19 +963,542 @@ async fn get_sequence(root: &Path) -> StudioResponse {
     }
 }
 
-async fn project_info(root: &Path) -> StudioResponse {
+/// The definition's own `name:`, read cheaply. Deliberately NOT the
+/// engine loader: this runs for every discovered procedure on every
+/// `project_info`, and a display label must not depend on the whole
+/// definition (phases, imports, validators) being valid — a procedure
+/// mid-edit still needs to be listed and selectable so it can be fixed.
+async fn procedure_display_name(yaml_path: &Path) -> Option<String> {
+    let text = tokio::fs::read_to_string(yaml_path).await.ok()?;
+    execution_engine::procedure::loader::procedure_name_from_str(&text)
+}
+
+/// Every procedure under `root`, root-first then by path.
+///
+/// A directory holding `procedure.yaml`/`.yml` IS a procedure — the
+/// same canonical-name rule the CLI and the git integration use. The
+/// walk deliberately does NOT anchor on `pyproject.toml` the way the
+/// git repo audit does: procedure subdirectories in a real monorepo
+/// share the root's pyproject and have none of their own, so anchoring
+/// there would miss exactly the layout this exists to support.
+///
+/// Bounded on both depth and count, and `SKIP_DIRS`/dotfiles are
+/// pruned, so a venv or `.git` is never descended into.
+async fn discover_procedures(root: &Path) -> Vec<station_protocol::StudioProcedure> {
+    // Breadth-first so the shallowest procedures are found first and
+    // the cap, if ever reached, keeps the ones nearest the root.
+    let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, usize)> =
+        std::collections::VecDeque::from([(PathBuf::new(), 0)]);
+
+    while let Some((rel_dir, depth)) = queue.pop_front() {
+        if found.len() >= MAX_PROCEDURES {
+            break;
+        }
+        let abs_dir = root.join(&rel_dir);
+        for name in ["procedure.yaml", "procedure.yml"] {
+            if tokio::fs::try_exists(abs_dir.join(name))
+                .await
+                .unwrap_or(false)
+            {
+                found.push((rel_dir.clone(), rel_dir.join(name)));
+                // One procedure per directory: `.yaml` wins over
+                // `.yml`, matching `find_procedure_yaml`'s order.
+                break;
+            }
+        }
+        if depth >= MAX_PROCEDURE_DEPTH {
+            continue;
+        }
+        let Ok(mut read_dir) = tokio::fs::read_dir(&abs_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let entry_name = entry.file_name().to_string_lossy().into_owned();
+            if is_skipped_name(&entry_name) {
+                continue;
+            }
+            // `file_type` reports the dirent's own type, so a symlink
+            // reads as a symlink and is skipped here — discovery never
+            // leaves the root through one.
+            if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                queue.push_back((rel_dir.join(entry_name), depth + 1));
+            }
+        }
+    }
+
+    let mut procedures = Vec::with_capacity(found.len());
+    for (rel_dir, rel_yaml) in found {
+        let name = match procedure_display_name(&root.join(&rel_yaml)).await {
+            Some(name) => name,
+            // No readable `name:`: the holding directory is what the
+            // author chose, and for the root it is the project itself.
+            None => rel_dir
+                .file_name()
+                .or_else(|| root.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("procedure")
+                .to_string(),
+        };
+        procedures.push(station_protocol::StudioProcedure {
+            path: rel_yaml.to_string_lossy().replace('\\', "/"),
+            dir: rel_dir.to_string_lossy().replace('\\', "/"),
+            name,
+        });
+    }
+    // Root procedure first, then by path. The head is what a session
+    // opens on, and the root's own procedure is what `tofupilot studio
+    // <dir>` used to serve — a subdirectory winning that spot on
+    // alphabetical luck would change the default under existing users.
+    procedures.sort_by(|a, b| (!a.dir.is_empty(), &a.path).cmp(&(!b.dir.is_empty(), &b.path)));
+    procedures
+}
+
+async fn project_info(state: &AppState, root: &Path) -> StudioResponse {
     let name = root
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project")
         .to_string();
-    let procedure_path = crate::commands::run::engine::find_procedure_yaml(root)
-        .and_then(|p| p.strip_prefix(root).ok().map(|r| r.to_path_buf()))
-        .map(|r| r.to_string_lossy().replace('\\', "/"));
+    let procedures = discover_procedures(root).await;
+
+    // Re-anchor the session on what discovery actually found: a
+    // selection whose file disappeared falls back to the first
+    // procedure, and a project with exactly one needs no click to be
+    // workable. Written back so `get_sequence`, `validate` and the run
+    // dispatcher all resolve the same procedure this reply names.
+    let mut guard = state.studio.lock().await;
+    let procedure_path = if let Some(config) = guard.as_mut() {
+        let still_there = config
+            .active_procedure()
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .filter(|active| procedures.iter().any(|p| &p.path == active));
+        match still_there {
+            Some(active) => Some(active),
+            None => {
+                config.forget_active_procedure();
+                match procedures.first() {
+                    Some(first) => {
+                        config.set_active_procedure(PathBuf::from(&first.path));
+                        Some(first.path.clone())
+                    }
+                    None => None,
+                }
+            }
+        }
+    } else {
+        procedures.first().map(|p| p.path.clone())
+    };
+    drop(guard);
+
     StudioResponse::ProjectInfo {
         root: root.to_string_lossy().into_owned(),
         name,
         procedure_path,
+        procedures: Some(procedures),
+    }
+}
+
+/// Select among the discovered procedures. Selection only, mirroring
+/// `open_project`: an unlisted path is refused whether or not it exists,
+/// so the reply cannot be used to probe the disk.
+async fn open_procedure(state: &AppState, root: &Path, path: &str) -> StudioResponse {
+    // A run pinned the procedure it started against — switching under
+    // it would leave the engine and the UI on two different procedures.
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return err(
+            StudioErrorCode::Busy,
+            "a run is in progress; stop it before switching procedure",
+        );
+    }
+
+    let procedures = discover_procedures(root).await;
+    let Some(procedure) = procedures.into_iter().find(|p| p.path == path) else {
+        return err(
+            StudioErrorCode::Forbidden,
+            "not a procedure of this project",
+        );
+    };
+
+    let mut guard = state.studio.lock().await;
+    let Some(config) = guard.as_mut() else {
+        return err(StudioErrorCode::Forbidden, "studio surface is not enabled");
+    };
+    config.set_active_procedure(PathBuf::from(&procedure.path));
+    StudioResponse::ProcedureOpened { procedure }
+}
+
+/// Move `target` to the OS trash, blocking.
+///
+/// On macOS the crate's DEFAULT is `DeleteMethod::Finder`, which drives
+/// osascript to ask the Finder application to do it. That is wrong for a
+/// daemon three ways: it needs Automation permission (the "wants to
+/// control Finder" prompt), it plays the trash sound, and with no
+/// interactive session to answer the prompt it simply hangs — a delete
+/// test sat for over 60 seconds before failing, which is how this was
+/// found. `NsFileManager` calls `trashItemAtURL` directly: no
+/// AppleScript, no permission, no prompt.
+///
+/// Documented cost of that choice: on some systems the Finder's "Put
+/// Back" entry does not appear for items trashed this way (a macOS bug
+/// the crate links). The file IS in the Trash and can be dragged out,
+/// which is the recoverability this op promises.
+fn trash_it(target: &Path) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete(target)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux follows the XDG trash spec and Windows the shell API;
+        // neither needs a method choice.
+        trash::delete(target)
+    }
+}
+
+/// Move a file or directory to the OS trash.
+///
+/// Confinement is the whole risk, so it reuses the same spine as every
+/// other write: `clamp_rel` for the shape of the path, `resolve_existing`
+/// to canonicalize (symlink-escape safe), `check_canonical_policy` on the
+/// resolved target. `require_text` is false — directories have no
+/// extension, and refusing a `.csv` fixture the user wants gone would be
+/// a rule protecting nothing: reading it is what the allow-list guards.
+async fn delete_entry(root: &Path, path: &str) -> StudioResponse {
+    let rel = match clamp_rel(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // Deleting the project root itself is not a file operation: it would
+    // take the session's own confinement anchor with it.
+    if rel.as_os_str().is_empty() {
+        return err(StudioErrorCode::Forbidden, "cannot delete the project root");
+    }
+    if let Err(e) = refuse_final_symlink(root, &rel).await {
+        return e;
+    }
+    let canon = match resolve_existing(root, &rel).await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Err(e) = check_canonical_policy(root, &canon, false) {
+        return e;
+    }
+    // NOT redundant with the check above: a symlink inside the project
+    // pointing at the project is made of Normal components, passes
+    // `clamp_rel`, and canonicalizes to the root itself. Covered by
+    // `delete_refuses_a_symlink_that_resolves_back_to_the_root`.
+    if canon == root {
+        return err(StudioErrorCode::Forbidden, "cannot delete the project root");
+    }
+
+    // Blocking: the trash backends are synchronous (Foundation on macOS,
+    // the XDG spec on Linux, the shell API on Windows), and a directory
+    // can take real time.
+    let target = canon.clone();
+    match tokio::task::spawn_blocking(move || trash_it(&target)).await {
+        Ok(Ok(())) => StudioResponse::Deleted {
+            path: rel.to_string_lossy().replace('\\', "/"),
+        },
+        Ok(Err(e)) => err(
+            StudioErrorCode::Internal,
+            format!("could not move it to the trash: {e}"),
+        ),
+        Err(join_err) => err(
+            StudioErrorCode::Internal,
+            format!("trash task failed: {join_err}"),
+        ),
+    }
+}
+
+/// Recursive copy, blocking, used by `copy_entry`.
+///
+/// Iterative with an explicit stack rather than recursion: a deep tree
+/// would otherwise be bounded by the thread's stack, and a copy is
+/// exactly where someone points at a directory they have never counted.
+///
+/// Skips symlinks and excluded directories. Symlinks because following
+/// one would copy data from outside the project into it; excluded dirs
+/// because they are invisible in the tree, and duplicating a procedure
+/// folder must not duplicate its virtualenv.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to copy a symlink",
+        ));
+    }
+    if meta.is_file() {
+        // create_new, not a bare copy: the clobber guard ran before
+        // this blocking task was scheduled, so an existing `to` here
+        // means a concurrent request won the name in between —
+        // `fs::copy` would silently truncate the winner's file.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        std::fs::copy(from, to)?;
+        return Ok(());
+    }
+
+    let mut pending = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = pending.pop() {
+        std::fs::create_dir(&dst_dir)?;
+        for entry in std::fs::read_dir(&src_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.to_str().map(is_skipped_name).unwrap_or(true) {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            // A symlink reports as a symlink here (the dirent's own
+            // type), so this both skips it and never follows it.
+            if kind.is_dir() {
+                pending.push((entry.path(), dst_dir.join(&name)));
+            } else if kind.is_file() {
+                std::fs::copy(entry.path(), dst_dir.join(&name))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy an entry. Same two-ended confinement as `move_entry`, and the
+/// same refusal to clobber — the only difference is that the source
+/// survives.
+async fn copy_entry(root: &Path, from: &str, to: &str) -> StudioResponse {
+    // `same_file_ok: false` — see resolve_two_ended: a copy onto its
+    // own case-variant would truncate the source before reading it.
+    let TwoEnded {
+        from_rel,
+        to_rel,
+        canon_from,
+        canon_to,
+    } = match resolve_two_ended(root, from, to, "copy", false).await {
+        Ok(ends) => ends,
+        Err(e) => return e,
+    };
+
+    // Same editable-set rule as move_entry, for the same invariant: a
+    // copy landing outside the editable extensions is a row the tree
+    // lists and read_file refuses. Scoped to editable SOURCES — a .png
+    // duplicates freely.
+    match tokio::fs::metadata(&canon_from).await {
+        Ok(m)
+            if m.is_file() && has_text_extension(&canon_from) && !has_text_extension(&canon_to) =>
+        {
+            return err(
+                StudioErrorCode::Invalid,
+                "that extension is not editable in Studio",
+            );
+        }
+        _ => {}
+    }
+
+    let (src, dst) = (canon_from.clone(), canon_to.clone());
+    match tokio::task::spawn_blocking(move || copy_tree(&src, &dst)).await {
+        Ok(Ok(())) => StudioResponse::Copied {
+            from: from_rel.to_string_lossy().replace('\\', "/"),
+            to: to_rel.to_string_lossy().replace('\\', "/"),
+        },
+        Ok(Err(e)) => {
+            // A partial copy is worse than none: the tree would show a
+            // half-populated folder that looks complete. EXCEPT when
+            // the failure is AlreadyExists on the destination itself —
+            // that means a concurrent request claimed the name after
+            // our clobber guard ran and we wrote nothing, so removing
+            // `canon_to` would hard-delete the winner's tree. (Nested
+            // paths can't collide: they live inside the directory this
+            // copy just created.)
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                let _ = tokio::fs::remove_dir_all(&canon_to).await;
+                let _ = tokio::fs::remove_file(&canon_to).await;
+            }
+            err(StudioErrorCode::Internal, format!("cannot copy it: {e}"))
+        }
+        Err(join_err) => err(
+            StudioErrorCode::Internal,
+            format!("copy task failed: {join_err}"),
+        ),
+    }
+}
+
+/// Both canonical ends of a path-to-path op, prologue done.
+struct TwoEnded {
+    from_rel: PathBuf,
+    to_rel: PathBuf,
+    canon_from: PathBuf,
+    canon_to: PathBuf,
+}
+
+/// True when the two paths are the same on-disk file. The case that
+/// needs it: a case-only rename (`Main.py` -> `main.py`) on the
+/// case-insensitive filesystems macOS and Windows default to, where
+/// the destination "exists" because it IS the source.
+#[cfg(unix)]
+fn same_underlying_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+#[cfg(not(unix))]
+fn same_underlying_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    // Windows has no stable inode API on std; a case-only rename there
+    // still reports Conflict. Wrong, but safely wrong — revisit when
+    // `MetadataExt::file_index` stabilizes.
+    false
+}
+
+/// The shared prologue of every path-to-path op (`move_entry`,
+/// `copy_entry`): clamp both ends, refuse a symlink as the source's
+/// final component, resolve and confine both ends, refuse a clobber
+/// and a folder landing inside itself.
+///
+/// BOTH ends need confinement, and for different reasons — the source
+/// must be a real entry inside the root (`resolve_existing`), while the
+/// destination does not exist yet, so it is its PARENT that has to
+/// resolve inside the root (`resolve_for_write`). An existing component
+/// on either side can be a symlink out of the project.
+///
+/// Extracted because the two hand-written copies had already drifted
+/// once: `copy_entry` shipped without the symlink refusal `move_entry`
+/// carried. `verb` only flavours the error strings.
+///
+/// `same_file_ok`: move sets it — a destination that IS the source
+/// (case-only rename on a case-insensitive filesystem) is not a
+/// clobber, and `fs::rename` performs the case change correctly. Copy
+/// must NOT set it: copying a file onto its own case-variant would
+/// truncate the source before reading it.
+async fn resolve_two_ended(
+    root: &Path,
+    from: &str,
+    to: &str,
+    verb: &str,
+    same_file_ok: bool,
+) -> Result<TwoEnded, StudioResponse> {
+    let (from_rel, to_rel) = match (clamp_rel(from), clamp_rel(to)) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return Err(e),
+    };
+    if from_rel == to_rel {
+        return Err(err(
+            StudioErrorCode::Invalid,
+            "source and destination are the same",
+        ));
+    }
+
+    refuse_final_symlink(root, &from_rel).await?;
+    let canon_from = resolve_existing(root, &from_rel).await?;
+    check_canonical_policy(root, &canon_from, false)?;
+    if canon_from == root {
+        return Err(err(
+            StudioErrorCode::Forbidden,
+            format!("cannot {verb} the project root"),
+        ));
+    }
+
+    let canon_to = resolve_for_write(root, &to_rel).await?;
+    check_canonical_policy(root, &canon_to, false)?;
+    // Never clobber: overwriting someone's file is not a rename, and
+    // `fs::rename` would do it silently.
+    if let Ok(to_meta) = tokio::fs::symlink_metadata(&canon_to).await {
+        let case_rename = same_file_ok
+            && matches!(
+                tokio::fs::symlink_metadata(&canon_from).await,
+                Ok(from_meta) if same_underlying_file(&from_meta, &to_meta)
+            )
+            && canon_to.parent() == canon_from.parent();
+        if !case_rename {
+            return Err(err(
+                StudioErrorCode::Conflict,
+                "something with that name already exists",
+            ));
+        }
+        // Case-only rename on a case-insensitive filesystem. Both
+        // canonical paths came back with the ON-DISK case (measured:
+        // realpath("main.py") -> .../Main.py), so renaming to
+        // `canon_to` would be a no-op REPORTED as success — the UI
+        // would re-key its tab while the disk kept the old case. Aim
+        // at the canonical parent + the REQUESTED final component
+        // instead, and skip the containment guard below: with both
+        // canonical paths identical it fires falsely, and the parent's
+        // confinement is already proven.
+        let requested = to_rel
+            .file_name()
+            .expect("clamp_rel refuses an empty final component");
+        let target = canon_from
+            .parent()
+            .expect("the root guard above rules out a parentless source")
+            .join(requested);
+        return Ok(TwoEnded {
+            from_rel,
+            to_rel,
+            canon_from,
+            canon_to: target,
+        });
+    }
+    // A directory landing inside itself would detach (move) or recurse
+    // over (copy) the subtree; the OS refuses it too, but with an
+    // errno the UI cannot explain.
+    if canon_to.starts_with(&canon_from) {
+        return Err(err(
+            StudioErrorCode::Invalid,
+            format!("cannot {verb} a folder inside itself"),
+        ));
+    }
+
+    Ok(TwoEnded {
+        from_rel,
+        to_rel,
+        canon_from,
+        canon_to,
+    })
+}
+
+/// Rename or move: one path-to-path move. Confinement lives in
+/// `resolve_two_ended`.
+async fn move_entry(root: &Path, from: &str, to: &str) -> StudioResponse {
+    let TwoEnded {
+        from_rel,
+        to_rel,
+        canon_from,
+        canon_to,
+    } = match resolve_two_ended(root, from, to, "move", true).await {
+        Ok(ends) => ends,
+        Err(e) => return e,
+    };
+
+    // A rename must not take an EDITABLE file out of Studio's editable
+    // set: the tree would still list the row while read_file refuses
+    // it — Studio producing an entry its own editor cannot open.
+    // Scoped to sources that ARE editable text: resources (.png, .bin —
+    // the set write_resource itself creates), extensionless files
+    // (LICENSE, Makefile) and directories carry no such invariant, and
+    // refusing them made every image and firmware file unrenamable.
+    match tokio::fs::metadata(&canon_from).await {
+        Ok(m)
+            if m.is_file() && has_text_extension(&canon_from) && !has_text_extension(&canon_to) =>
+        {
+            return err(
+                StudioErrorCode::Invalid,
+                "that extension is not editable in Studio",
+            );
+        }
+        _ => {}
+    }
+
+    match tokio::fs::rename(&canon_from, &canon_to).await {
+        Ok(()) => StudioResponse::Moved {
+            from: from_rel.to_string_lossy().replace('\\', "/"),
+            to: to_rel.to_string_lossy().replace('\\', "/"),
+        },
+        Err(e) => err(StudioErrorCode::Internal, format!("cannot move it: {e}")),
     }
 }
 
@@ -633,17 +1629,15 @@ async fn write_file(
         );
     }
     // Auto-create missing parent directories: agent/user writes may
-    // target new subtrees (plugs/multimeter.py). Every component
-    // already passed clamp_rel (Normal-only, no excluded names), so
-    // creation stays under the canonical root, and resolve_for_write
-    // still canonicalize-confines the final parent afterwards.
+    // target new subtrees (plugs/multimeter.py). Confined descent, not
+    // `create_dir_all`: clamp_rel proves the NAME is clean, but an
+    // existing intermediate can be a symlink out of the root, and
+    // create_dir_all would plant the chain on its target before
+    // resolve_for_write below got a chance to refuse the write.
     if let Some(parent_rel) = rel.parent() {
         if !parent_rel.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(root.join(parent_rel)).await {
-                return err(
-                    StudioErrorCode::Internal,
-                    format!("cannot create parent directory: {e}"),
-                );
+            if let Err(e) = mkdir_confined(root, parent_rel, false).await {
+                return e;
             }
         }
     }
@@ -728,17 +1722,24 @@ async fn atomic_write(root: &Path, full: &Path, bytes: &[u8]) -> Result<(), Stud
     Ok(())
 }
 
-async fn create_dir(root: &Path, path: &str) -> StudioResponse {
-    let rel = match clamp_rel(path) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    // Descend one component at a time instead of `create_dir_all`.
-    // Confinement can only be checked on a path that exists, so each
-    // level is created and then re-canonicalized: an intermediate that
-    // already exists may be a symlink out of the root (or into an
-    // excluded dir), and `create_dir_all` would follow it and plant the
-    // new directory there before anything got a chance to object.
+/// Create `rel` and every intermediate under `root`, one component at
+/// a time instead of `create_dir_all`. Confinement can only be checked
+/// on a path that exists, so each level is created and then
+/// re-canonicalized: an intermediate that already exists may be a
+/// symlink out of the root (or into an excluded dir), and
+/// `create_dir_all` would follow it and plant the new directory there
+/// before anything got a chance to object. Shared by `create_dir` and
+/// both write paths — the write paths previously used `create_dir_all`
+/// and failed exactly that invariant.
+///
+/// `expect_fresh_leaf`: `create_dir` sets it — an already-existing
+/// final component is a Conflict there, while the write paths only
+/// need the chain to exist.
+async fn mkdir_confined(
+    root: &Path,
+    rel: &Path,
+    expect_fresh_leaf: bool,
+) -> Result<(), StudioResponse> {
     let mut current = root.to_path_buf();
     let last = rel.components().count();
     for (index, comp) in rel.components().enumerate() {
@@ -747,10 +1748,10 @@ async fn create_dir(root: &Path, path: &str) -> StudioResponse {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
             Err(e) => {
-                return err(
+                return Err(err(
                     StudioErrorCode::Internal,
                     format!("cannot create directory: {e}"),
-                )
+                ))
             }
         };
         if !fresh {
@@ -759,25 +1760,28 @@ async fn create_dir(root: &Path, path: &str) -> StudioResponse {
             // caller's folder is not the one we would be reporting.
             match tokio::fs::metadata(&current).await {
                 Ok(m) if !m.is_dir() => {
-                    return err(StudioErrorCode::Conflict, "a file with that name exists")
+                    return Err(err(
+                        StudioErrorCode::Conflict,
+                        "a file with that name exists",
+                    ))
                 }
-                Ok(_) if index + 1 == last => {
-                    return err(StudioErrorCode::Conflict, "directory already exists")
+                Ok(_) if expect_fresh_leaf && index + 1 == last => {
+                    return Err(err(StudioErrorCode::Conflict, "directory already exists"))
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    return err(
+                    return Err(err(
                         StudioErrorCode::Internal,
                         format!("cannot inspect directory: {e}"),
-                    )
+                    ))
                 }
             }
         }
         let Ok(canon) = tokio::fs::canonicalize(&current).await else {
-            return err(
+            return Err(err(
                 StudioErrorCode::Internal,
                 "created directory vanished before it could be checked",
-            );
+            ));
         };
         if let Err(e) = check_canonical_policy(root, &canon, false) {
             // Only unwind what this request made: an escaping symlink
@@ -785,16 +1789,27 @@ async fn create_dir(root: &Path, path: &str) -> StudioResponse {
             if fresh {
                 let _ = tokio::fs::remove_dir(&current).await;
             }
-            return e;
+            return Err(e);
         }
         current = canon;
+    }
+    Ok(())
+}
+
+async fn create_dir(root: &Path, path: &str) -> StudioResponse {
+    let rel = match clamp_rel(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Err(e) = mkdir_confined(root, &rel, true).await {
+        return e;
     }
     let rel_display = rel.to_string_lossy().replace('\\', "/");
     crate::log::info(&format!("studio: created directory {rel_display}"));
     StudioResponse::DirCreated { path: rel_display }
 }
 
-async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
+async fn validate(config: &StudioConfig, root: &Path, path: Option<&str>) -> StudioResponse {
     let yaml_path = match path {
         Some(p) => {
             let rel = match clamp_rel(p) {
@@ -819,28 +1834,25 @@ async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
             }
             full
         }
-        None => match crate::commands::run::engine::find_procedure_yaml(root) {
-            Some(p) => {
-                // Same canonical policy as the explicit-path arm: a
-                // procedure.yaml that is a symlink out of the root (or
-                // into an excluded dir) must not be loadable implicitly
-                // when it would be refused when addressed by name.
-                let Ok(canon) = tokio::fs::canonicalize(&p).await else {
-                    return err(StudioErrorCode::NotFound, "procedure file not found");
-                };
-                if let Err(e) = check_canonical_policy(root, &canon, true) {
-                    return e;
-                }
-                canon
-            }
-            None => {
-                return err(
-                    StudioErrorCode::NotFound,
-                    "no procedure.yaml found in the studio root",
-                )
-            }
+        // Implicit: the procedure the session is working on. Same
+        // canonical policy as the explicit-path arm — a procedure.yaml
+        // that is a symlink out of the root (or into an excluded dir)
+        // must not be loadable implicitly when it would be refused
+        // when addressed by name (`active_procedure_yaml` checks it).
+        None => match active_procedure_yaml(config, root).await {
+            Ok(p) => p,
+            Err(e) => return e,
         },
     };
+    // Root-relative path of the validated file, so the web UI can open
+    // it from a diagnostic. Every diagnostic this op produces is about
+    // the YAML itself (parse/validation errors, and dangling `python:`
+    // refs are entries OF the yaml) — the referenced .py file does not
+    // exist, so the yaml line is the only place a fix can go.
+    let diag_path = yaml_path
+        .strip_prefix(root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
     // Loader runs on a blocking thread: it does synchronous file IO,
     // and on success every `python:` reference is resolved against the
     // procedure directory. Structural loading alone lets a dangling ref
@@ -860,13 +1872,13 @@ async fn validate(root: &Path, path: Option<&str>) -> StudioResponse {
             .map(|message| StudioDiagnostic {
                 severity: StudioDiagnosticSeverity::Error,
                 message,
-                path: None,
+                path: diag_path.clone(),
             })
             .collect(),
         Ok(Err(message)) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
             message,
-            path: None,
+            path: diag_path,
         }],
         Err(join_err) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
@@ -918,7 +1930,9 @@ async fn validate_content(path: &str, content: String) -> StudioResponse {
         Ok(Err(message)) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
             message,
-            path: None,
+            // The caller named the file it asked about; echo it so the
+            // UI can jump there, same as `validate`.
+            path: Some(rel.to_string_lossy().replace('\\', "/")),
         }],
         Err(join_err) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
@@ -986,15 +2000,12 @@ async fn write_resource(
         );
     }
     // Same parent auto-creation as write_file: resources/ typically
-    // does not exist before the first upload. Every component already
-    // passed clamp_rel, so creation stays under the canonical root.
+    // does not exist before the first upload. Same confined descent —
+    // see write_file for why create_dir_all is not safe here.
     if let Some(parent_rel) = rel.parent() {
         if !parent_rel.as_os_str().is_empty() {
-            if let Err(e) = tokio::fs::create_dir_all(root.join(parent_rel)).await {
-                return err(
-                    StudioErrorCode::Internal,
-                    format!("cannot create parent directory: {e}"),
-                );
+            if let Err(e) = mkdir_confined(root, parent_rel, false).await {
+                return e;
             }
         }
     }
@@ -1073,7 +2084,11 @@ mod tests {
         let dangling = "name: A\nmain:\n  - key: p1\n    name: P1\n    python: phases.main.check\n";
         std::fs::write(root.join("procedure.yaml"), dangling).unwrap();
 
-        let res = validate(&root, None).await;
+        // Upstream wrote this test against the single-root signature;
+        // on this branch validate resolves the implicit procedure
+        // through the granted-roots config.
+        let config = config_with(&[root.to_str().unwrap()]);
+        let res = validate(&config, &root, None).await;
         let StudioResponse::Diagnostics { diagnostics } = res else {
             panic!("expected Diagnostics, got {res:?}");
         };
@@ -1100,7 +2115,7 @@ mod tests {
             dangling.replace("phases.main.check", "phases.main:check"),
         )
         .unwrap();
-        let res = validate(&root, None).await;
+        let res = validate(&config, &root, None).await;
         let StudioResponse::Diagnostics { diagnostics } = res else {
             panic!("expected Diagnostics, got {res:?}");
         };
@@ -1431,5 +2446,573 @@ mod tests {
         };
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["phases", "procedure.yaml"]);
+    }
+
+    /// Build a config without touching the machine's recents file —
+    /// `StudioConfig::new` reads it, and these tests are about the
+    /// selection rule, not about what this machine has opened before.
+    fn config_with(paths: &[&str]) -> StudioConfig {
+        StudioConfig {
+            granted: paths
+                .iter()
+                .map(|p| GrantedRoot::new(PathBuf::from(p)))
+                .collect(),
+            recents_file: PathBuf::from("/dev/null/unused-by-these-tests"),
+            active_procedure: None,
+        }
+    }
+
+    #[test]
+    fn active_is_the_head_of_the_granted_set() {
+        let config = config_with(&["/projects/alpha", "/projects/beta"]);
+        assert_eq!(config.active(), Path::new("/projects/alpha"));
+    }
+
+    #[test]
+    fn activating_a_granted_root_promotes_it() {
+        let mut config = config_with(&["/projects/alpha", "/projects/beta"]);
+        let opened = config.activate(Path::new("/projects/beta")).unwrap();
+
+        assert_eq!(opened.name, "beta");
+        assert_eq!(config.active(), Path::new("/projects/beta"));
+        // Promotion reorders, it never drops the one we came from.
+        let paths: Vec<&Path> = config.granted().iter().map(|g| g.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![Path::new("/projects/beta"), Path::new("/projects/alpha")]
+        );
+    }
+
+    /// The security-relevant case: a path the browser invents must not
+    /// become active, whether or not it exists on disk. This test is
+    /// the guard on `open_project`'s "selects, never grants" contract.
+    #[test]
+    fn activating_an_ungranted_root_is_refused_and_changes_nothing() {
+        let mut config = config_with(&["/projects/alpha"]);
+
+        assert!(config.activate(Path::new("/etc")).is_none());
+        assert!(config
+            .activate(Path::new("/projects/alpha/../beta"))
+            .is_none());
+        assert_eq!(config.active(), Path::new("/projects/alpha"));
+        assert_eq!(config.granted().len(), 1);
+    }
+
+    #[test]
+    fn activating_the_active_root_is_a_no_op() {
+        let mut config = config_with(&["/projects/alpha", "/projects/beta"]);
+        assert!(config.activate(Path::new("/projects/alpha")).is_some());
+        assert_eq!(config.active(), Path::new("/projects/alpha"));
+        assert_eq!(config.granted().len(), 2, "no duplicate on re-activation");
+    }
+
+    /// The monorepo shape this exists for: one procedure per named
+    /// subdirectory, sharing the root's pyproject and having none of
+    /// their own. Anchoring discovery on `pyproject.toml` (what the git
+    /// repo audit does) would find only the root — this asserts the
+    /// canonical-YAML rule instead.
+    #[tokio::test]
+    async fn discovery_finds_procedures_in_named_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::write(root.join("procedure.yaml"), "name: Root suite\n").unwrap();
+        for sub in ["plug-rpc-60s-timeout", "ui-showcase"] {
+            std::fs::create_dir(root.join(sub)).unwrap();
+        }
+        // A `name:` reads as the label; without one the folder does.
+        std::fs::write(
+            root.join("plug-rpc-60s-timeout/procedure.yaml"),
+            "name: Plug RPC timeout\nversion: 1.0.0\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("ui-showcase/procedure.yaml"), "version: 1.0.0\n").unwrap();
+        // Neither a procedure nor a place to descend into.
+        std::fs::create_dir(root.join("phases")).unwrap();
+        std::fs::write(root.join("phases/main.py"), "def main():\n    pass\n").unwrap();
+
+        let found = discover_procedures(root).await;
+        let paths: Vec<&str> = found.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                // Root first: it is the head, and the head is what a
+                // session opens on. A subdirectory must not take that
+                // spot on alphabetical luck.
+                "procedure.yaml",
+                "plug-rpc-60s-timeout/procedure.yaml",
+                "ui-showcase/procedure.yaml",
+            ],
+        );
+        let named: Vec<(&str, &str)> = found
+            .iter()
+            .map(|p| (p.dir.as_str(), p.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("", "Root suite"),
+                ("plug-rpc-60s-timeout", "Plug RPC timeout"),
+                // No readable `name:` -> the folder the author named.
+                ("ui-showcase", "ui-showcase"),
+            ],
+        );
+    }
+
+    /// Discovery runs on whatever folder a human picked in the dialog,
+    /// so the excluded dirs are not cosmetic: a `.venv` full of vendored
+    /// packages (or a `.git`) must never be descended into, and depth is
+    /// bounded so a home directory cannot become a full-disk walk.
+    #[tokio::test]
+    async fn discovery_prunes_excluded_dirs_and_stops_at_the_depth_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for excluded in [".venv", "node_modules", ".git"] {
+            std::fs::create_dir(root.join(excluded)).unwrap();
+            std::fs::write(root.join(excluded).join("procedure.yaml"), "name: Nope\n").unwrap();
+        }
+        // One level past the bound.
+        let deep = root.join("a/b/c/d");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("procedure.yaml"), "name: Too deep\n").unwrap();
+        // At the bound, so it must be found.
+        std::fs::write(root.join("a/b/c/procedure.yaml"), "name: At the bound\n").unwrap();
+
+        let found = discover_procedures(root).await;
+        let paths: Vec<&str> = found.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, vec!["a/b/c/procedure.yaml"]);
+    }
+
+    /// A procedure whose YAML is mid-edit still has to be listed and
+    /// selectable — that is how it gets fixed. The label falls back to
+    /// the folder rather than the whole procedure dropping out.
+    #[tokio::test]
+    async fn a_procedure_with_unparseable_yaml_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("half-written")).unwrap();
+        std::fs::write(
+            root.join("half-written/procedure.yaml"),
+            "name: [this is not: valid yaml\n",
+        )
+        .unwrap();
+
+        let found = discover_procedures(root).await;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "half-written");
+        assert_eq!(found[0].dir, "half-written");
+    }
+
+    /// Switching project drops the procedure selection: the path is
+    /// root-relative, so keeping it would point the session at another
+    /// project's same-named file.
+    #[test]
+    fn switching_project_forgets_the_active_procedure() {
+        let mut config = config_with(&["/projects/alpha", "/projects/beta"]);
+        config.set_active_procedure(PathBuf::from("sub/procedure.yaml"));
+        assert_eq!(
+            config.active_procedure_dir(),
+            Path::new("/projects/alpha/sub")
+        );
+
+        config.activate(Path::new("/projects/beta")).unwrap();
+        assert_eq!(config.active_procedure(), None);
+        // With no selection a run executes the root itself, which is
+        // every single-procedure project.
+        assert_eq!(config.active_procedure_dir(), Path::new("/projects/beta"));
+    }
+
+    /// Delete goes to the trash, so the assertion is that the entry left
+    /// the PROJECT — not that the bytes are gone. Recovering it is the
+    /// Finder's job, and that is the whole point of the choice.
+    #[tokio::test]
+    async fn delete_removes_files_and_whole_directories_from_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("notes.md"), "bye\n").unwrap();
+        std::fs::create_dir(root.join("phases")).unwrap();
+        std::fs::write(root.join("phases/main.py"), "x = 1\n").unwrap();
+
+        assert!(matches!(
+            delete_entry(root, "notes.md").await,
+            StudioResponse::Deleted { .. }
+        ));
+        assert!(!root.join("notes.md").exists());
+
+        // A directory goes with its contents: that is what the gesture
+        // means in every file manager.
+        assert!(matches!(
+            delete_entry(root, "phases").await,
+            StudioResponse::Deleted { .. }
+        ));
+        assert!(!root.join("phases").exists());
+    }
+
+    /// The refusals that matter on a destructive op. The root case is
+    /// the dangerous one: it would take the session's own confinement
+    /// anchor with it.
+    #[tokio::test]
+    async fn delete_refuses_the_root_escapes_and_excluded_entries() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("precious.txt"), "keep\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".venv")).unwrap();
+        std::fs::write(root.join(".venv/pyvenv.cfg"), "\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+
+        for path in [
+            ".",
+            "",
+            "..",
+            "link/precious.txt",
+            ".venv/pyvenv.cfg",
+            "../",
+        ] {
+            let refused = delete_entry(root, path).await;
+            assert!(
+                matches!(refused, StudioResponse::Error { .. }),
+                "deleting {path:?} was not refused: {refused:?}",
+            );
+        }
+        // Nothing outside the project was touched through the symlink,
+        // and the project itself is still there.
+        assert!(outside.path().join("precious.txt").exists());
+        assert!(root.exists());
+        assert!(root.join(".venv/pyvenv.cfg").exists());
+    }
+
+    /// The root guard after canonicalization is not redundant with
+    /// `clamp_rel`: a symlink INSIDE the project pointing at the project
+    /// is made of Normal components and passes every earlier check, then
+    /// resolves to the root itself. Without it, deleting that link would
+    /// trash the whole project.
+    #[tokio::test]
+    async fn delete_refuses_a_symlink_that_resolves_back_to_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("keep.py"), "x = 1\n").unwrap();
+        std::os::unix::fs::symlink(root, root.join("self")).unwrap();
+
+        let refused = delete_entry(root, "self").await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "got {refused:?}"
+        );
+        assert!(root.join("keep.py").exists(), "the project must survive");
+    }
+
+    /// An in-project symlink is refused by delete and move alike: the
+    /// canonical resolution would land the op on the pointee while the
+    /// reply names the link (the `procedure.yaml -> procedures/v2.yaml`
+    /// version-pinning pattern would lose the target).
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn delete_and_move_refuse_an_in_project_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("procedures")).unwrap();
+        std::fs::write(root.join("procedures/v2.yaml"), "name: V2\n").unwrap();
+        std::os::unix::fs::symlink(root.join("procedures/v2.yaml"), root.join("procedure.yaml"))
+            .unwrap();
+
+        let refused = delete_entry(root, "procedure.yaml").await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "delete got {refused:?}"
+        );
+        assert!(
+            root.join("procedures/v2.yaml").exists(),
+            "the pointee must survive"
+        );
+
+        let refused = move_entry(root, "procedure.yaml", "renamed.yaml").await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "move got {refused:?}"
+        );
+        assert!(
+            root.join("procedures/v2.yaml").exists(),
+            "the pointee must survive a refused move"
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("procedure.yaml")).is_ok(),
+            "the link itself must survive too"
+        );
+    }
+
+    /// A case-only rename must reach the disk with the REQUESTED case:
+    /// on a case-insensitive filesystem the destination "exists"
+    /// because it IS the source, and both the clobber guard and the
+    /// containment guard used to fire on it — then a naive fix would
+    /// have renamed to the canonicalized (on-disk-case) path, a no-op
+    /// reported as success. Probes the filesystem and stands down on a
+    /// case-sensitive one, where the plain rename path covers it.
+    #[tokio::test]
+    async fn move_performs_a_case_only_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("Main.py"), "x = 1\n").unwrap();
+        if !root.join("main.py").exists() {
+            // Case-sensitive filesystem: "main.py" is simply a new
+            // name and the regular rename path applies.
+            return;
+        }
+
+        let moved = move_entry(root, "Main.py", "main.py").await;
+        assert!(
+            matches!(moved, StudioResponse::Moved { .. }),
+            "got {moved:?}"
+        );
+        // The case change must be real on disk, not a reported no-op.
+        let on_disk: Vec<String> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            on_disk.contains(&"main.py".to_string()),
+            "disk still shows: {on_disk:?}"
+        );
+    }
+
+    /// The extension rule is scoped to EDITABLE sources: a .py must not
+    /// leave the editable set, while resources and extensionless files
+    /// rename freely (the first version refused those too, making every
+    /// image and firmware file unrenamable).
+    #[tokio::test]
+    async fn move_extension_rule_only_guards_editable_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("logo.png"), [137u8, 80, 78, 71]).unwrap();
+        std::fs::write(root.join("LICENSE"), "MIT\n").unwrap();
+
+        let refused = move_entry(root, "main.py", "main.py.bak").await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "got {refused:?}"
+        );
+        assert!(matches!(
+            move_entry(root, "logo.png", "banner.png").await,
+            StudioResponse::Moved { .. }
+        ));
+        assert!(matches!(
+            move_entry(root, "LICENSE", "LICENSE.orig").await,
+            StudioResponse::Moved { .. }
+        ));
+    }
+
+    /// Rename and move are one op, and this is the shape both take.
+    #[tokio::test]
+    async fn move_renames_within_a_directory_and_across_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("old.py"), "x = 1\n").unwrap();
+        std::fs::create_dir(root.join("phases")).unwrap();
+
+        // Rename: same parent, new name.
+        assert!(matches!(
+            move_entry(root, "old.py", "new.py").await,
+            StudioResponse::Moved { .. }
+        ));
+        assert!(!root.join("old.py").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.py")).unwrap(),
+            "x = 1\n"
+        );
+
+        // Move: new parent, and the content rides along.
+        assert!(matches!(
+            move_entry(root, "new.py", "phases/new.py").await,
+            StudioResponse::Moved { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.join("phases/new.py")).unwrap(),
+            "x = 1\n"
+        );
+    }
+
+    /// A move must never destroy anything: `fs::rename` overwrites the
+    /// destination silently, which would turn a mistyped rename into
+    /// data loss. Verified by mutation — disabling the guard fails this.
+    #[tokio::test]
+    async fn move_refuses_to_clobber_an_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.py"), "keep me\n").unwrap();
+        std::fs::write(root.join("b.py"), "do not lose me\n").unwrap();
+
+        let refused = move_entry(root, "a.py", "b.py").await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Conflict,
+                    ..
+                }
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.py")).unwrap(),
+            "do not lose me\n",
+            "the destination must be untouched",
+        );
+        assert!(root.join("a.py").exists(), "the source must be untouched");
+    }
+
+    /// Confinement on BOTH ends, which is what makes a move riskier than
+    /// a write: a symlinked component can point out of the project on
+    /// the source side or the destination side.
+    #[tokio::test]
+    async fn move_confines_both_ends_and_refuses_a_folder_into_itself() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("theirs.py"), "not ours\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("ours.py"), "ours\n").unwrap();
+        std::fs::create_dir(root.join("group")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+
+        // Destination escapes: the file must not leave the project.
+        let out = move_entry(root, "ours.py", "link/ours.py").await;
+        assert!(matches!(out, StudioResponse::Error { .. }), "got {out:?}");
+        assert!(root.join("ours.py").exists());
+        assert!(!outside.path().join("ours.py").exists());
+
+        // Source escapes: a file outside must not be pulled in.
+        let inward = move_entry(root, "link/theirs.py", "theirs.py").await;
+        assert!(
+            matches!(inward, StudioResponse::Error { .. }),
+            "got {inward:?}"
+        );
+        assert!(outside.path().join("theirs.py").exists());
+
+        // A folder into its own subtree detaches it; refuse in our own
+        // words rather than surfacing an errno.
+        let cycle = move_entry(root, "group", "group/inner").await;
+        assert!(
+            matches!(
+                cycle,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "got {cycle:?}"
+        );
+        assert!(root.join("group").is_dir());
+    }
+
+    /// A copy carries the tree but deliberately not everything on disk:
+    /// symlinks and excluded dirs are skipped, because the tree does not
+    /// show them and duplicating a procedure folder must not duplicate
+    /// its virtualenv.
+    #[tokio::test]
+    async fn copy_duplicates_a_tree_skipping_symlinks_and_excluded_dirs() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("theirs.txt"), "not ours\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("proc/phases")).unwrap();
+        std::fs::write(root.join("proc/procedure.yaml"), "name: P\n").unwrap();
+        std::fs::write(root.join("proc/phases/main.py"), "x = 1\n").unwrap();
+        // Both must stay out of the copy.
+        std::fs::create_dir(root.join("proc/venv")).unwrap();
+        std::fs::write(root.join("proc/venv/big"), "0".repeat(64)).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("theirs.txt"),
+            root.join("proc/link.txt"),
+        )
+        .unwrap();
+
+        let res = copy_entry(root, "proc", "proc-copy").await;
+        assert!(matches!(res, StudioResponse::Copied { .. }), "got {res:?}");
+
+        // The source is untouched — that is the whole difference from move.
+        assert!(root.join("proc/procedure.yaml").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("proc-copy/phases/main.py")).unwrap(),
+            "x = 1\n"
+        );
+        assert!(
+            !root.join("proc-copy/venv").exists(),
+            "venv must not follow"
+        );
+        assert!(
+            !root.join("proc-copy/link.txt").exists(),
+            "a symlink must not be followed into the copy",
+        );
+    }
+
+    /// Same refusals as a move, plus the one specific to copying: a
+    /// folder into its own subtree would recurse forever, since the
+    /// destination keeps reappearing inside the walk.
+    #[tokio::test]
+    async fn copy_refuses_clobber_escapes_and_a_folder_into_itself() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.py"), "mine\n").unwrap();
+        std::fs::write(root.join("b.py"), "do not lose me\n").unwrap();
+        std::fs::create_dir(root.join("group")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).unwrap();
+
+        let clobber = copy_entry(root, "a.py", "b.py").await;
+        assert!(
+            matches!(
+                clobber,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Conflict,
+                    ..
+                }
+            ),
+            "got {clobber:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.py")).unwrap(),
+            "do not lose me\n"
+        );
+
+        // Destination outside the project.
+        let out = copy_entry(root, "a.py", "link/a.py").await;
+        assert!(matches!(out, StudioResponse::Error { .. }), "got {out:?}");
+        assert!(!outside.path().join("a.py").exists());
+
+        let cycle = copy_entry(root, "group", "group/inner").await;
+        assert!(
+            matches!(
+                cycle,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "got {cycle:?}"
+        );
     }
 }

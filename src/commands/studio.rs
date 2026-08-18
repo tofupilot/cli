@@ -25,6 +25,11 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
         }
     };
 
+    // Remember it before anything can fail below: a session that got
+    // as far as resolving a root is a project the operator meant to
+    // open, whether or not the server then starts.
+    crate::commands::studio_recents::record(&root);
+
     let whoami = crate::commands::db::open()
         .ok()
         .and_then(|db| db.get_whoami().ok().flatten());
@@ -72,12 +77,11 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     // Studio run pane's picker has something to run. The id is a
     // fixed local marker: the dispatcher always runs the project
     // root, whatever id the command carries.
+    // Tolerant name-only read, same mechanism Studio discovery uses: a
+    // procedure mid-edit still advertises its name instead of falling
+    // back to the folder because one phase failed to parse.
     let proc_name = crate::commands::run::engine::find_procedure_yaml(&root)
-        .and_then(|p| {
-            execution_engine::procedure::loader::load_procedure_definition(&p)
-                .ok()
-                .map(|def| def.name)
-        })
+        .and_then(|p| execution_engine::procedure::loader::read_procedure_name(&p))
         .unwrap_or_else(|| project_name.clone());
     server
         .set_procedures(vec![crate::local_ws::ProcedureRef {
@@ -153,17 +157,91 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     eprintln!("  Press Ctrl-C to stop.");
     eprintln!();
 
-    // Park until Ctrl-C. The server lives on this task's stack; drop
-    // on return tears down the listener and any kiosk attachments.
-    let exit_code = match tokio::signal::ctrl_c().await {
-        Ok(()) => {
-            eprintln!();
-            crate::log::info("studio session ended");
-            0
-        }
-        Err(e) => {
-            crate::log::error(&format!("signal handler failed: {e}"));
-            1
+    // Folder-dialog host for `pick_project`. This loop is the reason
+    // the dialog works at all: `#[tokio::main]`'s `block_on` polls
+    // run_cmd on the process's MAIN thread, and macOS only lets a
+    // non-windowed process open an AppKit panel there (rfd panics on
+    // any other thread). So the RPC handler — on a tokio worker —
+    // posts a job, and this loop shows the dialog where it is legal.
+    //
+    // `run_cmd` must therefore stay directly awaited from `main`,
+    // never `tokio::spawn`ed — spawning would move this loop to a
+    // worker thread and the first pick would panic the daemon.
+    let (dialog_tx, mut dialog_rx) =
+        tokio::sync::mpsc::channel::<crate::local_ws::StudioDialogJob>(1);
+    server.set_studio_dialog_host(dialog_tx).await;
+
+    // Park until Ctrl-C, serving dialog jobs meanwhile. The server
+    // lives on this task's stack; drop on return tears down the
+    // listener and any kiosk attachments. The ctrl_c future is created
+    // ONCE and pinned: registered before the loop, it keeps its
+    // readiness through a blocking dialog, so a ^C pressed while a
+    // panel is open lands right after the panel closes instead of
+    // being lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    // Once a panel has been shown, this process is a UI app in the
+    // window server's books, and a UI app that stops servicing its
+    // event queue gets the unresponsive treatment: ~5s after the pick,
+    // the cursor beachballs over whatever window residue the panel
+    // teardown left. The post-pick drain below is bounded (~200ms) and
+    // was measured LOSING that race on macOS 26 (2026-08-17): the open
+    // panel lives in a separate XPC service, and its teardown handshake
+    // can outlast the drain. So after the first dialog, keep servicing
+    // AppKit for the life of the daemon — a 200ms tick is far inside
+    // the multi-second unresponsiveness threshold, and each tick
+    // returns immediately when the queue is empty.
+    let mut appkit_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+    appkit_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut appkit_in_use = false;
+    let exit_code = loop {
+        tokio::select! {
+            sig = &mut ctrl_c => {
+                break match sig {
+                    Ok(()) => {
+                        eprintln!();
+                        crate::log::info("studio session ended");
+                        0
+                    }
+                    Err(e) => {
+                        crate::log::error(&format!("signal handler failed: {e}"));
+                        1
+                    }
+                };
+            }
+            Some(reply) = dialog_rx.recv() => {
+                // Say it in the terminal too. The page can only show
+                // "waiting"; this is the one place that can name where
+                // the dialog is, and it is the fallback if the panel
+                // still ends up behind another window.
+                crate::log::info(
+                    "studio: folder dialog open — pick a folder (or cancel) to continue",
+                );
+                bring_dialog_to_front();
+                // Deliberately blocks this (main) thread while the
+                // panel is open: the panel is modal, one at a time by
+                // the gate the job itself carries (released in its
+                // Drop, right after this arm ends), and the server
+                // keeps serving from its worker threads throughout.
+                let picked = rfd::FileDialog::new()
+                    .set_title("Open a project — TofuPilot Studio")
+                    .pick_folder();
+                // The panel is NOT gone when pick_folder returns: its
+                // fade-out needs run-loop turns that never come once we
+                // re-enter select!, leaving an invisible (alpha 0) but
+                // still hit-testable window frozen at the panel's spot.
+                // Measured via CGWindowList on macOS 26, 2026-08-14.
+                // Drain the bulk of it here; the appkit_tick arm below
+                // owns whatever outlasts the drain (see its comment).
+                drain_dialog_teardown();
+                appkit_in_use = true;
+                // Receiver gone = the page dropped the request; the
+                // human's click has nowhere to land, nothing to do.
+                let _ = reply.send(picked);
+            }
+            _ = appkit_tick.tick(), if cfg!(target_os = "macos") && appkit_in_use => {
+                pump_appkit();
+            }
         }
     };
 
@@ -191,6 +269,116 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
 /// project. The dispatcher runs the project root regardless of the id
 /// a Run command carries.
 const STUDIO_PROCEDURE_ID: &str = "studio-local";
+
+/// Put the folder dialog in front of whatever the human is looking at.
+///
+/// rfd raises a `Prohibited` process to `Accessory` and stops there
+/// (its `backend/macos/utils/policy_manager.rs`), and `Accessory` is by
+/// definition a process that does not become the active app — so the
+/// panel can open BEHIND the browser (never observed in practice, but
+/// the policy mechanics allow it), leaving the page to wait on a dialog
+/// nobody can see until its two-minute give-up. Raising the policy
+/// ourselves and activating fixes the cause.
+///
+/// Best effort by contract: AppKit documents that `activate` may not
+/// activate at all. The terminal line above is the backstop.
+#[cfg(target_os = "macos")]
+fn bring_dialog_to_front() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    // The dialog host loop runs on the process main thread (see the
+    // select! in `run_cmd`, and the note there on never spawning it),
+    // which is exactly what this marker asserts. `None` would mean that
+    // invariant broke — do nothing rather than risk an AppKit call off
+    // the main thread.
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    // Accessory, not Regular: enough to show and focus a window,
+    // without putting a Dock icon on a CLI daemon. rfd restores the
+    // policy it found when its own guard drops, so setting it here is
+    // not undone under us — its guard saw this value already.
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.activate();
+    // Do NOT add activateIgnoringOtherApps here: tried 2026-08-14, and
+    // on macOS 26 the double activation left the panel visible but
+    // INERT (keyboard focus stayed with the browser until the operator
+    // clicked around). rfd's own policy dance plus plain activate() is
+    // the least-bad combination we have measured.
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_dialog_to_front() {
+    // Windows shows the common dialog in front already, and on Linux
+    // the xdg-portal backend hands the request to the desktop portal,
+    // which owns placement. Nothing to do.
+}
+
+/// Finish tearing down the closed rfd panel. Order every window of this
+/// process out immediately (skips the fade the run loop would never
+/// finish), then pump the run loop a few turns so the window-server
+/// removal actually commits before the main thread stops serving AppKit.
+#[cfg(target_os = "macos")]
+fn drain_dialog_teardown() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
+
+    // Same invariant as bring_dialog_to_front: this runs on the main
+    // thread or not at all.
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        window.orderOut(None);
+    }
+    let run_loop = NSRunLoop::currentRunLoop();
+    for _ in 0..10 {
+        let limit = NSDate::dateWithTimeIntervalSinceNow(0.02);
+        let _ = unsafe { run_loop.runMode_beforeDate(NSDefaultRunLoopMode, &limit) };
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn drain_dialog_teardown() {
+    // The other platforms' dialogs are torn down by their owners
+    // (common dialog on Windows, the portal on Linux); nothing lingers.
+}
+
+/// Service whatever AppKit has queued, without parking. Called on a
+/// timer from the dialog-host loop once a panel has been shown: the
+/// open-panel XPC service tears itself down asynchronously, and any of
+/// its callbacks that land after `drain_dialog_teardown`'s bounded pump
+/// would otherwise sit unserviced until macOS flags the process
+/// unresponsive (the beachball-over-a-dead-zone the drain alone did not
+/// fully fix — observed again 2026-08-17 with the drain in place).
+/// A zero-deadline turn returns as soon as the queue is empty, so an
+/// idle tick costs essentially nothing.
+#[cfg(target_os = "macos")]
+fn pump_appkit() {
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSRunLoop};
+
+    // Same invariant as the other two AppKit helpers: main thread or
+    // nothing.
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let run_loop = NSRunLoop::currentRunLoop();
+    for _ in 0..4 {
+        let limit = NSDate::dateWithTimeIntervalSinceNow(0.0);
+        let _ = unsafe { run_loop.runMode_beforeDate(NSDefaultRunLoopMode, &limit) };
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pump_appkit() {
+    // Unreachable: the tick arm is gated on target_os = "macos", and
+    // the other platforms have no run loop of ours to service.
+}
 
 /// Receive station-level commands from the loopback WS and run the
 /// project. Mirrors the station daemon's Run handling, reduced to one
@@ -252,6 +440,13 @@ async fn run_dispatcher(
                         .map(|p| format!("phase '{p}' + deps/setup/teardown"))
                         .unwrap_or_else(|| "full procedure".to_string())
                 ));
+                // Pin the project NOW, not at `RunStarted`: venv
+                // bootstrap and the identify prompt run before that
+                // event, and a project switch inside that window used
+                // to be allowed — reloading the page onto project B
+                // while the engine boots project A. The run's terminal
+                // events release the flag as before.
+                server.set_studio_run_active(true);
                 if let Some(mut handle) = active_run.take() {
                     crate::log::info("studio: aborting in-flight run (Run again)");
                     handle.request_cancel();
@@ -270,10 +465,20 @@ async fn run_dispatcher(
                 // processes can briefly drive the same serial/VISA ports.
                 crate::commands::run::teardown::drain_prior_teardowns(&mut teardowns, 5, false)
                     .await;
+                // The procedure the UI is on, not the one this task was
+                // launched with: a multi-procedure project runs the
+                // selected subdirectory. Read now rather than captured,
+                // so a switch between two runs is honored. Falls back
+                // to the launch root if the surface went away.
+                let run_dir = server
+                    .studio_run_dir()
+                    .await
+                    .unwrap_or_else(|| root.clone());
+                crate::log::info(&format!("studio: running {}", run_dir.display()));
                 active_run = Some(
                     crate::commands::run::start(
                         STUDIO_PROCEDURE_ID,
-                        root.clone(),
+                        run_dir,
                         // No upload: studio runs are local iterations.
                         false,
                         false,
@@ -423,11 +628,54 @@ async fn handle_upload_run(
     );
 }
 
+/// Which project a bare `tofupilot studio` opens, in priority order:
+/// an explicit `PATH` always wins, then the current directory when it
+/// looks like a project, then the most recent root that still exists.
+///
+/// The cwd only wins when it *is* a project: running the command from
+/// a home directory used to serve that home directory, which is both
+/// useless and a wide surface. Falling through to the last project is
+/// the VSCode behaviour, and the reason the recents list exists.
 fn resolve_root(path: Option<PathBuf>) -> Result<PathBuf, String> {
-    let candidate = match path {
-        Some(p) => p,
-        None => std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?,
-    };
+    if let Some(explicit) = path {
+        return canonical_dir(explicit);
+    }
+
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot resolve cwd: {e}"))?;
+    resolve_without_path(&cwd, &crate::commands::studio_recents::existing())
+}
+
+/// The fallback decision, with both ambient inputs passed in: the
+/// process cwd cannot be moved from a test without racing every other
+/// test in the binary, and the recents list must not be read from the
+/// developer's own `~/.tofupilot`.
+///
+/// `recents` is expected pre-filtered to roots that still exist
+/// (`studio_recents::existing`) — only the head is considered.
+fn resolve_without_path(cwd: &std::path::Path, recents: &[PathBuf]) -> Result<PathBuf, String> {
+    if crate::commands::run::engine::find_procedure_yaml(cwd).is_some() {
+        return canonical_dir(cwd.to_path_buf());
+    }
+
+    match recents.first() {
+        Some(recent) => {
+            crate::log::info(&format!(
+                "no procedure here; reopening {}",
+                recent.display()
+            ));
+            canonical_dir(recent.clone())
+        }
+        // Serving the cwd anyway would be surprising; naming the two
+        // ways out is more useful than a bare "not found".
+        None => Err(format!(
+            "no procedure.yaml in {} and no previous project to reopen.\n  \
+             Run `tofupilot studio <path>`, or start one from a project directory.",
+            cwd.display()
+        )),
+    }
+}
+
+fn canonical_dir(candidate: PathBuf) -> Result<PathBuf, String> {
     let canon = candidate
         .canonicalize()
         .map_err(|e| format!("project directory {} not found: {e}", candidate.display()))?;
@@ -435,4 +683,84 @@ fn resolve_root(path: Option<PathBuf>) -> Result<PathBuf, String> {
         return Err(format!("{} is not a directory", canon.display()));
     }
     Ok(canon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory holding a procedure, i.e. something `resolve_root`
+    /// is allowed to open.
+    fn project(parent: &std::path::Path, name: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("procedure.yaml"), "name: Demo\nversion: 1.0.0\n").unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// A directory that is not a project — a home directory stands in
+    /// for it.
+    fn plain(parent: &std::path::Path, name: &str) -> PathBuf {
+        let dir = parent.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    /// The explicit argument is answered before either ambient input is
+    /// read, so this one can go through the real entry point.
+    #[test]
+    fn an_explicit_path_is_opened_whatever_it_contains() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Deliberately not a project: `tofupilot studio <path>` has
+        // always served what it was pointed at, and the new fallback
+        // order must not start second-guessing an explicit argument.
+        let target = plain(tmp.path(), "somewhere");
+        assert_eq!(resolve_root(Some(target.clone())).unwrap(), target);
+    }
+
+    #[test]
+    fn an_explicit_path_that_does_not_exist_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-dir");
+        assert!(resolve_root(Some(missing)).is_err());
+    }
+
+    #[test]
+    fn a_project_cwd_wins_over_the_recents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let here = project(tmp.path(), "here");
+        let last = project(tmp.path(), "last");
+        assert_eq!(resolve_without_path(&here, &[last]).unwrap(), here);
+    }
+
+    /// The behaviour change this fallback exists for: launched from a
+    /// directory that is not a project, the session used to serve that
+    /// directory. It now reopens the last project instead.
+    #[test]
+    fn a_non_project_cwd_reopens_the_most_recent_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = plain(tmp.path(), "home");
+        let recent = project(tmp.path(), "recent");
+        let older = project(tmp.path(), "older");
+        assert_eq!(
+            resolve_without_path(&home, &[recent.clone(), older]).unwrap(),
+            recent,
+            "the head of the recents list is the last project opened",
+        );
+    }
+
+    #[test]
+    fn a_non_project_cwd_with_no_history_refuses_instead_of_serving_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = plain(tmp.path(), "home");
+        let err = resolve_without_path(&home, &[]).expect_err("nothing to open");
+        assert!(
+            err.contains(&home.display().to_string()),
+            "the message must name the directory it looked in: {err}",
+        );
+        assert!(
+            err.contains("tofupilot studio <path>"),
+            "and the way out of it: {err}",
+        );
+    }
 }

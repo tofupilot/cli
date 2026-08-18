@@ -913,6 +913,111 @@ pub enum StudioRequest {
     /// engine's real loader. This is the single source the sequence
     /// tree / inspector consume — clients never parse YAML themselves.
     GetSequence {},
+    /// Projects this session may switch between: the roots a human
+    /// granted, past sessions included. Never a filesystem listing —
+    /// the dashboard cannot enumerate the host from here.
+    ListProjects {},
+    /// Make one of the granted roots active. `path` must already be in
+    /// the granted set: this op selects, it never grants. An unknown
+    /// path is `Forbidden`, whether or not it exists on disk, so the
+    /// reply cannot be used to probe the filesystem.
+    OpenProject { path: String },
+    /// Move a file or directory to the OS trash. The FIRST destructive
+    /// op on this surface — everything before it only read or added.
+    ///
+    /// Trash rather than unlink, deliberately: the caller is a human in
+    /// a file tree, and a mis-click on a procedure has to be
+    /// recoverable outside Studio. A directory goes with its contents,
+    /// which is what the trash gesture means everywhere else.
+    ///
+    /// There is no `expected_sha256` equivalent here (a hash cannot
+    /// describe a tree), so the UI owes the user a confirmation naming
+    /// what goes — the daemon cannot make that judgement.
+    DeleteEntry { path: String },
+    /// Copy `from` to `to`, both root-relative. A directory is copied
+    /// with its contents.
+    ///
+    /// A server op rather than read+write from the page, for two
+    /// reasons: `ReadFile` refuses anything outside the text allow-list,
+    /// so a client-side copy could not carry a `.png`, and a directory
+    /// would need one round trip per entry.
+    ///
+    /// Two things are deliberately NOT copied, matching what the tree
+    /// shows rather than what the disk holds: symlinks (following one
+    /// would pull in data from outside the project) and the excluded
+    /// directories (`.git`, `venv`, `node_modules`, …) — duplicating a
+    /// procedure folder should not duplicate its virtualenv.
+    CopyEntry { from: String, to: String },
+    /// Move `from` to `to`, both root-relative. One op covers rename
+    /// (same parent, new name) and move (new parent): they are the same
+    /// filesystem operation, and splitting them would duplicate the
+    /// confinement checks that are the whole risk here.
+    ///
+    /// Refuses when `to` already exists rather than overwriting —
+    /// clobbering someone's file is not a rename.
+    MoveEntry { from: String, to: String },
+    /// Make one of the project's discovered procedures active. `path`
+    /// must be one of the paths `ProjectInfo` listed: like
+    /// `OpenProject`, this selects among what the daemon found, it
+    /// never takes an arbitrary path from the browser. Refused `Busy`
+    /// during a run — the run pinned the procedure it started.
+    OpenProcedure { path: String },
+    /// Ask the daemon to open the OS folder picker on its own host —
+    /// the ONE way a session gains a root it does not already hold.
+    /// The dialog is native and modal: the page can request it but can
+    /// neither drive it nor read anything from it except the final
+    /// choice, so it is the human at the machine who grants. Answers
+    /// `Opened` with the picked project, `PickedEmpty` when the chosen
+    /// folder holds no procedure (nothing is granted yet — see
+    /// `ConfirmPick`), `Error { code: Cancelled }` when the human
+    /// dismissed the dialog, and `Busy` while a run is in flight or
+    /// another picker window is already open.
+    PickProject {},
+    /// Grant the folder the LAST dialog picked, after the daemon
+    /// answered `PickedEmpty`. Carries no path on purpose: the browser
+    /// must never be able to name a root, so this can only confirm the
+    /// choice the human already made in the native dialog — the daemon
+    /// holds it. A folder with no procedure is almost always a
+    /// mis-click, and the grant is permanent full read/write, so it
+    /// takes this second, explicit yes. Answers `Opened`, or
+    /// `Error { code: Invalid }` when no pick is awaiting confirmation.
+    ConfirmPick {},
+    /// The human declined the `PickedEmpty` warning: drop the parked
+    /// path so nothing can confirm it later. A "no" MUST reach the
+    /// daemon — without it the offer stays armed and a later bare
+    /// `ConfirmPick` (a second tab, a replay) would grant a folder no
+    /// human ever said yes to. Always answers `PickDiscarded`;
+    /// discarding when nothing is parked is a no-op, not an error.
+    DiscardPick {},
+}
+
+/// A project root the session can switch to.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioProject {
+    /// Absolute path on the daemon host. Display and identity only —
+    /// file requests stay relative to whichever root is active.
+    pub path: String,
+    /// The directory's own name.
+    pub name: String,
+}
+
+/// A procedure the daemon found inside the active project. One project
+/// can hold several: a repo with one procedure per subdirectory is the
+/// shape the git integration already imports, so the local session has
+/// to describe it too.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioProcedure {
+    /// Root-relative path of the procedure definition, e.g.
+    /// `plug-rpc-60s-timeout/procedure.yaml`. Identity of the
+    /// procedure and what `OpenProcedure` takes.
+    pub path: String,
+    /// Root-relative directory holding it, `""` for the project root.
+    /// This is the directory a run executes.
+    pub dir: String,
+    /// Display name: the definition's own `name:` when it reads, else
+    /// the holding directory's name. Never a file name — the file name
+    /// is canonical, the folder is what the author chose.
+    pub name: String,
 }
 
 /// Reply to a `StudioRequest`. Every request maps to exactly one
@@ -925,10 +1030,21 @@ pub enum StudioResponse {
         /// the dashboard; all request paths stay root-relative.
         root: String,
         name: String,
-        /// Root-relative path of the detected procedure definition
-        /// (e.g. `procedure.yaml`), when one exists.
+        /// Root-relative path of the ACTIVE procedure definition (e.g.
+        /// `procedure.yaml`), when the project holds one. Kept as the
+        /// single active path it always was: older dashboards read only
+        /// this and must keep working.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         procedure_path: Option<String>,
+        /// Every procedure found under the root, the active one
+        /// included, ordered root-first then by path. This daemon
+        /// always sends `Some` (an empty list on a folder holding
+        /// none), but the field is optional on the wire because the
+        /// dashboard also meets OLDER daemons that predate it — the
+        /// web already models that as `?? null`; the type now says so
+        /// instead of contradicting it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        procedures: Option<Vec<StudioProcedure>>,
     },
     Files {
         entries: Vec<StudioFileEntry>,
@@ -946,11 +1062,56 @@ pub enum StudioResponse {
         /// Root-relative path of the directory that now exists.
         path: String,
     },
+    Deleted {
+        /// Root-relative path that is gone from the project.
+        path: String,
+    },
+    Moved {
+        from: String,
+        to: String,
+    },
+    Copied {
+        from: String,
+        to: String,
+    },
     Diagnostics {
         diagnostics: Vec<StudioDiagnostic>,
     },
     Sequence {
         sequence: StudioSequence,
+    },
+    Projects {
+        /// Granted roots, most recently opened first. Roots whose
+        /// directory has disappeared are omitted: offering to reopen a
+        /// path that is gone is worse than not offering it.
+        projects: Vec<StudioProject>,
+        /// Absolute path of the active root. Usually one of
+        /// `projects`, but NOT guaranteed: the vanished-directory
+        /// filter above also applies to the active root (a disconnected
+        /// share), so consumers must key on the path, not on finding it
+        /// in the list.
+        active: String,
+    },
+    Opened {
+        project: StudioProject,
+    },
+    /// The dialog's choice holds no procedure, so nothing was granted:
+    /// the daemon parked the path and waits for `ConfirmPick`. The park
+    /// is invalidated by `DiscardPick` (the human said no), by any new
+    /// `PickProject` (opening a fresh dialog always clears the stale
+    /// offer first), and by daemon restart. `path`/`name` are
+    /// display-only — the page shows the human what they are about to
+    /// open.
+    PickedEmpty {
+        path: String,
+        name: String,
+    },
+    /// The parked pick was dropped (`DiscardPick`'s acknowledgement).
+    /// Past-participle like its siblings — and never `Ok`, which reads
+    /// as `Result::Ok` at every match site.
+    PickDiscarded {},
+    ProcedureOpened {
+        procedure: StudioProcedure,
     },
     Error {
         code: StudioErrorCode,
@@ -1190,6 +1351,17 @@ pub enum StudioErrorCode {
     Invalid,
     Unsupported,
     Internal,
+    /// The session is doing something that the request would corrupt.
+    /// Today: switching project while a run is in flight — the run
+    /// captured its root at start, so moving the active project under
+    /// it would have the UI and the engine describing two projects.
+    /// Also a second `PickProject` while a picker window is open:
+    /// dialogs must not stack (reentrance, not security).
+    Busy,
+    /// The human at the daemon's machine dismissed the dialog the
+    /// request opened, choosing nothing. Not a failure — the UI should
+    /// return to its previous state without comment.
+    Cancelled,
 }
 
 // ---------------------------------------------------------------------------

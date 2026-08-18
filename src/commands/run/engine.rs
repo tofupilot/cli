@@ -1804,8 +1804,10 @@ pub async fn run_yaml_procedure(
         return (1, None);
     }
 
-    // Identify-unit step: canonical framework entry point. Procedures
-    // without a `unit:` block skip identify entirely.
+    // Identify-unit step: canonical framework entry point. It always
+    // runs: `unit_cfg` above defaults the block when the YAML omits it,
+    // so the `(None, _)` arms below are unreachable in practice and
+    // only satisfy the match on the `Option`.
     // `auto_identify: true` resolves from `default_value`s without an
     // operator prompt; otherwise the host emits a `UiRequest` and
     // awaits the response. Resolved info is written directly into
@@ -1865,10 +1867,10 @@ pub async fn run_yaml_procedure(
                 infos
             }
             (None, Some(_)) => {
-                // Procedure declared no `unit:` block; reuse_unit has
-                // nowhere to land. Silently drop and run with empty
-                // unit info — same as a normal first run on this
-                // procedure.
+                // Unreachable in practice — `unit_cfg` above is always
+                // Some thanks to the default-block fallback. Kept only
+                // to satisfy the match on the Option; empty unit info
+                // is the least-wrong answer if it ever fires.
                 std::collections::HashMap::new()
             }
             (Some(cfg), None) => {
@@ -1941,8 +1943,7 @@ pub async fn run_yaml_procedure(
                 }
                 infos
             }
-            // Procedure has no `unit:` block: nothing to identify,
-            // run starts with empty unit info regardless of reuse.
+            // Unreachable in practice, like `(None, Some(_))` above.
             (None, None) => std::collections::HashMap::new(),
         };
 

@@ -124,6 +124,26 @@ tower-http = { version = "0.6", features = ["cors"] }
 include_dir = "0.7"
 mime_guess = "2"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+# Native folder picker for `pick_project` (local_ws/studio.rs) — the one
+# studio op that can grant a NEW root, via a window the web page cannot
+# drive. macOS/Windows backends are unconditional; on Linux only
+# `xdg-portal` (pure Rust — rfd 0.17 drives the portal itself over
+# `pollster`; no ashpd, no zbus in the lockfile) is enabled: the default `wayland`
+# feature links the system libwayland C library and would break the
+# static musl release targets. It is only for parenting the dialog to a
+# Wayland window, and a daemon has no window.
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+# Delete in the Code sidebar goes to the OS trash, not `unlink`: a
+# mis-click on someone's procedure has to be recoverable from the
+# Finder. Dependency tree verified against the musl target — chrono,
+# libc, urlencoding, percent-encoding, all pure Rust, no dbus/zbus and
+# nothing linking C, so the static Linux release builds are unaffected
+# (macOS goes through objc2/Foundation, already in the tree via rfd).
+# NOT verified: the Windows path, which pulls windows 0.56 — a fourth
+# major of that family into this lockfile (0.56/0.57/0.58/0.61). Cost
+# is compile time on the Windows release job, not runtime; consolidate
+# when the ecosystem converges rather than pinning against it here.
+trash = "5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -145,6 +165,18 @@ reqwest = { version = "0.13", default-features = false, features = ["hickory-dns
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_System_Threading", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Brings the folder dialog to the front (see `bring_dialog_to_front` in
+# commands/studio.rs). rfd raises a Prohibited process only as far as
+# Accessory and never activates it — verified in its own
+# backend/macos/utils/policy_manager.rs — so on a CLI daemon the panel
+# can open BEHIND the browser, leaving the page waiting on a dialog
+# nobody can see. Both crates are already in the tree via rfd, so this
+# adds no compilation units, only a direct path to NSApplication.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSResponder", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSRunLoop", "NSDate", "NSString", "NSArray"] }
 
 [dev-dependencies]
 tempfile = "3"

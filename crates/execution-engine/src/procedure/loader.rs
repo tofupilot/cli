@@ -38,6 +38,30 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
     load_procedure_definition_from_str(&content)
 }
 
+/// The definition's own `name:`, read tolerantly: a partial parse that
+/// only needs the `name` key, NOT the whole definition to be valid. A
+/// procedure mid-edit (broken phases, bad refs) still needs a display
+/// label so it can be listed, selected and fixed. `None` when the text
+/// is unparsable or the name is empty. The one name-reading mechanism
+/// for every consumer — Studio discovery and the hello frame both call
+/// it, so "the procedure's display name" cannot drift between them.
+pub fn procedure_name_from_str(content: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct JustTheName {
+        name: String,
+    }
+    let parsed: JustTheName = serde_yaml::from_str(content).ok()?;
+    let trimmed = parsed.name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `procedure_name_from_str` over a file. Sync (small files, called
+/// from startup paths); async callers read the file themselves and use
+/// the `_from_str` form.
+pub fn read_procedure_name(file_path: &Path) -> Option<String> {
+    procedure_name_from_str(&std::fs::read_to_string(file_path).ok()?)
+}
+
 /// Same parse + validation chain as `load_procedure_definition`, on
 /// content that is not (or not yet) on disk. Validation is purely
 /// structural — nothing after the file read touches the filesystem —
@@ -341,6 +365,57 @@ main:
         .unwrap();
         let def = load_procedure_definition(&path).expect("valid procedure");
         assert!(def.resolve_python_refs(&dir, None).is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_python_refs_suggests_the_colon_spelling() {
+        let dir = std::env::temp_dir().join(format!("tp-loader-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("phases")).unwrap();
+        std::fs::create_dir_all(dir.join("plugs")).unwrap();
+        std::fs::write(dir.join("phases/main.py"), "def check():\n    pass\n").unwrap();
+        std::fs::write(dir.join("plugs/psu.py"), "class PSU:\n    pass\n").unwrap();
+        let path = dir.join("procedure.yaml");
+        std::fs::write(
+            &path,
+            r#"
+name: Hinted Refs
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu.PSU
+  - name: Ghost
+    key: ghost
+    python: plugs.nowhere.Thing
+main:
+  - key: p1
+    name: P1
+    python: phases.main.check
+"#,
+        )
+        .unwrap();
+
+        let def = load_procedure_definition(&path).expect("valid structure");
+        let problems = def.resolve_python_refs(&dir, None);
+        assert_eq!(problems.len(), 3, "unexpected: {problems:?}");
+        // The dotted-class spelling whose ':' variant resolves gets the
+        // did-you-mean; a spec that is broken either way does not.
+        assert!(
+            problems[0].contains("did you mean `plugs.psu:PSU`"),
+            "got: {}",
+            problems[0]
+        );
+        assert!(
+            !problems[1].contains("did you mean"),
+            "got: {}",
+            problems[1]
+        );
+        assert!(
+            problems[2].contains("did you mean `phases.main:check`"),
+            "got: {}",
+            problems[2]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

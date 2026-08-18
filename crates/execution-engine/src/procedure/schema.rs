@@ -1443,11 +1443,37 @@ impl ProcedureDefinition {
         procedure_dir: &Path,
         main_filter: Option<&HashSet<String>>,
     ) -> Vec<String> {
+        // The dotted-class spelling (`plugs.psu.PowerSupply` for class
+        // PowerSupply in plugs/psu.py) is the most common way to land
+        // here: every dot is a directory, the class needs a ':'. When
+        // swapping the last '.' for ':' makes the spec parse, say so —
+        // "file not found: .../PowerSupply.py" alone reads as a broken
+        // validator to whoever meant the class.
+        let colon_hint = |spec: &PythonSpec| -> String {
+            let raw = spec.as_str().trim();
+            if raw.contains(':') || raw.contains('/') || raw.contains('\\') {
+                return String::new();
+            }
+            let Some((head, tail)) = raw.rsplit_once('.') else {
+                return String::new();
+            };
+            let alt = format!("{head}:{tail}");
+            if PythonSpec(alt.clone()).parse(procedure_dir).is_ok() {
+                format!(" — did you mean `{alt}`? (':' separates the callable or class from the module)")
+            } else {
+                String::new()
+            }
+        };
         let mut problems = Vec::new();
         if main_filter.is_none() {
             for plug in &self.plugs {
                 if let Err(e) = plug.python.parse(procedure_dir) {
-                    problems.push(format!("Plug `{}`: {}", plug.key, e));
+                    problems.push(format!(
+                        "Plug `{}`: {}{}",
+                        plug.key,
+                        e,
+                        colon_hint(&plug.python)
+                    ));
                 }
             }
         }
@@ -1471,9 +1497,10 @@ impl ProcedureDefinition {
                         ));
                     } else if !file.exists() && spec.is_tree_bound(procedure_dir) {
                         problems.push(format!(
-                            "Phase `{}`: Python file not found: {}",
+                            "Phase `{}`: Python file not found: {}{}",
                             phase.key,
-                            file.display()
+                            file.display(),
+                            colon_hint(spec)
                         ));
                     }
                 }

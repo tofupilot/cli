@@ -12,6 +12,7 @@ pub mod run;
 pub mod service;
 pub mod station;
 pub mod studio;
+pub mod studio_recents;
 pub mod uninstall;
 pub mod update;
 pub mod uv_bootstrap;
