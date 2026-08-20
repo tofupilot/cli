@@ -20,6 +20,14 @@
 //! edit changes the fingerprint, which respawns that plug only. Reuse
 //! additionally requires a live `GetStatus` probe.
 //!
+//! A plug that stops being declared — renamed key, deleted entry — is
+//! addressed by [`StationPlugHost::release_absent`], which every run
+//! calls at initialization. Without it nothing would ever reach that
+//! instance again: the fingerprint check is per-key, so the old key
+//! simply stops being asked for and its interpreter keeps the
+//! instrument open for the station's lifetime — while the new key
+//! spawns a second instance onto a device the first still holds.
+//!
 //! Deployment updates are INVISIBLE to those checks: the bundle is
 //! swapped in place (same directory, new contents — see the CLI's
 //! `pull::sync`), and the fingerprint does not hash the plug's Python
@@ -28,7 +36,7 @@
 //! plug from the new bundle instead of reusing instances built from
 //! code that no longer exists on disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -248,6 +256,88 @@ impl StationPlugHost {
         );
 
         Ok(port)
+    }
+
+    /// Release every held plug the current procedure no longer declares.
+    ///
+    /// Called once per run at initialization, with the keys of every
+    /// `scope: station` plug in the procedure about to execute. A key
+    /// absent from that set can never be acquired again, so holding its
+    /// instrument is pure loss — and actively harmful when the plug was
+    /// renamed, because the new key needs the device the old instance
+    /// still has open.
+    ///
+    /// A context mismatch is a no-op on purpose: the next `acquire`
+    /// releases every held plug when it swaps the context, and pruning
+    /// against another procedure's plug list here would tear down
+    /// instances that procedure is still using.
+    pub async fn release_absent(
+        &self,
+        procedure_dir: &PathBuf,
+        python_path: &Option<PathBuf>,
+        declared: &HashSet<String>,
+        event_sink: &Arc<dyn EventSink>,
+    ) {
+        let mut inner = self.inner.lock().await;
+
+        let context = HostContext {
+            procedure_dir: procedure_dir.clone(),
+            python_path: python_path.clone(),
+        };
+        if inner.context.as_ref() != Some(&context) {
+            return;
+        }
+
+        let absent: Vec<String> = inner
+            .live
+            .keys()
+            .filter(|key| !declared.contains(*key))
+            .cloned()
+            .collect();
+        if absent.is_empty() {
+            return;
+        }
+
+        let manager = Arc::clone(
+            inner
+                .manager
+                .as_ref()
+                .expect("manager is set whenever a context is"),
+        );
+
+        for key in absent {
+            let Some(entry) = inner.live.remove(&key) else {
+                continue;
+            };
+            log::info!(
+                "Station plug '{}' is no longer declared; releasing it",
+                key
+            );
+            crate::plugs::manager::emit_plug_status(
+                event_sink,
+                key.clone(),
+                entry.display_name.clone(),
+                PlugScope::Station,
+                None,
+                PlugStage::Teardown,
+                PlugStatusValue::Destructing,
+            );
+            // Same fallback as a stale respawn: a wedged process makes
+            // the graceful path fail, and the kill is what guarantees
+            // the device is actually free for the run that follows.
+            if manager.stop_plug_service(&key).await.is_err() {
+                manager.force_kill_plug_service(&key).await.ok();
+            }
+            crate::plugs::manager::emit_plug_status(
+                event_sink,
+                key.clone(),
+                entry.display_name,
+                PlugScope::Station,
+                None,
+                PlugStage::Teardown,
+                PlugStatusValue::Idle,
+            );
+        }
     }
 
     /// Gracefully release every held plug. Call at station shutdown; the

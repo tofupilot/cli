@@ -82,7 +82,13 @@ impl Orchestrator {
                                 )
                                 .await
                             {
-                                Ok(port) => acquired_ports.push((plug.key.clone(), port)),
+                                Ok(port) => {
+                                    acquired_ports.push((
+                                        plug.key.clone(),
+                                        plug.name.clone(),
+                                        port,
+                                    ))
+                                }
                                 Err(e) => {
                                     self.emit_plug_scope_event("error").await;
                                     return Err(format!(
@@ -95,8 +101,10 @@ impl Orchestrator {
 
                         {
                             let resource_manager = self.resource_manager.write().await;
-                            for (key, port) in acquired_ports {
-                                resource_manager.register_station_plug(key, port).await;
+                            for (key, name, port) in acquired_ports {
+                                resource_manager
+                                    .register_station_plug(key, name, port)
+                                    .await;
                             }
                         }
 

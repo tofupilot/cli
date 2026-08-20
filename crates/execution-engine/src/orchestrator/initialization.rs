@@ -125,6 +125,28 @@ impl Orchestrator {
             // NOTE: All-scope plugs will be created before first SetupAll phase runs
         }
 
+        // Hand back station plugs this procedure no longer declares before
+        // the run asks for the ones it does. A key that was renamed or
+        // deleted is never acquired again, so nothing else would ever
+        // reach that instance — and its interpreter is still holding the
+        // instrument the new key is about to open.
+        if let Some(host) = &self.station_plug_host {
+            let declared: std::collections::HashSet<String> = self
+                .procedure_definition
+                .plugs
+                .iter()
+                .filter(|p| p.scope_is_station())
+                .map(|p| p.key.clone())
+                .collect();
+            host.release_absent(
+                &self.procedure_dir,
+                &self.python_path,
+                &declared,
+                &self.event_sink,
+            )
+            .await;
+        }
+
         let mut state = self.state.write().await;
 
         // Set should_stop_on_first_failure flag from procedure configuration

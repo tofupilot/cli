@@ -1145,6 +1145,61 @@ pub struct StudioSequencePlug {
     pub key: String,
     pub name: String,
     pub python: String,
+    /// `"slot"` | `"execution"` | `"station"` when the file states a
+    /// `scope:` line, `None` when it does not and the engine's `slot`
+    /// default applies. A String, not an enum, because this crate has
+    /// no dependency on the engine's schema and the Builder only needs
+    /// the canonical spelling to render a picker.
+    ///
+    /// The Option is the whole point: the runtime `PlugDefinition` has
+    /// the default already applied, so it cannot say whether anyone
+    /// chose it, and the Builder must not draw an inherited scope as a
+    /// choice. Presence comes from `plugs_with_explicit_scope`, the
+    /// spelling from the parsed definition — so a legacy `all` reports
+    /// as stated, and reports as `"execution"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Option, not a skip-when-empty String: the generated TS would
+    /// declare a required field the wire omits, and the page reads it
+    /// as `?? ''`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `config:` keys in file order.
+    ///
+    /// Never `skip_serializing_if`: the wire always carries the list,
+    /// empty included, which is the rule `StudioSequence.plugs` states —
+    /// a list the wire omits generates a non-optional TS field and
+    /// crashes the page on `undefined.map`.
+    ///
+    /// `serde(default)` is for the other direction, and it is why the
+    /// generated TS declares this one optional: a Studio daemon older
+    /// than the web app it is paired with sends a plug with no `config`
+    /// at all, and the Builder has to read that as "no keys" rather
+    /// than fail to parse the whole sequence.
+    #[serde(default)]
+    pub config: Vec<StudioSequencePlugConfigEntry>,
+}
+
+/// One `config:` key of a plug — a keyword argument the engine passes to
+/// the plug class `__init__`.
+///
+/// A projection, not a round-trip: `value` is the scalar already
+/// rendered for display, so the Builder never re-serializes YAML. `kind`
+/// exists because the line editor can only rewrite a scalar in place; a
+/// list or mapping value has to be sent to Code mode, and the page needs
+/// to know that before it renders the row rather than after the write
+/// fails.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequencePlugConfigEntry {
+    pub key: String,
+    /// The value as displayed: a string unquoted, a number or bool in
+    /// its YAML spelling, and for `complex` a short rendering of the
+    /// structure (`[3 items]`, `{2 keys}`) rather than the whole tree.
+    pub value: String,
+    /// `"string"` | `"number"` | `"bool"` | `"null"` | `"complex"`.
+    /// A String rather than an enum, matching `scope` on the parent: the
+    /// Builder only needs the canonical spelling to pick a write mode.
+    pub kind: String,
 }
 
 /// Unit identification projection (`unit:` at the procedure root):

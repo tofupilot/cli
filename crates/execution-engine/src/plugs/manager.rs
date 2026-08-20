@@ -36,14 +36,30 @@ pub(crate) fn emit_plug_status(
 pub struct ResourceAllocation {
     pub job_id: Uuid,
     pub allocated_resources: HashMap<String, String>, // resource_type -> specific_instance
-    pub plug_ports: HashMap<String, u16>,             // plug_key -> port
 }
 
+/// A live plug service, as addressed by the instance map. Its map key is
+/// `plug_key` for a shared instance (execution, station, manual) and
+/// `plug_key_<slot>` for a per-slot one — which is why identity is
+/// carried in the struct rather than recovered from that key: stripping
+/// a `_<slot>` suffix off a string is guesswork, and it put the INSTANCE
+/// key on the wire as `plug_key` on the force-destroy path (a slot
+/// plug's teardown event then named a plug no consumer had heard of).
+///
+/// `display_name` is here for the same reason: the teardown paths had no
+/// access to the procedure's names and emitted the key as the name, so a
+/// plug renamed itself from "Power Supply" to "power_supply" halfway
+/// through a run.
 #[derive(Debug, Clone)]
 pub struct PlugInstance {
     pub port: u16,
-    pub slot_id: Option<String>, // None for all-slots plugs
-    pub ref_count: usize,        // Number of jobs using this instance
+    /// The plug's own key — never the instance key.
+    pub plug_key: String,
+    /// The `name:` from the procedure. Falls back to the key for a
+    /// manual plug, which has no procedure entry.
+    pub display_name: String,
+    /// The slot this instance belongs to; `None` for shared instances.
+    pub slot_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -145,7 +161,6 @@ impl ResourceManager {
         let allocation = ResourceAllocation {
             job_id,
             allocated_resources: allocated,
-            plug_ports: HashMap::new(), // Will be populated when plugs are started
         };
 
         self.allocations.write().await.push(allocation.clone());
@@ -185,26 +200,25 @@ impl ResourceManager {
         stats
     }
 
-    /// Start plug services for a job with scope awareness
-    pub async fn start_plug_services(
-        &self,
-        job_id: Uuid,
-        plug_configs: &HashMap<String, serde_json::Value>,
-    ) -> Result<HashMap<String, u16>, String> {
-        self.start_plug_services_for_slot(job_id, plug_configs, None)
-            .await
-    }
-
-    /// Start plug services for a job, optionally in a specific slot
+    /// Resolve the port of every plug a job needs, in a specific slot.
+    ///
+    /// Named "start" for history: the plugs are already running (a scope
+    /// boundary created them), so this only addresses them. The returned
+    /// map is what the caller hands the worker — it used to be copied
+    /// into the job's `ResourceAllocation` as well, for a reader that no
+    /// longer exists, which is why neither the copy nor the job id is
+    /// here any more.
     pub async fn start_plug_services_for_slot(
         &self,
-        job_id: Uuid,
         plug_configs: &HashMap<String, serde_json::Value>,
         slot_id: Option<String>,
     ) -> Result<HashMap<String, u16>, String> {
         let mut plug_ports = HashMap::new();
         let scopes = self.plug_scopes.read().await;
-        let mut instances = self.plug_instances.write().await;
+        // Read, not write: resolving a port mutates nothing now that the
+        // reference count is gone, so concurrent jobs no longer serialize
+        // on this lock to look up a number.
+        let instances = self.plug_instances.read().await;
 
         // Start or reuse plug services based on scope
         for plug_name in plug_configs.keys() {
@@ -214,26 +228,34 @@ impl ResourceManager {
             // scopes share one instance across slots, so the bare plug
             // key addresses it.
             let instance_key = match scope {
-                PlugScope::Slot => {
-                    // For slot-level plugs, include slot ID in the key
-                    if let Some(ref slot) = slot_id {
-                        format!("{}_{}", plug_name, slot)
-                    } else {
-                        // If no slot specified, treat as job-level (backward compat)
-                        format!("{}_{}", plug_name, job_id)
+                PlugScope::Slot => match &slot_id {
+                    Some(slot) => format!("{}_{}", plug_name, slot),
+                    // A slot plug's instance is keyed by its slot, so
+                    // there is nothing to address for a job that has no
+                    // slot (an execution-wide setup/teardown phase whose
+                    // Python names a slot-scope plug). This errored before
+                    // too — the key was built from the job id, which no
+                    // create path ever writes — but said the plug was
+                    // missing rather than that it cannot be reached from
+                    // here. Falling back to the bare key would be worse
+                    // than either: that addresses a SHARED instance.
+                    None => {
+                        return Err(format!(
+                            "Plug '{}' is slot-scoped and cannot be used by a phase that \
+                             runs once for all slots — give the plug `scope: execution` or \
+                             the phase `scope: slot`",
+                            plug_name
+                        ))
                     }
-                }
+                },
                 PlugScope::Execution | PlugScope::Station => plug_name.clone(),
             };
 
-            // Plug should already exist - just increment reference count
-            if let Some(instance) = instances.get_mut(&instance_key) {
-                instance.ref_count += 1;
+            // Plug should already exist at this point — a scope boundary
+            // created it. Resolving its port is all a phase needs.
+            if let Some(instance) = instances.get(&instance_key) {
                 plug_ports.insert(plug_name.clone(), instance.port);
-                log::debug!(
-                    "Phase using plug {} (ref_count: {})",
-                    instance_key, instance.ref_count
-                );
+                log::debug!("Phase using plug {}", instance_key);
                 // No event needed - plug is already ready
             } else {
                 return Err(format!(
@@ -249,60 +271,18 @@ impl ResourceManager {
             }
         }
 
-        // Update the allocation with plug ports
-        let mut allocations = self.allocations.write().await;
-        if let Some(allocation) = allocations.iter_mut().find(|a| a.job_id == job_id) {
-            allocation.plug_ports = plug_ports.clone();
-        }
-
         Ok(plug_ports)
     }
 
-    /// Stop plug services for a job with scope awareness
-    pub async fn stop_plug_services(&self, job_id: Uuid) -> Result<(), String> {
-        self.stop_plug_services_for_slot(job_id, None).await
-    }
-
-    /// Stop plug services for a job, handling scope properly
-    pub async fn stop_plug_services_for_slot(
-        &self,
-        job_id: Uuid,
-        slot_id: Option<String>,
-    ) -> Result<(), String> {
-        let allocations = self.allocations.read().await;
-        let scopes = self.plug_scopes.read().await;
-
-        if let Some(allocation) = allocations.iter().find(|a| a.job_id == job_id) {
-            let mut instances = self.plug_instances.write().await;
-
-            for plug_name in allocation.plug_ports.keys() {
-                let scope = scopes.get(plug_name).cloned().unwrap_or(PlugScope::Slot);
-
-                // Determine the instance key
-                let instance_key = match scope {
-                    PlugScope::Slot => {
-                        if let Some(ref slot) = slot_id {
-                            format!("{}_{}", plug_name, slot)
-                        } else {
-                            format!("{}_{}", plug_name, job_id)
-                        }
-                    }
-                    PlugScope::Execution | PlugScope::Station => plug_name.clone(),
-                };
-
-                // Just decrement ref count - don't destroy plugs here
-                if let Some(instance) = instances.get_mut(&instance_key) {
-                    instance.ref_count -= 1;
-                    log::debug!(
-                        "Phase done using plug {} (ref_count: {})",
-                        instance_key, instance.ref_count
-                    );
-                    // Plug stays ready - will be destroyed at scope boundary
-                }
-            }
-        }
-        Ok(())
-    }
+    // A job finishing needs no counterpart to `start_plug_services_*`: a
+    // plug outlives every phase that uses it and is destroyed at its
+    // scope boundary. The `stop_plug_services*` pair that used to sit
+    // here only moved `PlugInstance::ref_count`, which nothing ever
+    // read — so per job it took two locks, walked the allocation and
+    // rebuilt every instance key to reach a counter that decided
+    // nothing. It also underflowed on the partial-start path (an early
+    // `Err` leaves increments behind and never records the ports the
+    // decrement walks). Destruction lives in `destroy_*_scope_plugs`.
 
     /// Create all-slots plugs at procedure start
     pub async fn create_procedure_plugs(
@@ -368,8 +348,9 @@ impl ResourceManager {
                         instance_key.clone(),
                         PlugInstance {
                             port,
+                            plug_key: plug_name.clone(),
+                            display_name: display_name.clone(),
                             slot_id: None, // All-slots
-                            ref_count: 0,  // Will be incremented when slots use it
                         },
                     );
 
@@ -397,14 +378,15 @@ impl ResourceManager {
     /// `StationPlugHost` — it is deliberately NOT in this manager's
     /// `PlugServiceManager`, so no run-owned teardown path (auto-
     /// teardown, shutdown sweep, `Drop`) can reach it.
-    pub async fn register_station_plug(&self, plug_key: String, port: u16) {
+    pub async fn register_station_plug(&self, plug_key: String, display_name: String, port: u16) {
         let mut instances = self.plug_instances.write().await;
         instances.insert(
-            plug_key,
+            plug_key.clone(),
             PlugInstance {
                 port,
+                plug_key,
+                display_name,
                 slot_id: None, // shared across slots, like execution scope
-                ref_count: 0,
             },
         );
     }
@@ -474,8 +456,9 @@ impl ResourceManager {
                         instance_key.clone(),
                         PlugInstance {
                             port,
+                            plug_key: plug_name.clone(),
+                            display_name: display_name.clone(),
                             slot_id: Some(slot_id.clone()),
-                            ref_count: 0, // Will be incremented when phases use it
                         },
                     );
 
@@ -503,15 +486,25 @@ impl ResourceManager {
         let scopes = self.plug_scopes.read().await;
         let instances = self.plug_instances.read().await;
 
-        instances.keys().any(|key| {
-            if key.ends_with(&format!("_{}", slot_id)) {
-                let plug_name = key.strip_suffix(&format!("_{}", slot_id)).unwrap_or(key);
-                let scope = scopes.get(plug_name).cloned().unwrap_or(PlugScope::Slot);
-                matches!(scope, PlugScope::Slot)
-            } else {
-                false
-            }
-        })
+        instances
+            .values()
+            .any(|instance| self.is_slot_instance(instance, slot_id, &scopes))
+    }
+
+    /// Whether `instance` is a slot-scope instance belonging to `slot_id`.
+    /// Both the "is there anything to tear down" question and the
+    /// teardown itself must answer this identically, so they share it.
+    fn is_slot_instance(
+        &self,
+        instance: &PlugInstance,
+        slot_id: &str,
+        scopes: &HashMap<String, PlugScope>,
+    ) -> bool {
+        instance.slot_id.as_deref() == Some(slot_id)
+            && matches!(
+                scopes.get(&instance.plug_key).cloned().unwrap_or(PlugScope::Slot),
+                PlugScope::Slot
+            )
     }
 
     /// Check if there are any all-scope plugs
@@ -519,9 +512,12 @@ impl ResourceManager {
         let scopes = self.plug_scopes.read().await;
         let instances = self.plug_instances.read().await;
 
-        instances.keys().any(|key| {
-            let scope = scopes.get(key.as_str()).cloned().unwrap_or(PlugScope::Slot);
-            matches!(scope, PlugScope::Execution)
+        instances.values().any(|instance| {
+            let scope = scopes
+                .get(&instance.plug_key)
+                .cloned()
+                .unwrap_or(PlugScope::Slot);
+            matches!(scope, PlugScope::Execution) && instance.slot_id.is_none()
         })
     }
 
@@ -535,31 +531,21 @@ impl ResourceManager {
         let mut instances = self.plug_instances.write().await;
 
         let keys_to_remove: Vec<String> = instances
-            .keys()
-            .filter(|key| {
-                if key.ends_with(&format!("_{}", slot_id)) {
-                    let plug_name = key.strip_suffix(&format!("_{}", slot_id)).unwrap_or(key);
-                    let scope = scopes.get(plug_name).cloned().unwrap_or(PlugScope::Slot);
-                    matches!(scope, PlugScope::Slot)
-                } else {
-                    false
-                }
-            })
-            .cloned()
+            .iter()
+            .filter(|(_, instance)| self.is_slot_instance(instance, &slot_id, &scopes))
+            .map(|(key, _)| key.clone())
             .collect();
 
         for instance_key in keys_to_remove {
-            if let Some(_instance) = instances.remove(&instance_key) {
-                // Extract plug key by removing the "_slot_X" suffix
-                let plug_key = instance_key
-                    .strip_suffix(&format!("_{}", slot_id))
-                    .unwrap_or(&instance_key);
+            if let Some(instance) = instances.remove(&instance_key) {
+                let plug_key = instance.plug_key.as_str();
+                let display_name = instance.display_name.as_str();
 
                 // Emit stopping event
                 emit_plug_status(
                     event_sink,
                     plug_key.to_string(),
-                    plug_key.to_string(),
+                    display_name.to_string(),
                     PlugScope::Slot,
                     Some(slot_id.clone()),
                     PlugStage::Teardown,
@@ -584,7 +570,7 @@ impl ResourceManager {
                 emit_plug_status(
                     event_sink,
                     plug_key.to_string(),
-                    plug_key.to_string(),
+                    display_name.to_string(),
                     PlugScope::Slot,
                     Some(slot_id.clone()),
                     PlugStage::Teardown,
@@ -605,24 +591,27 @@ impl ResourceManager {
         let mut instances = self.plug_instances.write().await;
 
         let keys_to_remove: Vec<String> = instances
-            .keys()
-            .filter(|key| {
-                let scope = scopes.get(*key).cloned().unwrap_or(PlugScope::Slot);
-                matches!(scope, PlugScope::Execution)
+            .iter()
+            .filter(|(_, instance)| {
+                let scope = scopes
+                    .get(&instance.plug_key)
+                    .cloned()
+                    .unwrap_or(PlugScope::Slot);
+                matches!(scope, PlugScope::Execution) && instance.slot_id.is_none()
             })
-            .cloned()
+            .map(|(key, _)| key.clone())
             .collect();
 
         for instance_key in keys_to_remove {
-            if let Some(_instance) = instances.remove(&instance_key) {
-                // For all-scope plugs, instance_key == plug_key (no suffix).
-                let plug_key = instance_key.clone();
+            if let Some(instance) = instances.remove(&instance_key) {
+                let plug_key = instance.plug_key.clone();
+                let display_name = instance.display_name.clone();
 
                 // Emit stopping event
                 emit_plug_status(
                     event_sink,
                     plug_key.clone(),
-                    plug_key.clone(),
+                    display_name.clone(),
                     PlugScope::Execution,
                     None,
                     PlugStage::Teardown,
@@ -647,7 +636,7 @@ impl ResourceManager {
                 emit_plug_status(
                     event_sink,
                     plug_key.clone(),
-                    plug_key.clone(),
+                    display_name.clone(),
                     PlugScope::Execution,
                     None,
                     PlugStage::Teardown,
@@ -724,8 +713,11 @@ impl ResourceManager {
             plug_name.clone(),
             PlugInstance {
                 port,
+                plug_key: plug_name.clone(),
+                // A manual plug is started from the UI, not from a
+                // procedure entry, so the key is the only name there is.
+                display_name: plug_name.clone(),
                 slot_id: Some("manual".to_string()), // Mark as manual
-                ref_count: 0,                        // Manual plugs don't use ref counting
             },
         );
 
@@ -853,16 +845,17 @@ impl ResourceManager {
             }
 
             if let Some(instance) = instances.remove(&instance_key) {
-                let (plug_name, scope, slot_id) = if let Some(ref slot) = instance.slot_id {
-                    let plug_name = instance_key
-                        .strip_suffix(&format!("_{}", slot))
-                        .unwrap_or(&instance_key);
-                    let scope = scopes.get(plug_name).cloned().unwrap_or(PlugScope::Slot);
-                    (plug_name, scope, Some(slot.clone()))
-                } else {
-                    let scope = scopes.get(&instance_key).cloned().unwrap_or(PlugScope::Execution);
-                    (instance_key.as_str(), scope, None)
-                };
+                let scope = scopes.get(&instance.plug_key).cloned().unwrap_or(
+                    // An instance with no slot is a shared one, so
+                    // execution is the right default for it; a per-slot
+                    // instance defaults to slot.
+                    if instance.slot_id.is_some() {
+                        PlugScope::Slot
+                    } else {
+                        PlugScope::Execution
+                    },
+                );
+                let slot_id = instance.slot_id.clone();
 
                 if let Err(e) = self
                     .plug_service_manager
@@ -877,10 +870,13 @@ impl ResourceManager {
 
                 log::info!("Force destroyed plug {}", instance_key);
 
+                // The plug's key, NOT the instance key: a slot plug's
+                // instance key (`dmm_slot_1`) matched no `plug_key` any
+                // consumer had been told about at `RunStarted`.
                 emit_plug_status(
                     event_sink,
-                    instance_key.clone(),
-                    plug_name.to_string(),
+                    instance.plug_key.clone(),
+                    instance.display_name.clone(),
                     scope,
                     slot_id,
                     PlugStage::Teardown,
@@ -902,11 +898,91 @@ mod tests {
         Arc::new(NullSink)
     }
 
+    /// Keeps every `plug_status` event so a test can read what teardown
+    /// actually put on the wire.
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<PlugStatusUpdateEvent>>);
+
+    impl EventSink for RecordingSink {
+        fn emit(&self, event: &ExecutionEvent) {
+            if let ExecutionEvent::PlugStatus(e) = event {
+                self.0.lock().unwrap().push(e.clone());
+            }
+        }
+    }
+
+    /// A slot plug's teardown must name the plug the way the procedure
+    /// does, under the plug's own key — not `power_supply` under
+    /// `power_supply_slot_1`, which is what the instance map is keyed by.
+    #[tokio::test]
+    async fn slot_teardown_events_carry_key_and_display_name() {
+        let rm = ResourceManager::new(std::env::temp_dir());
+        rm.set_plug_scopes(HashMap::from([(
+            "power_supply".to_string(),
+            PlugScope::Slot,
+        )]))
+        .await;
+        rm.plug_instances.write().await.insert(
+            "power_supply_slot_1".to_string(),
+            PlugInstance {
+                port: 45010,
+                plug_key: "power_supply".to_string(),
+                display_name: "Power Supply".to_string(),
+                slot_id: Some("slot_1".to_string()),
+            },
+        );
+
+        let recorder: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let sink: Arc<dyn EventSink> = recorder.clone();
+        assert!(rm.has_each_scope_plugs("slot_1").await);
+        rm.destroy_each_scope_plugs("slot_1".to_string(), &sink)
+            .await
+            .unwrap();
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 2, "destructing then idle");
+        for event in &events {
+            assert_eq!(event.plug_key, "power_supply");
+            assert_eq!(event.plug_name, "Power Supply");
+            assert_eq!(event.slot_id.as_deref(), Some("slot_1"));
+        }
+        assert!(rm.plug_instances.read().await.is_empty());
+    }
+
+    /// Same for the force-kill path, which used to put the INSTANCE key
+    /// on the wire as `plug_key`.
+    #[tokio::test]
+    async fn force_destroy_events_carry_the_plug_key() {
+        let rm = ResourceManager::new(std::env::temp_dir());
+        rm.set_plug_scopes(HashMap::from([("dmm".to_string(), PlugScope::Slot)]))
+            .await;
+        rm.plug_instances.write().await.insert(
+            "dmm_slot_2".to_string(),
+            PlugInstance {
+                port: 45011,
+                plug_key: "dmm".to_string(),
+                display_name: "Multimeter".to_string(),
+                slot_id: Some("slot_2".to_string()),
+            },
+        );
+
+        let recorder: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let sink: Arc<dyn EventSink> = recorder.clone();
+        rm.force_destroy_all_plugs(&sink).await.unwrap();
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].plug_key, "dmm");
+        assert_eq!(events[0].plug_name, "Multimeter");
+        assert_eq!(events[0].slot_id.as_deref(), Some("slot_2"));
+    }
+
     async fn manager_with_station_plug() -> ResourceManager {
         let rm = ResourceManager::new(std::env::temp_dir());
         rm.set_plug_scopes(HashMap::from([("psu".to_string(), PlugScope::Station)]))
             .await;
-        rm.register_station_plug("psu".to_string(), 45001).await;
+        rm.register_station_plug("psu".to_string(), "PSU".to_string(), 45001)
+            .await;
         rm
     }
 
@@ -922,11 +998,11 @@ mod tests {
 
         // Two phases in different slots share the single station instance.
         let ports_a = rm
-            .start_plug_services_for_slot(job_a, &configs, Some("slot_1".into()))
+            .start_plug_services_for_slot(&configs, Some("slot_1".into()))
             .await
             .unwrap();
         let ports_b = rm
-            .start_plug_services_for_slot(job_b, &configs, Some("slot_2".into()))
+            .start_plug_services_for_slot(&configs, Some("slot_2".into()))
             .await
             .unwrap();
         assert_eq!(ports_a.get("psu"), Some(&45001));
@@ -951,7 +1027,7 @@ mod tests {
         rm.allocate_resources(job, &[]).await.unwrap();
         let configs = HashMap::from([("psu".to_string(), serde_json::json!({}))]);
         let ports = rm
-            .start_plug_services_for_slot(job, &configs, Some("slot_1".into()))
+            .start_plug_services_for_slot(&configs, Some("slot_1".into()))
             .await
             .expect("station instance must still be allocatable after run teardown");
         assert_eq!(ports.get("psu"), Some(&45001));
@@ -965,15 +1041,17 @@ mod tests {
             ("dmm".to_string(), PlugScope::Execution),
         ]))
         .await;
-        rm.register_station_plug("psu".to_string(), 45001).await;
+        rm.register_station_plug("psu".to_string(), "PSU".to_string(), 45001)
+            .await;
         // Fake an execution-scope instance directly (no live process needed for
         // map semantics; force_kill on the absent service just warns).
         rm.plug_instances.write().await.insert(
             "dmm".to_string(),
             PlugInstance {
                 port: 45002,
+                plug_key: "dmm".to_string(),
+                display_name: "Multimeter".to_string(),
                 slot_id: None,
-                ref_count: 0,
             },
         );
 
@@ -985,7 +1063,7 @@ mod tests {
         rm.allocate_resources(job, &[]).await.unwrap();
         let station_cfg = HashMap::from([("psu".to_string(), serde_json::json!({}))]);
         let ports = rm
-            .start_plug_services_for_slot(job, &station_cfg, None)
+            .start_plug_services_for_slot(&station_cfg, None)
             .await
             .expect("station plug must survive force destroy");
         assert_eq!(ports.get("psu"), Some(&45001));
@@ -994,7 +1072,7 @@ mod tests {
         rm.allocate_resources(job2, &[]).await.unwrap();
         let run_cfg = HashMap::from([("dmm".to_string(), serde_json::json!({}))]);
         assert!(
-            rm.start_plug_services_for_slot(job2, &run_cfg, None)
+            rm.start_plug_services_for_slot(&run_cfg, None)
                 .await
                 .is_err(),
             "run plug must be gone after force destroy"
@@ -1010,7 +1088,7 @@ mod tests {
         rm.allocate_resources(job, &[]).await.unwrap();
         let configs = HashMap::from([("psu".to_string(), serde_json::json!({}))]);
         assert!(rm
-            .start_plug_services_for_slot(job, &configs, None)
+            .start_plug_services_for_slot(&configs, None)
             .await
             .is_err());
     }

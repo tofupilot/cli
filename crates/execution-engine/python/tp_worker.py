@@ -1695,10 +1695,15 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                         kwargs[param_name] = matched_plug
                     elif sig.parameters[param_name].default is inspect.Parameter.empty:
                         available = list(phase_results.keys()) if phase_results else []
+                        available_plugs = sorted(plugs_dict.keys())
                         raise TypeError(
                             f"Phase '{function_name}' has required parameter '{param_name}' that could not be resolved.\n"
                             f"Built-in injectables: phase, run, measurements, log, ui, unit, attach.\n"
-                            f"If '{param_name}' is a plug, declare it in the phase's plugs config.\n"
+                            f"If '{param_name}' is a plug, the procedure needs a plug whose KEY is '{param_name}' "
+                            f"— a phase receives a plug by naming its key as a parameter. A plug's key is its "
+                            f"`key:` line, or is derived from its `name:` when it has none, so renaming a plug "
+                            f"moves the key its phases have to ask for.\n"
+                            f"Plugs available to this phase: {available_plugs}\n"
                             f"If '{param_name}' refers to another phase's results, make sure that phase completes before this one (add it to depends_on).\n"
                             f"Available phase results: {available}"
                         )

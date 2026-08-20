@@ -1,5 +1,6 @@
 use super::error::CommandError;
 use crate::procedure::schema::{ProcedureDefinition, ProcedureYaml};
+use std::collections::HashSet;
 use std::path::Path;
 use validator::Validate;
 
@@ -36,6 +37,51 @@ pub fn load_procedure_definition(file_path: &Path) -> Result<ProcedureDefinition
         .map_err(|e| format!("Failed to read {}: {}", file_path.display(), e))?;
 
     load_procedure_definition_from_str(&content)
+}
+
+/// Names of the plugs whose entry states an explicit `scope:` line.
+///
+/// The loaded definition cannot answer this, by design:
+/// `From<PlugDefinitionYaml>` applies the `slot` default on the way in
+/// and `PlugDefinition::to_yaml` erases an explicit `slot` on the way
+/// out, so an author who wrote the default is indistinguishable from one
+/// who omitted it — everywhere except the text. Studio needs the
+/// difference to draw an inherited scope as inherited rather than as a
+/// choice someone made.
+///
+/// Tolerant in the same way, and for the same reason, as
+/// `procedure_name_from_str`: `scope` is read as an opaque value so a
+/// legacy spelling (`each`/`all`/`run`) or an outright invalid one still
+/// counts as stated, and every field is optional so a procedure being
+/// edited still answers. Unparsable text yields an empty set, which
+/// renders as "nothing stated" — the safe direction.
+pub fn plugs_with_explicit_scope(content: &str) -> HashSet<String> {
+    #[derive(serde::Deserialize)]
+    struct JustPlugs {
+        #[serde(default)]
+        plugs: Vec<JustScope>,
+    }
+    #[derive(serde::Deserialize)]
+    struct JustScope {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        scope: Option<serde_yaml::Value>,
+    }
+
+    serde_yaml::from_str::<JustPlugs>(content)
+        .map(|parsed| {
+            parsed
+                .plugs
+                .into_iter()
+                .filter(|p| p.scope.is_some())
+                // Trimmed to match `PlugDefinitionYaml.name`, which
+                // deserializes through `serde_trim` — an untrimmed key
+                // here would never match the projection's plug name.
+                .map(|p| p.name.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The definition's own `name:`, read tolerantly: a partial parse that
@@ -162,6 +208,30 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
         }
     }
 
+    // Plug keys must be unique too, and case-insensitively so: the worker
+    // matches a phase parameter to a plug with `param_name.lower() ==
+    // plug_key.lower()` (tp_worker.py), so `DMM` and `dmm` are one binding
+    // as far as a phase is concerned. Duplicates have no failure mode a
+    // user can read: the scope map keeps the LAST entry
+    // (`orchestrator/initialization.rs`) while the config lookup finds the
+    // FIRST (`orchestrator/plugs.rs`), so two declared instruments quietly
+    // become one process built from one entry and torn down by the other's
+    // lifetime. Keys are usually derived from `name`, which makes this
+    // easy to hit without noticing — "Power Supply" and "Power-Supply" are
+    // two distinct names that derive the same key.
+    let mut seen_plug_keys: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::new();
+    for plug in &procedure_def.plugs {
+        if let Some(first) = seen_plug_keys.insert(plug.key.to_lowercase(), plug.name.as_str()) {
+            return Err(format!(
+                "Duplicate plug key `{}` (plugs `{}` and `{}`) — every plug must have a \
+                 unique key, because a phase receives a plug by naming that key as a \
+                 parameter. Set an explicit `key:` on one of them",
+                plug.key, first, plug.name
+            ));
+        }
+    }
+
     // `depends_on` must reference phase keys that exist in the procedure.
     // Silently ignoring unknown dependencies lets a typo mask broken ordering.
     let known_keys: std::collections::HashSet<&str> =
@@ -202,6 +272,61 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The distinction the projection cannot make for itself: an
+    /// omitted `scope:` and a stated one that happens to name the
+    /// default are the same `PlugDefinition` after loading.
+    #[test]
+    fn explicit_scope_separates_stated_from_inherited() {
+        let yaml = r#"
+name: P
+version: 1.0.0
+plugs:
+  - name: Inherited
+    python: plugs.a:A
+  - name: Stated Default
+    scope: slot
+    python: plugs.b:B
+  - name: Stated Other
+    scope: station
+    python: plugs.c:C
+"#;
+        let explicit = plugs_with_explicit_scope(yaml);
+        assert!(!explicit.contains("Inherited"));
+        assert!(explicit.contains("Stated Default"));
+        assert!(explicit.contains("Stated Other"));
+    }
+
+    /// A legacy spelling is still a stated scope: the projection reports
+    /// presence from here and the canonical spelling from the parse, so
+    /// `all` must not read as inherited just because it is not the
+    /// current word for it.
+    #[test]
+    fn explicit_scope_counts_legacy_spellings() {
+        let yaml = "plugs:\n  - name: Legacy\n    scope: all\n";
+        assert!(plugs_with_explicit_scope(yaml).contains("Legacy"));
+    }
+
+    /// Unparsable and plugless text answers "nothing stated" rather
+    /// than failing: a procedure mid-edit still has to render.
+    #[test]
+    fn explicit_scope_tolerates_broken_and_plugless_text() {
+        assert!(plugs_with_explicit_scope("{{{ not yaml").is_empty());
+        assert!(plugs_with_explicit_scope("name: P\n").is_empty());
+        // An invalid scope value is still a stated one — the page shows
+        // the parse's spelling, and the parse is what rejects it.
+        assert!(plugs_with_explicit_scope("plugs:\n  - name: Bad\n    scope: nonsense\n")
+            .contains("Bad"));
+    }
+
+    /// Names are trimmed to match `PlugDefinitionYaml.name`, which
+    /// deserializes through `serde_trim` — an untrimmed key would never
+    /// match the plug it belongs to.
+    #[test]
+    fn explicit_scope_trims_names() {
+        let yaml = "plugs:\n  - name: \"  Padded  \"\n    scope: execution\n";
+        assert!(plugs_with_explicit_scope(yaml).contains("Padded"));
+    }
 
     fn load_from_str(yaml: &str) -> Result<ProcedureDefinition, String> {
         let dir = std::env::temp_dir().join(format!(
@@ -282,6 +407,81 @@ main:
         );
         let def = result.expect("station scope on a plug is valid");
         assert!(def.plugs[0].scope_is_station());
+    }
+
+    /// Two names that derive the same key are the realistic way to hit
+    /// this — neither entry looks wrong on its own.
+    #[test]
+    fn duplicate_plug_key_rejected() {
+        let err = load_from_str(
+            r#"
+name: Two Plugs One Key
+version: "1.0"
+plugs:
+  - name: Power Supply
+    python: instruments.psu:PowerSupply
+  - name: Power-Supply
+    python: instruments.psu2:PowerSupply
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        )
+        .expect_err("two plugs deriving `power_supply` must be rejected");
+        assert!(
+            err.contains("Duplicate plug key `power_supply`")
+                && err.contains("Power Supply")
+                && err.contains("Power-Supply"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The worker matches a parameter to a plug case-insensitively, so
+    /// two keys differing only in case are one binding and must not load.
+    #[test]
+    fn plug_keys_differing_only_in_case_rejected() {
+        let err = load_from_str(
+            r#"
+name: Case Clash
+version: "1.0"
+plugs:
+  - name: Meter A
+    key: DMM
+    python: instruments.a:A
+  - name: Meter B
+    key: dmm
+    python: instruments.b:B
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        )
+        .expect_err("`DMM` and `dmm` are one binding for a phase");
+        assert!(err.contains("Duplicate plug key"), "unexpected error: {err}");
+    }
+
+    /// The check must not fire on the ordinary case.
+    #[test]
+    fn distinct_plug_keys_load() {
+        let def = load_from_str(
+            r#"
+name: Two Plugs
+version: "1.0"
+plugs:
+  - name: Power Supply
+    python: instruments.psu:PowerSupply
+  - name: Multimeter
+    python: instruments.dmm:Multimeter
+main:
+  - key: p1
+    name: P1
+    python: phases.p1
+"#,
+        )
+        .expect("distinct keys load");
+        assert_eq!(def.plugs.len(), 2);
     }
 
     #[test]

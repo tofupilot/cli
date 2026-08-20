@@ -32,8 +32,8 @@ use station_protocol::{
     StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
     StudioProject, StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation,
     StudioSequenceAxis, StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug,
-    StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit,
-    StudioSequenceUnitField, StudioSequenceValidator,
+    StudioSequencePlugConfigEntry, StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi,
+    StudioSequenceUnit, StudioSequenceUnitField, StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -773,17 +773,75 @@ async fn active_procedure_yaml(
     Ok(canon)
 }
 
+/// A plug's `config:` mapping as ordered display entries.
+///
+/// `kind` is what the Builder edits on: only a scalar can be
+/// rewritten in place by the line editor, so a list or mapping is
+/// reported as `complex` with a summary instead of its contents —
+/// the row shows it and links to Code mode rather than offering an
+/// inline field that cannot commit.
+fn map_plug_config(
+    config: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Vec<StudioSequencePlugConfigEntry> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    config
+        .iter()
+        .map(|(key, value)| {
+            let (kind, rendered) = match value {
+                // Unquoted: the field edits the string itself, and
+                // the write path re-quotes it.
+                serde_json::Value::String(s) => ("string", s.clone()),
+                serde_json::Value::Number(n) => ("number", n.to_string()),
+                serde_json::Value::Bool(b) => ("bool", b.to_string()),
+                serde_json::Value::Null => ("null", "null".to_string()),
+                serde_json::Value::Array(items) => (
+                    "complex",
+                    format!(
+                        "[{} item{}]",
+                        items.len(),
+                        if items.len() == 1 { "" } else { "s" }
+                    ),
+                ),
+                serde_json::Value::Object(map) => (
+                    "complex",
+                    format!(
+                        "{{{} key{}}}",
+                        map.len(),
+                        if map.len() == 1 { "" } else { "s" }
+                    ),
+                ),
+            };
+            StudioSequencePlugConfigEntry {
+                key: key.clone(),
+                value: rendered,
+                kind: kind.to_string(),
+            }
+        })
+        .collect()
+}
+
 async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
     let yaml_path = match active_procedure_yaml(config, root).await {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Both the parsed definition and the text it came from: the
+    // projection needs the text to tell a stated `scope:` from an
+    // inherited one, which the parse has already collapsed. One read
+    // feeds both — parsing the text we already hold, never the path —
+    // so the two cannot disagree: a second read could land after a
+    // write and report a scope the returned definition does not have.
     let loaded = tokio::task::spawn_blocking(move || {
-        execution_engine::procedure::loader::load_procedure_definition(&yaml_path)
+        let content = std::fs::read_to_string(&yaml_path)
+            .map_err(|e| format!("Failed to read {}: {}", yaml_path.display(), e))?;
+        execution_engine::procedure::loader::load_procedure_definition_from_str(&content)
+            .map(|def| (def, content))
     })
     .await;
-    let def = match loaded {
-        Ok(Ok(def)) => def,
+    let (def, yaml_text) = match loaded {
+        Ok(Ok(pair)) => pair,
         Ok(Err(message)) => return err(StudioErrorCode::Invalid, message),
         Err(join_err) => {
             return err(
@@ -808,6 +866,19 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
             })
             .unwrap_or_default();
         format!("{op} {value}")
+    }
+
+    /// The canonical YAML spelling of a scope. Deliberately not
+    /// `serde_json::to_string`: the wire contract is the bare word the
+    /// file contains, and the legacy aliases (`each`/`all`/`run`) are
+    /// parse-only — everything emits the new spellings.
+    fn scope_str(scope: execution_engine::procedure::schema::Scope) -> &'static str {
+        use execution_engine::procedure::schema::Scope;
+        match scope {
+            Scope::Slot => "slot",
+            Scope::Execution => "execution",
+            Scope::Station => "station",
+        }
     }
 
     fn map_phase(p: &execution_engine::procedure::schema::PhaseDefinition) -> StudioSequencePhase {
@@ -908,6 +979,9 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
         }
     }
 
+    let explicit_scopes =
+        execution_engine::procedure::loader::plugs_with_explicit_scope(&yaml_text);
+
     StudioResponse::Sequence {
         sequence: StudioSequence {
             name: def.name.clone(),
@@ -954,6 +1028,16 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
                     key: pl.key.clone(),
                     name: pl.name.clone(),
                     python: pl.python.as_str().to_string(),
+                    // Presence from the file, spelling from the parse.
+                    scope: explicit_scopes
+                        .contains(pl.name.as_str())
+                        .then(|| scope_str(pl.scope).to_string()),
+                    // Empty and absent are the same thing to the
+                    // schema (`description` defaults to ""), so the
+                    // projection collapses them rather than sending an
+                    // empty string the page would have to special-case.
+                    description: Some(pl.description.clone()).filter(|d| !d.is_empty()),
+                    config: map_plug_config(pl.config.as_ref()),
                 })
                 .collect(),
             setup: def.setup.iter().map(map_phase).collect(),
@@ -2046,6 +2130,53 @@ async fn write_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plug_config_projection_kinds_and_order() {
+        let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{
+                "address": "192.168.1.100",
+                "channel": 1,
+                "gain": 1.5,
+                "invert": true,
+                "spare": null,
+                "channels": [1, 2, 3],
+                "limits": {"lo": 0, "hi": 5}
+            }"#,
+        )
+        .unwrap();
+        let out = map_plug_config(Some(&config));
+        let seen: Vec<(&str, &str, &str)> = out
+            .iter()
+            .map(|e| (e.key.as_str(), e.kind.as_str(), e.value.as_str()))
+            .collect();
+
+        // A string arrives UNQUOTED: the field edits the string itself
+        // and the write path re-quotes it.
+        assert!(seen.contains(&("address", "string", "192.168.1.100")));
+        assert!(seen.contains(&("channel", "number", "1")));
+        assert!(seen.contains(&("gain", "number", "1.5")));
+        assert!(seen.contains(&("invert", "bool", "true")));
+        assert!(seen.contains(&("spare", "null", "null")));
+        // A list or mapping is summarized, never inlined: the line editor
+        // cannot rewrite it, so the row must not offer a field.
+        assert!(seen.contains(&("channels", "complex", "[3 items]")));
+        assert!(seen.contains(&("limits", "complex", "{2 keys}")));
+        assert_eq!(out.len(), 7);
+    }
+
+    #[test]
+    fn plug_config_singular_summaries_and_absent() {
+        let one: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"a": [7], "b": {"k": 1}}"#).unwrap();
+        let out = map_plug_config(Some(&one));
+        assert_eq!(out.iter().find(|e| e.key == "a").unwrap().value, "[1 item]");
+        assert_eq!(out.iter().find(|e| e.key == "b").unwrap().value, "{1 key}");
+
+        // No `config:` at all is an empty list, never a null the wire
+        // would omit — the page maps over it unconditionally.
+        assert!(map_plug_config(None).is_empty());
+    }
 
     #[test]
     fn text_extension_allow_list() {

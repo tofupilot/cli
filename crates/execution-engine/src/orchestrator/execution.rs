@@ -476,11 +476,7 @@ impl Orchestrator {
 
                 // Start plug services and get ports (pass slot_id for scope management)
                 match resource_manager_ref
-                    .start_plug_services_for_slot(
-                        original_job.id,
-                        &plug_configs,
-                        original_job.slot_id.clone(),
-                    )
+                    .start_plug_services_for_slot(&plug_configs, original_job.slot_id.clone())
                     .await
                 {
                     Ok(ports) => {
@@ -719,25 +715,11 @@ impl Orchestrator {
                 })
                 .await;
 
-            // Clean up plug services for this job
-            if !original_job.required_plugs.is_empty() {
-                // Events now emitted at plug level in ResourceManager
-
-                let resource_manager_ref = resource_manager.read().await;
-
-                if let Err(e) = resource_manager_ref
-                    .stop_plug_services_for_slot(original_job.id, original_job.slot_id.clone())
-                    .await
-                {
-                    log::warn!(
-                        "Failed to stop plug services for job {}: {}",
-                        original_job.id,
-                        e
-                    );
-                }
-
-                // Events now emitted at plug level in ResourceManager
-            }
+            // No plug cleanup for a finished job on purpose: a plug
+            // outlives every phase that uses it and is destroyed at its
+            // scope boundary (`destroy_*_scope_plugs`). This used to call
+            // `stop_plug_services_for_slot`, which took a lock and walked
+            // the allocation to move a reference count nothing read.
 
             // Resources are automatically released when resource_guard is dropped
             drop(resource_guard);

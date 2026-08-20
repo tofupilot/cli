@@ -200,6 +200,94 @@ async fn context_change_releases_all_held_plugs() {
     host.shutdown(None).await;
 }
 
+/// A renamed key is the same file, class and config under a new name —
+/// the fingerprint check cannot see it, so the run's declared set is
+/// what has to release the old instance. The device the old process
+/// holds is the one the new key is about to open.
+#[tokio::test]
+async fn renamed_key_releases_the_orphaned_instance() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let bed = TestBed::new("renamed-key");
+    let host = StationPlugHost::new();
+    let python = Some(python);
+
+    let old_port = host
+        .acquire(&bed.dir, &python, "psu", "PSU", bed.config("a"), &sink())
+        .await
+        .unwrap();
+    assert!(port_listening(old_port));
+
+    // The next run declares the same plug under `power_supply`.
+    let declared = std::collections::HashSet::from(["power_supply".to_string()]);
+    host.release_absent(&bed.dir, &python, &declared, &sink())
+        .await;
+    assert_eq!(host.held_count().await, 0, "`psu` is no longer declared");
+
+    for _ in 0..20 {
+        if !port_listening(old_port) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        !port_listening(old_port),
+        "the orphaned instance must be dead, not holding the instrument"
+    );
+
+    let new_port = host
+        .acquire(
+            &bed.dir,
+            &python,
+            "power_supply",
+            "PSU",
+            bed.config("a"),
+            &sink(),
+        )
+        .await
+        .unwrap();
+    assert!(port_listening(new_port));
+    assert_eq!(bed.init_count(), 2, "the new key connected on its own");
+
+    host.shutdown(None).await;
+}
+
+/// A declared plug is untouched, and so is a plug held for a DIFFERENT
+/// procedure — pruning against another procedure's list would tear down
+/// instances that procedure is still using.
+#[tokio::test]
+async fn release_absent_spares_declared_and_other_contexts() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let bed = TestBed::new("prune-spares");
+    let other = TestBed::new("prune-other");
+    let host = StationPlugHost::new();
+    let python = Some(python);
+
+    let port = host
+        .acquire(&bed.dir, &python, "psu", "PSU", bed.config("a"), &sink())
+        .await
+        .unwrap();
+
+    let declared = std::collections::HashSet::from(["psu".to_string()]);
+    host.release_absent(&bed.dir, &python, &declared, &sink())
+        .await;
+    assert_eq!(host.held_count().await, 1, "still declared, still held");
+
+    // Another procedure's (empty) plug list must not reach this context.
+    host.release_absent(&other.dir, &python, &Default::default(), &sink())
+        .await;
+    assert_eq!(host.held_count().await, 1, "context mismatch is a no-op");
+    assert!(port_listening(port));
+    assert_eq!(bed.init_count(), 1, "no respawn happened");
+
+    host.shutdown(None).await;
+}
+
 #[tokio::test]
 async fn dead_process_respawns_on_acquire() {
     let Some(python) = python3() else {
