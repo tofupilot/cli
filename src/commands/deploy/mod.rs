@@ -31,16 +31,18 @@ pub struct DeployArgs {
     pub yes: bool,
 }
 
-/// Directory names never shipped, regardless of .gitignore. Mirrors what
-/// a git push would exclude plus Python/venv noise that is sometimes
-/// committed but never useful to a cloud build.
 /// Client-side mirror of the server's MAX_SOURCE_SIZE_BYTES. Checked after
 /// packing, before the upload reads the whole tarball into memory, so a
 /// runaway directory fails fast with a clear message instead of OOMing or
 /// getting a 403 from the size-bound presigned URL.
 const MAX_SOURCE_SIZE_BYTES: u64 = 95 * 1024 * 1024;
 
-const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
+/// Entry names never shipped, regardless of .gitignore. Mirrors what a git
+/// push would exclude plus Python/venv noise that is sometimes committed but
+/// never useful to a cloud build. Matched on name alone, not just for
+/// directories: `.git` can be a *file* (submodule or linked worktree) whose
+/// content is a path on the developer's machine.
+const ALWAYS_EXCLUDED_NAMES: &[&str] = &[
     ".git",
     "venv",
     ".venv",
@@ -404,8 +406,7 @@ fn pack(dir: &Path) -> CliResult<Packed> {
         .require_git(false) // honor .gitignore files even outside a repo
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            !(entry.file_type().is_some_and(|t| t.is_dir())
-                && ALWAYS_EXCLUDED_DIRS.contains(&name.as_ref()))
+            !ALWAYS_EXCLUDED_NAMES.contains(&name.as_ref())
         })
         .build();
 
@@ -489,5 +490,54 @@ fn human_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packed_names(dir: &Path) -> Vec<String> {
+        let packed = pack(dir).unwrap();
+        let file = packed.tar.reopen().unwrap();
+        let decoder = zstd::Decoder::new(file).unwrap();
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pack_excludes_git_file_not_just_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.py"), "print('hi')").unwrap();
+        std::fs::write(root.join(".python-version"), "3.12").unwrap();
+        // Linked worktree: `.git` is a file holding an absolute path from
+        // the developer's machine.
+        std::fs::write(root.join(".git"), "gitdir: /home/dev/repo/.git/worktrees/x").unwrap();
+        // Submodule: the vendored dependency's `.git` is a file too.
+        std::fs::create_dir(root.join("vendored")).unwrap();
+        std::fs::write(root.join("vendored/lib.py"), "x = 1").unwrap();
+        std::fs::write(
+            root.join("vendored/.git"),
+            "gitdir: ../.git/modules/vendored",
+        )
+        .unwrap();
+        // Directory case must keep working.
+        std::fs::create_dir(root.join("__pycache__")).unwrap();
+        std::fs::write(root.join("__pycache__/junk.pyc"), "junk").unwrap();
+
+        let names = packed_names(root);
+        assert!(names.contains(&"main.py".to_string()));
+        assert!(names.contains(&".python-version".to_string()));
+        assert!(names.contains(&"vendored/lib.py".to_string()));
+        assert!(
+            !names.iter().any(|n| n == ".git" || n.ends_with("/.git")),
+            "a .git file leaked into the tarball: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n.contains("__pycache__")));
     }
 }
