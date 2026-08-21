@@ -201,19 +201,28 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // hits EADDRINUSE and exits cleanly. No PID file, no suspend
     // marker, no takeover prompt.
 
+    // One read of the station whoami slot serves the whole boot: banner,
+    // Web-UI line and kiosk hello below. Nothing writes the slot between
+    // here and those uses, and each `cached_whoami` call is a fresh
+    // `db::open()` that can poll a cross-process lock — no reason to pay
+    // it three times for the same row.
+    //
+    // Station slot only: it holds what creds lack (station name, station
+    // id), and post-split a user-side login can't overwrite it (TP-1040).
+    // The org slug comes from the credential record, like every other
+    // slug consumer in the CLI (deploy, queue, config, studio, the Web UI
+    // line below): one rule — slugs from creds, the cache only provides
+    // what creds lack. A server-side org rename leaves creds slugs stale
+    // CLI-wide until re-login; that is a pre-existing, separate issue,
+    // and a lone cache-first consumer here wouldn't fix it.
+    let whoami = crate::commands::db::cached_whoami(crate::commands::db::WhoamiSlot::Station);
+    let station_name = whoami
+        .as_ref()
+        .and_then(|w| w.station_name.clone())
+        .unwrap_or_else(|| "Station".to_string());
+
     if !json_mode {
-        let whoami = crate::commands::db::open()
-            .ok()
-            .and_then(|db| db.get_whoami().ok().flatten());
-        let station_name = whoami
-            .as_ref()
-            .and_then(|w| w.station_name.as_deref())
-            .unwrap_or("Station");
-        let org_slug = whoami
-            .as_ref()
-            .map(|w| w.organization_slug.as_str())
-            .unwrap_or(&creds.organization_slug);
-        show_banner(station_name, org_slug);
+        show_banner(&station_name, &creds.organization_slug);
     }
 
     // Upload-queue drain is spawned later, after the local-WS server
@@ -237,22 +246,12 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // a browser tab opened pre-run survives the whole station
     // lifetime, and a tab opened mid-run hydrates the in-flight
     // state without needing to reconnect to a fresh port.
-    let whoami = crate::commands::db::open()
-        .ok()
-        .and_then(|db| db.get_whoami().ok().flatten());
-
     if !json_mode {
+        // See `web_ui_line` for why the URL never reads the whoami cache.
+        // An empty slot prints nothing here; the boot heal below prints
+        // the line once the probe has fetched the identity.
         if let Some(station_id) = whoami.as_ref().and_then(|w| w.station_id.as_deref()) {
-            let org = whoami
-                .as_ref()
-                .map(|w| w.organization_slug.as_str())
-                .unwrap_or(&creds.organization_slug);
-            log::info(&format!(
-                "Web UI: {}/{}/operator/{}",
-                creds.base(),
-                org,
-                station_id,
-            ));
+            log::info(&web_ui_line(creds, station_id));
         }
     }
 
@@ -293,10 +292,6 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
         tokio::sync::mpsc::channel::<StationCommand>(32);
 
     let local_ws_server: Option<std::sync::Arc<crate::local_ws::Server>> = if kiosk_enabled {
-        let station_name = whoami
-            .as_ref()
-            .and_then(|w| w.station_name.clone())
-            .unwrap_or_else(|| "Station".to_string());
         let identity = whoami
             .as_ref()
             .map(crate::local_ws::HelloIdentity::from)
@@ -356,12 +351,32 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // was revoked while offline (e.g. someone redeemed a setup token on
     // another machine during the downtime) we exit now instead of entering
     // a long station-loop session with a dead key.
-    if auth_probe(creds).await == AuthProbeOutcome::Unauthorized {
+    let boot_probe = auth_probe(creds).await;
+    if boot_probe.outcome == AuthProbeOutcome::Unauthorized {
         if !json_mode {
             log::warn("Logged out: revoked");
         }
         clear_local_credentials();
         return EXIT_REVOKED;
+    }
+
+    // Heal the station whoami slot from the probe's own response body —
+    // same endpoint, no extra round-trip, nothing to do offline (the
+    // probe had no body either). The daemon must feed this slot itself:
+    // on a dual-login machine, user-side commands refresh the USER slot
+    // (their user-first `credentials::load()`), and on a pure-station
+    // appliance nothing ever runs `whoami` at all — while a
+    // `login --token` whose identity fetch failed (offline provisioning)
+    // leaves the slot empty or carrying the previous station (TP-1040).
+    // When the probe reveals a station id the earlier Web UI print didn't
+    // have — or contradicts the one it printed — say the correct line now.
+    if let Some(fresh) = &boot_probe.identity {
+        let announce = absorb_station_identity(fresh, local_ws_server.as_deref()).await;
+        if !json_mode && announce {
+            if let Some(station_id) = fresh.station_id.as_deref() {
+                log::info(&web_ui_line(creds, station_id));
+            }
+        }
     }
 
     // Boot-time update check: synchronously fetch + stage + apply so a station
@@ -909,7 +924,15 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 if active_run.is_some() {
                     continue;
                 }
-                if auth_probe(creds).await == AuthProbeOutcome::Unauthorized {
+                let probe = auth_probe(creds).await;
+                // Long-uptime heal: a station that never reboots would
+                // otherwise keep a stale slot forever. The tick already
+                // paid for the identity, so absorb it (redb write still
+                // gated on empty-or-stale inside).
+                if let Some(fresh) = &probe.identity {
+                    absorb_station_identity(fresh, local_ws_server.as_deref()).await;
+                }
+                if probe.outcome == AuthProbeOutcome::Unauthorized {
                     if !json_mode { log::warn("Logged out: revoked"); }
                     clear_local_credentials();
                     exit_code = EXIT_REVOKED;
@@ -1558,15 +1581,28 @@ enum AuthProbeOutcome {
     Indeterminate,
 }
 
+struct AuthProbeResult {
+    outcome: AuthProbeOutcome,
+    /// Parsed whoami body on a successful probe. The probe hits
+    /// `/api/cli/whoami` anyway, so the identity rides along instead of
+    /// being discarded: the boot heal and the periodic tick feed the
+    /// station whoami slot from it (TP-1040) without a second round-trip.
+    identity: Option<crate::commands::db::WhoamiCache>,
+}
+
 /// Probe the server to verify our API key is still valid. 401/403 means this
 /// installation has been revoked (typically replaced by a newer login).
-async fn auth_probe(creds: &Credentials) -> AuthProbeOutcome {
+async fn auth_probe(creds: &Credentials) -> AuthProbeResult {
+    let outcome_only = |outcome| AuthProbeResult {
+        outcome,
+        identity: None,
+    };
     let base = creds.base();
     let Ok(client) = crate::http::client_builder()
         .timeout(crate::config::timeouts::AUTH_PROBE)
         .build()
     else {
-        return AuthProbeOutcome::Indeterminate;
+        return outcome_only(AuthProbeOutcome::Indeterminate);
     };
     match client
         .get(format!("{base}/api/cli/whoami"))
@@ -1579,16 +1615,153 @@ async fn auth_probe(creds: &Credentials) -> AuthProbeOutcome {
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                AuthProbeOutcome::Unauthorized
+                outcome_only(AuthProbeOutcome::Unauthorized)
             } else if status.is_success() {
-                AuthProbeOutcome::Ok
+                // An unparseable body downgrades to identity-less Ok: the
+                // probe's primary job is the key check, the identity is a
+                // bonus.
+                AuthProbeResult {
+                    outcome: AuthProbeOutcome::Ok,
+                    identity: res
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .map(|info| crate::commands::auth::whoami_cache_from_json(&info)),
+                }
             } else {
                 // 404, 5xx, anything else: treat as transient, don't tear down.
-                AuthProbeOutcome::Indeterminate
+                outcome_only(AuthProbeOutcome::Indeterminate)
             }
         }
-        Err(_) => AuthProbeOutcome::Indeterminate,
+        Err(_) => outcome_only(AuthProbeOutcome::Indeterminate),
     }
+}
+
+/// What the station heal should do with a probe-returned identity — a
+/// pure decision over `(fresh, cached)`, split out so it is unit-testable
+/// like the crate's other routing decisions (`pick_whoami_row`,
+/// `pick_station_first`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsorbDecision {
+    /// The body's `auth_type` contradicts the station key that made the
+    /// probe (older self-hosted server, rewriting proxy; the parse
+    /// default is `"user"`). Persisting it would clobber the USER slot on
+    /// every probe tick — the exact cross-identity write this branch
+    /// removes — and pushing it into the kiosk hello would be just as
+    /// wrong. Refuse everything, loudly: it means the server contract
+    /// moved.
+    Refuse,
+    /// Persist `fresh` AND have the caller (re)print the Web UI line: the
+    /// cached row was absent or named a different `station_id`, so the
+    /// boot print either said nothing or said the wrong station (host
+    /// re-provisioned with `login --token` while offline — the failed
+    /// identity fetch leaves the previous station's row in place).
+    WriteAndAnnounce,
+    /// Persist `fresh`, nothing to announce: same station, but the row is
+    /// past its TTL or a display field (name, org) changed — a dashboard
+    /// rename must not wait out the 24 h TTL while the hello frame
+    /// already shows the new name.
+    Write,
+    /// Same station, same display fields, row still fresh — don't touch
+    /// redb (the 300 s probe tick must not rewrite it every pass).
+    Keep,
+}
+
+impl AbsorbDecision {
+    fn persists(self) -> bool {
+        matches!(
+            self,
+            AbsorbDecision::WriteAndAnnounce | AbsorbDecision::Write
+        )
+    }
+}
+
+fn absorb_decision(
+    fresh: &crate::commands::db::WhoamiCache,
+    cached: Option<&crate::commands::db::WhoamiCache>,
+) -> AbsorbDecision {
+    if fresh.slot() != crate::commands::db::WhoamiSlot::Station {
+        return AbsorbDecision::Refuse;
+    }
+    let Some(cached) = cached else {
+        return AbsorbDecision::WriteAndAnnounce;
+    };
+    if cached.station_id != fresh.station_id {
+        return AbsorbDecision::WriteAndAnnounce;
+    }
+    let display_changed = cached.station_name != fresh.station_name
+        || cached.organization_slug != fresh.organization_slug
+        || cached.organization_name != fresh.organization_name;
+    if display_changed || crate::commands::auth::whoami_cache_is_stale(cached) {
+        AbsorbDecision::Write
+    } else {
+        AbsorbDecision::Keep
+    }
+}
+
+/// Fold a probe-returned identity into the station state: persist it to
+/// the station whoami slot per [`absorb_decision`], and push it into the
+/// running kiosk server's hello frame so tabs opened from now on identify
+/// correctly (tabs already connected keep the hello they received).
+/// Returns whether the caller should (re)print the Web UI line — the
+/// earlier boot print either had no `station_id` or printed a stale one.
+async fn absorb_station_identity(
+    fresh: &crate::commands::db::WhoamiCache,
+    server: Option<&crate::local_ws::Server>,
+) -> bool {
+    // One DB handle for the read and the write: `db::open()` can poll a
+    // cross-process lock for up to LOCK_WAIT, and this runs on every
+    // 300 s probe tick — no reason to pay it twice.
+    let decision = match crate::commands::db::open() {
+        Ok(db) => {
+            let cached = db
+                .get_whoami(crate::commands::db::WhoamiSlot::Station)
+                .ok()
+                .flatten();
+            let decision = absorb_decision(fresh, cached.as_ref());
+            if decision.persists() {
+                let _ = db.set_whoami(fresh);
+            }
+            decision
+        }
+        // Unreadable DB: decide as if the slot were empty — nothing can
+        // be persisted, but the hello push and the announcement don't
+        // depend on redb (the boot print couldn't read a station_id
+        // either, so announcing is consistent).
+        Err(_) => absorb_decision(fresh, None),
+    };
+    if decision == AbsorbDecision::Refuse {
+        log::warn(&format!(
+            "whoami probe answered auth_type '{}' for the station key; ignoring it",
+            fresh.auth_type,
+        ));
+        return false;
+    }
+    if let Some(s) = server {
+        s.set_identity(
+            crate::local_ws::HelloIdentity::from(fresh),
+            fresh.station_name.clone(),
+        )
+        .await;
+    }
+    decision == AbsorbDecision::WriteAndAnnounce
+}
+
+/// The operator-page URL line for this station. Base and org slug both
+/// come from the station credential record — the identity this daemon
+/// authenticates with — never from the whoami cache, so the printed URL
+/// can't mix instances (TP-1040). Only `station_id` comes from the cache
+/// (it exists nowhere else); callers gate on having one, printing nothing
+/// rather than something wrong. Returns the line instead of logging it so
+/// the URL construction is unit-testable — a hybrid URL is exactly what
+/// TP-1040 produced.
+fn web_ui_line(creds: &Credentials, station_id: &str) -> String {
+    format!(
+        "Web UI: {}/{}/operator/{}",
+        creds.base(),
+        creds.organization_slug,
+        station_id,
+    )
 }
 
 async fn try_start_run(
@@ -1762,5 +1935,124 @@ mod drain_tests {
             "inner run task must be aborted by the wrapper's Drop, not left running"
         );
         assert_eq!(inner_finished.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    use super::{absorb_decision, AbsorbDecision};
+    use crate::commands::db::WhoamiCache;
+
+    fn station_row(id: &str, name: &str, age_hours: i64) -> WhoamiCache {
+        WhoamiCache {
+            fetched_at: chrono::Utc::now() - chrono::Duration::hours(age_hours),
+            auth_type: "station".to_string(),
+            user_id: None,
+            user_name: None,
+            user_email: None,
+            station_name: Some(name.to_string()),
+            station_id: Some(id.to_string()),
+            organization_name: "Org".to_string(),
+            organization_slug: "org".to_string(),
+        }
+    }
+
+    // The guard that stops a cross-identity clobber (a 200 whose body
+    // doesn't say "station" must never be persisted or pushed) — this is
+    // the branch's safety net against reintroducing TP-1040 on the 300 s
+    // probe loop.
+    #[test]
+    fn refuses_a_non_station_body() {
+        let mut fresh = station_row("st_1", "Bench", 0);
+        fresh.auth_type = "user".to_string();
+        assert_eq!(absorb_decision(&fresh, None), AbsorbDecision::Refuse);
+        assert_eq!(
+            absorb_decision(&fresh, Some(&station_row("st_1", "Bench", 0))),
+            AbsorbDecision::Refuse,
+        );
+    }
+
+    #[test]
+    fn announces_when_the_slot_was_empty() {
+        assert_eq!(
+            absorb_decision(&station_row("st_1", "Bench", 0), None),
+            AbsorbDecision::WriteAndAnnounce,
+        );
+    }
+
+    // Host re-provisioned for a different station while offline: the boot
+    // print used the previous station's id, so the correct URL must be
+    // announced.
+    #[test]
+    fn announces_when_the_station_id_changed() {
+        assert_eq!(
+            absorb_decision(
+                &station_row("st_new", "Bench", 0),
+                Some(&station_row("st_old", "Bench", 0)),
+            ),
+            AbsorbDecision::WriteAndAnnounce,
+        );
+    }
+
+    // Dashboard rename: same station, fresh row — must persist without
+    // waiting out the 24 h TTL, but the boot URL was already correct so
+    // nothing is announced.
+    #[test]
+    fn writes_a_rename_without_waiting_for_the_ttl() {
+        assert_eq!(
+            absorb_decision(
+                &station_row("st_1", "Renamed", 0),
+                Some(&station_row("st_1", "Bench", 0)),
+            ),
+            AbsorbDecision::Write,
+        );
+    }
+
+    #[test]
+    fn writes_a_stale_row_even_when_nothing_changed() {
+        assert_eq!(
+            absorb_decision(
+                &station_row("st_1", "Bench", 0),
+                Some(&station_row("st_1", "Bench", 25)),
+            ),
+            AbsorbDecision::Write,
+        );
+    }
+
+    // The 300 s probe tick must not rewrite redb when nothing changed.
+    #[test]
+    fn keeps_a_fresh_unchanged_row() {
+        assert_eq!(
+            absorb_decision(
+                &station_row("st_1", "Bench", 0),
+                Some(&station_row("st_1", "Bench", 1)),
+            ),
+            AbsorbDecision::Keep,
+        );
+    }
+}
+
+#[cfg(test)]
+mod web_ui_tests {
+    use super::web_ui_line;
+    use crate::commands::auth::credentials::Credentials;
+
+    // A hybrid URL — base from one identity, slug from another — is
+    // exactly what TP-1040 produced. The line must be a pure function of
+    // the single credential record (plus the station id), with the base's
+    // trailing slash collapsed.
+    #[test]
+    fn web_ui_line_comes_from_the_credential_record_alone() {
+        let creds = Credentials {
+            api_key: "k".into(),
+            base_url: "https://x.app/".into(),
+            organization_slug: "org".into(),
+            installation_id: Some("inst_1".into()),
+            ca_cert: None,
+        };
+        assert_eq!(
+            web_ui_line(&creds, "st_1"),
+            "Web UI: https://x.app/org/operator/st_1",
+        );
     }
 }

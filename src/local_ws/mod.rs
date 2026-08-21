@@ -382,6 +382,25 @@ struct HelloPayload {
     capabilities: Vec<String>,
 }
 
+impl HelloPayload {
+    /// The one identity→payload fan-out, shared by `Server::start` and
+    /// `set_identity` — same promise as the `From<&WhoamiCache>` impl
+    /// below: a single mapping, so a new identity field can't be wired
+    /// into one site and missed in the other. Note the
+    /// `station_id → analytics_station_id` rename: the payload's
+    /// top-level `station_id` carries the installation id and is NOT
+    /// touched here.
+    fn apply_identity(&mut self, identity: HelloIdentity) {
+        self.auth_type = identity.auth_type;
+        self.organization_slug = identity.organization_slug;
+        self.organization_name = identity.organization_name;
+        self.analytics_station_id = identity.station_id;
+        self.user_id = identity.user_id;
+        self.user_email = identity.user_email;
+        self.user_name = identity.user_name;
+    }
+}
+
 /// Identity bundle threaded into `Server::start`. Mirrors the subset
 /// of `WhoamiCache` the operator-UI cares about. Defaults to all-None
 /// so callers without a whoami cache (e.g. unauthenticated `run --kiosk`)
@@ -795,21 +814,23 @@ impl Server {
         let (placeholder_cancel, _placeholder_cancel_rx) =
             crate::commands::run::cancel::CancelToken::new();
 
-        let hello = Arc::new(Mutex::new(HelloPayload {
+        let mut hello_payload = HelloPayload {
             kind: "hello",
             station_id,
             station_name,
             procedures: Vec::new(),
             mode,
-            auth_type: identity.auth_type,
-            organization_slug: identity.organization_slug,
-            organization_name: identity.organization_name,
-            analytics_station_id: identity.station_id,
-            user_id: identity.user_id,
-            user_email: identity.user_email,
-            user_name: identity.user_name,
+            auth_type: None,
+            organization_slug: None,
+            organization_name: None,
+            analytics_station_id: None,
+            user_id: None,
+            user_email: None,
+            user_name: None,
             capabilities: Vec::new(),
-        }));
+        };
+        hello_payload.apply_identity(identity);
+        let hello = Arc::new(Mutex::new(hello_payload));
 
         // Random session token (UUIDv4 → 122 random bits), hex-encoded.
         // Generated even when studio never gets enabled — a token that
@@ -1063,6 +1084,26 @@ impl Server {
                 deployment_id: String::new(),
             })
             .await;
+        }
+    }
+
+    /// Update the hello frame's identity envelope (and, when known, the
+    /// displayed station name) on a running server. Tabs already connected
+    /// keep the hello they received — there is no re-broadcast — so this
+    /// only helps connections opened AFTERWARDS. On the boot that heals an
+    /// empty station slot, the auto-launched kiosk tab usually connects
+    /// before the auth probe returns and therefore keeps the anonymous
+    /// hello (its PostHog identify no-ops) until a reload or the next
+    /// boot; the tab that does benefit is the dashboard Web-UI tab the
+    /// operator opens from the URL the heal prints. Re-identifying live
+    /// tabs would need an identity frame in the protocol plus an SPA
+    /// handler — deliberately out of scope for the analytics-only stake
+    /// (TP-1040).
+    pub async fn set_identity(&self, identity: HelloIdentity, station_name: Option<String>) {
+        let mut h = self.state.hello.lock().await;
+        h.apply_identity(identity);
+        if let Some(name) = station_name {
+            h.station_name = name;
         }
     }
 

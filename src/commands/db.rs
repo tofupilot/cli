@@ -270,6 +270,63 @@ pub struct PullState {
 // Whoami cache
 // ---------------------------------------------------------------------------
 
+/// Identity slot for the whoami cache, mirroring the two credential files
+/// (`credentials.json` / `station.json`). The cache used to be a single
+/// last-writer-wins row, so a user-side `whoami` refresh silently evicted
+/// the station identity the daemon banner, Web-UI line and kiosk analytics
+/// rely on (TP-1040). One row per identity ends that interference the same
+/// way the credential-file split (#1573) did for API keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhoamiSlot {
+    User,
+    Station,
+}
+
+impl WhoamiSlot {
+    fn key(self) -> &'static str {
+        match self {
+            WhoamiSlot::User => "user",
+            WhoamiSlot::Station => "station",
+        }
+    }
+
+    /// The slot a fetched identity belongs to. The server's `auth_type` is
+    /// authoritative on which kind of key made the call; anything else
+    /// (including the parse default `"user"`) routes to the user slot.
+    /// Private: outside callers go through [`WhoamiCache::slot`].
+    fn for_auth_type(auth_type: &str) -> Self {
+        if auth_type == "station" {
+            WhoamiSlot::Station
+        } else {
+            WhoamiSlot::User
+        }
+    }
+}
+
+/// Pre-split installs stored a single row under this key, written by
+/// whichever login or `whoami` refresh ran last.
+const LEGACY_WHOAMI_KEY: &str = "current";
+
+/// Row selection for [`StateDb::get_whoami`], split out so the legacy
+/// fallback is unit-testable without a real redb file (same idiom as
+/// `credentials::pick_station_first`). The slotted row always wins; the
+/// legacy row is served only to the slot matching its own `auth_type`,
+/// never across identities — cross-serving was the TP-1040 hazard.
+fn pick_whoami_row(
+    slotted: Option<WhoamiCache>,
+    legacy: Option<WhoamiCache>,
+    slot: WhoamiSlot,
+) -> Option<WhoamiCache> {
+    slotted.or_else(|| legacy.filter(|row| row.slot() == slot))
+}
+
+/// Convenience read of one whoami slot through a fresh DB handle,
+/// swallowing IO errors — the cache is display data, so absence and an
+/// unreadable DB are the same non-event to callers.
+pub fn cached_whoami(slot: WhoamiSlot) -> Option<WhoamiCache> {
+    open().ok()?.get_whoami(slot).ok()?
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WhoamiCache {
     pub fetched_at: chrono::DateTime<chrono::Utc>,
@@ -286,6 +343,15 @@ pub struct WhoamiCache {
     pub station_id: Option<String>,
     pub organization_name: String,
     pub organization_slug: String,
+}
+
+impl WhoamiCache {
+    /// The slot this row belongs to, derived from the server-reported
+    /// `auth_type`. Split out (rather than inlined at each call site) so
+    /// writers and the legacy-row fallback can never disagree on routing.
+    pub fn slot(&self) -> WhoamiSlot {
+        WhoamiSlot::for_auth_type(&self.auth_type)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,18 +538,39 @@ impl StateDb {
 
     // -- Whoami cache --
 
-    pub fn get_whoami(&self) -> CliResult<Option<WhoamiCache>> {
-        self.get(LOGIN_WHOAMI, "current")?
+    /// Read the cached identity for one slot. Falls back to the pre-split
+    /// `"current"` row when the slot is empty AND that row's `auth_type`
+    /// matches the requested slot — so an existing station keeps its
+    /// banner, Web-UI line and analytics identity across the upgrade
+    /// without a re-login. The legacy row is shadowed by the first slotted
+    /// write and removed by [`Self::clear_whoami`]. Most callers want the
+    /// one-shot [`cached_whoami`]; use this directly only to share one DB
+    /// handle across a read and a write (the station heal).
+    pub fn get_whoami(&self, slot: WhoamiSlot) -> CliResult<Option<WhoamiCache>> {
+        Ok(pick_whoami_row(
+            self.read_whoami(slot.key())?,
+            self.read_whoami(LEGACY_WHOAMI_KEY)?,
+            slot,
+        ))
+    }
+
+    fn read_whoami(&self, key: &str) -> CliResult<Option<WhoamiCache>> {
+        self.get(LOGIN_WHOAMI, key)?
             .map(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("Deserialize: {e}")))
             .transpose()
             .map_err(Into::into)
     }
 
+    /// Store a fetched identity in the slot matching its own `auth_type`.
+    /// Routing lives here (not at call sites) so a login and a `whoami`
+    /// refresh can never file the same response under different slots.
     pub fn set_whoami(&self, cache: &WhoamiCache) -> CliResult<()> {
         let bytes = serde_json::to_vec(cache).map_err(|e| format!("Serialize: {e}"))?;
-        self.set(LOGIN_WHOAMI, "current", &bytes)
+        self.set(LOGIN_WHOAMI, cache.slot().key(), &bytes)
     }
 
+    /// Remove every cached identity — both slots and the legacy row.
+    /// Logout is a full reset, matching `credentials::clear()`.
     pub fn clear_whoami(&self) -> CliResult<()> {
         let txn = self
             .inner
@@ -491,7 +578,13 @@ impl StateDb {
             .map_err(|e| format!("Write txn: {e}"))?;
         {
             if let Ok(mut tbl) = txn.open_table(LOGIN_WHOAMI) {
-                let _ = tbl.remove("current");
+                for key in [
+                    WhoamiSlot::User.key(),
+                    WhoamiSlot::Station.key(),
+                    LEGACY_WHOAMI_KEY,
+                ] {
+                    let _ = tbl.remove(key);
+                }
             }
         }
         txn.commit().map_err(|e| format!("Commit: {e}"))?;
@@ -659,5 +752,70 @@ impl StateDb {
             items.push((k, v));
         }
         Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(auth_type: &str) -> WhoamiCache {
+        WhoamiCache {
+            fetched_at: chrono::Utc::now(),
+            auth_type: auth_type.to_string(),
+            user_id: None,
+            user_name: None,
+            user_email: None,
+            station_name: None,
+            station_id: None,
+            organization_name: "Org".to_string(),
+            organization_slug: "org".to_string(),
+        }
+    }
+
+    #[test]
+    fn slot_routes_station_auth_type_to_station() {
+        assert_eq!(row("station").slot(), WhoamiSlot::Station);
+    }
+
+    #[test]
+    fn slot_routes_user_auth_type_to_user() {
+        assert_eq!(row("user").slot(), WhoamiSlot::User);
+    }
+
+    // `fetch_whoami` defaults a missing `auth_type` to "user"; anything
+    // unrecognized must land in the user slot rather than shadow the
+    // station identity.
+    #[test]
+    fn slot_routes_unknown_auth_type_to_user() {
+        assert_eq!(row("something-new").slot(), WhoamiSlot::User);
+    }
+
+    #[test]
+    fn pick_prefers_the_slotted_row_over_legacy() {
+        let picked = pick_whoami_row(Some(row("station")), Some(row("user")), WhoamiSlot::Station);
+        assert_eq!(picked.unwrap().auth_type, "station");
+    }
+
+    // Upgrade path: a pre-split station install has only the legacy row;
+    // the station slot read must serve it so the daemon keeps its
+    // identity without a re-login.
+    #[test]
+    fn pick_serves_legacy_to_its_matching_slot() {
+        let picked = pick_whoami_row(None, Some(row("station")), WhoamiSlot::Station);
+        assert_eq!(picked.unwrap().auth_type, "station");
+    }
+
+    // The TP-1040 hazard: a legacy row written by the other identity must
+    // never answer this slot's read.
+    #[test]
+    fn pick_filters_legacy_from_the_other_slot() {
+        assert!(pick_whoami_row(None, Some(row("station")), WhoamiSlot::User).is_none());
+        assert!(pick_whoami_row(None, Some(row("user")), WhoamiSlot::Station).is_none());
+    }
+
+    #[test]
+    fn pick_none_when_neither_present() {
+        assert!(pick_whoami_row(None, None, WhoamiSlot::User).is_none());
     }
 }

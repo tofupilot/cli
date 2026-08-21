@@ -30,9 +30,22 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     // open, whether or not the server then starts.
     crate::commands::studio_recents::record(&root);
 
-    let whoami = crate::commands::db::open()
-        .ok()
-        .and_then(|db| db.get_whoami().ok().flatten());
+    // The credential record resolved here drives every URL part below and
+    // is the same identity the run upload later re-resolves — see the
+    // pairing-URL comment before `base` for why nothing URL-shaped may
+    // come from anywhere else.
+    let creds = crate::commands::auth::credentials::load();
+
+    // Displayed identity only, never URL parts. Read from the slot
+    // matching the credential record so a row written by the other login
+    // (a station on a dev laptop, a user on a bench host) can't leak into
+    // this session's hello frame.
+    let whoami = crate::commands::db::cached_whoami(
+        creds
+            .as_ref()
+            .map(|c| c.whoami_slot())
+            .unwrap_or(crate::commands::db::WhoamiSlot::User),
+    );
     let identity = whoami
         .as_ref()
         .map(crate::local_ws::HelloIdentity::from)
@@ -115,10 +128,19 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     // Dashboard URL when we know the org; otherwise a bare local
     // pairing hint. Token rides the fragment on purpose — it is
     // consumed by the Studio page's JS and never reaches any server.
-    let base = crate::commands::auth::credentials::load()
-        .map(|c| c.base().trim_end_matches('/').to_string())
+    //
+    // Base AND org slug come from the same credential record — the one
+    // `handle_upload_run` re-resolves — so the URL is consistent by
+    // construction with where the run actually uploads. They used to come
+    // from different identity sources (user-first credentials vs the
+    // last-writer whoami cache), which on a machine holding both a user
+    // and a station login printed a hybrid URL pointing at no real org
+    // (TP-1040).
+    let base = creds
+        .as_ref()
+        .map(|c| c.base().to_string())
         .unwrap_or_else(|| crate::commands::auth::config::DEFAULT_BASE_URL.to_string());
-    let org_slug = whoami.as_ref().map(|w| w.organization_slug.clone());
+    let org_slug = creds.as_ref().map(|c| c.organization_slug.clone());
 
     eprintln!();
     eprintln!("  Studio session for {}", root.display());

@@ -1,3 +1,11 @@
+// Rust 1.98's clippy extended `result_large_err` to async fns, flagging
+// every helper here that returns `Result<_, StudioResponse>` (the Err is
+// ~672 bytes). The real fix is boxing `StudioResponse` in
+// `station_protocol` — a signature change across this file and its
+// callers, not a lint-appeasement edit. Allowed until that pass happens;
+// these are per-RPC-request paths, not hot loops.
+#![allow(clippy::result_large_err)]
+
 //! Studio RPC surface on the loopback server.
 //!
 //! Serves `POST /studio/rpc` (a `StudioRequest` JSON body → one

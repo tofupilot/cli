@@ -39,6 +39,28 @@ impl Credentials {
     pub fn base(&self) -> &str {
         self.base_url.trim_end_matches('/')
     }
+
+    /// The whoami-cache slot this record's identity reads from — same
+    /// routing rule as [`save`]: a station login carries an
+    /// `installation_id`, a user login doesn't. Commands that resolve a
+    /// credential record use this so the displayed identity always comes
+    /// from the same identity as the requests they make.
+    ///
+    /// Reads route on `installation_id` while cache WRITES route on the
+    /// server-reported `auth_type` (`db::set_whoami`). They agree because
+    /// of a server contract nothing here can assert: the login endpoint
+    /// returns `installation_id: null` exactly for user logins, and
+    /// `/api/cli/whoami` derives `auth_type` from the kind of key that
+    /// made the call. If the server ever broke that pairing, the symptom
+    /// would be silent — the read slot never sees the writes, so the
+    /// cache looks permanently stale.
+    pub fn whoami_slot(&self) -> super::super::db::WhoamiSlot {
+        if self.installation_id.is_some() {
+            super::super::db::WhoamiSlot::Station
+        } else {
+            super::super::db::WhoamiSlot::User
+        }
+    }
 }
 
 /// Filesystem path to the *user* credentials JSON. Public so the
@@ -415,5 +437,14 @@ mod tests {
     #[test]
     fn station_first_none_when_neither_present() {
         assert!(pick_station_first(None, None).is_none());
+    }
+
+    // whoami_slot must follow the same routing rule as `save`: the
+    // presence of an installation_id decides the identity.
+    #[test]
+    fn whoami_slot_follows_installation_id() {
+        use crate::commands::db::WhoamiSlot;
+        assert_eq!(creds("https://x.app").whoami_slot(), WhoamiSlot::User);
+        assert_eq!(station("inst_1").whoami_slot(), WhoamiSlot::Station);
     }
 }

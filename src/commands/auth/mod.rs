@@ -57,16 +57,12 @@ struct RedeemTokenResponse {
     replaced_installations: u32,
 }
 
-fn load_whoami_cache() -> Option<db::WhoamiCache> {
-    db::open().ok()?.get_whoami().ok()?
-}
-
 /// True when a cached identity is older than `WHOAMI_CACHE_TTL` (or the
 /// timestamp is in the future from a clock step). A non-stale cache is
 /// served without any network call. The future-side check mirrors the
 /// update throttle: a backward clock jump shouldn't pin the cache as
 /// "fresh" forever.
-fn whoami_cache_is_stale(cache: &db::WhoamiCache) -> bool {
+pub(crate) fn whoami_cache_is_stale(cache: &db::WhoamiCache) -> bool {
     let age = chrono::Utc::now() - cache.fetched_at;
     match chrono::Duration::from_std(timeouts::WHOAMI_CACHE_TTL) {
         Ok(ttl) => age >= ttl || age < chrono::Duration::zero(),
@@ -77,6 +73,22 @@ fn whoami_cache_is_stale(cache: &db::WhoamiCache) -> bool {
 fn save_whoami_cache(cache: &db::WhoamiCache) {
     if let Ok(db) = db::open() {
         let _ = db.set_whoami(cache);
+    }
+}
+
+/// Best-effort, silent whoami refresh for `whoami_cmd`'s stale-cache
+/// path: bounded by `AUTH_PROBE`, saved to the slot matching the
+/// response's `auth_type`, failures swallowed — the caller has already
+/// displayed the cached identity.
+async fn refresh_whoami(creds: &Credentials) {
+    let Ok(client) = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()
+    else {
+        return;
+    };
+    if let Ok(fresh) = fetch_whoami(&client, creds).await {
+        save_whoami_cache(&fresh);
     }
 }
 
@@ -308,7 +320,10 @@ async fn teardown_boot_service() {
 pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
     let creds = credentials::load().ok_or("not logged in, run `tofupilot login`")?;
 
-    if let Some(cache) = load_whoami_cache() {
+    // Read the slot matching the credential record the refresh below will
+    // query with, so the displayed identity and the fetch can never
+    // belong to different logins.
+    if let Some(cache) = db::cached_whoami(creds.whoami_slot()) {
         display_whoami(&cache, json_mode);
         // Refresh only when the cache is stale, so the common case is
         // instant and offline never stalls. A stale-cache refresh is still
@@ -316,14 +331,7 @@ pub async fn whoami_cmd(json_mode: bool) -> Result<(), CliError> {
         // the cached identity, so a failed refresh costs nothing but the
         // probe wait, and only once per TTL.
         if whoami_cache_is_stale(&cache) {
-            if let Ok(client) = crate::http::client_builder()
-                .timeout(timeouts::AUTH_PROBE)
-                .build()
-            {
-                if let Ok(fresh) = fetch_whoami(&client, &creds).await {
-                    save_whoami_cache(&fresh);
-                }
-            }
+            refresh_whoami(&creds).await;
         }
         return Ok(());
     }
@@ -433,7 +441,15 @@ async fn fetch_whoami(client: &Client, creds: &Credentials) -> Result<db::Whoami
         .json()
         .await?;
 
-    Ok(db::WhoamiCache {
+    Ok(whoami_cache_from_json(&info))
+}
+
+/// Parse a `/api/cli/whoami` response body into a cache row, stamped now.
+/// Shared with the station daemon's auth probe, which hits the same
+/// endpoint and feeds the identity to the station slot instead of
+/// discarding the body (one round-trip serves both purposes).
+pub(crate) fn whoami_cache_from_json(info: &serde_json::Value) -> db::WhoamiCache {
+    db::WhoamiCache {
         fetched_at: chrono::Utc::now(),
         auth_type: info["auth_type"].as_str().unwrap_or("user").to_string(),
         user_id: info["user_id"].as_str().map(str::to_string),
@@ -443,7 +459,7 @@ async fn fetch_whoami(client: &Client, creds: &Credentials) -> Result<db::Whoami
         station_id: info["station_id"].as_str().map(str::to_string),
         organization_name: info["organization_name"].as_str().unwrap_or("").to_string(),
         organization_slug: info["organization_slug"].as_str().unwrap_or("").to_string(),
-    })
+    }
 }
 
 async fn redeem_token(

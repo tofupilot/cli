@@ -853,9 +853,17 @@ pub async fn start(
         let server = match local_ws_server.clone() {
             Some(s) => Some(s),
             None => {
-                let identity = crate::commands::db::open()
-                    .ok()
-                    .and_then(|db| db.get_whoami().ok().flatten())
+                // Displayed identity from the slot matching the credential
+                // record this run uploads with (the `creds` parameter, not
+                // a fresh disk read — callers may have resolved a different
+                // record than `load()` would), so the hello frame can't
+                // carry the other login's identity (TP-1040). A credless
+                // run falls back to the user slot, matching what `load()`
+                // resolves first on a machine that later logs in.
+                let whoami_slot = creds
+                    .map(|c| c.whoami_slot())
+                    .unwrap_or(crate::commands::db::WhoamiSlot::User);
+                let identity = crate::commands::db::cached_whoami(whoami_slot)
                     .map(|w| crate::local_ws::HelloIdentity::from(&w))
                     .unwrap_or_default();
                 // Foreground `run --kiosk` never installs a station-command
