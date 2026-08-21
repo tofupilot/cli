@@ -109,12 +109,12 @@ pub struct GrantedRoot {
 }
 
 impl GrantedRoot {
-    /// `path` should be canonical — `enable_studio` and the picker
-    /// canonicalize before calling. `with_recents_file` is the third
-    /// caller and feeds paths straight from JSON WITHOUT canonicalizing:
-    /// that fails closed (every resolver rejects a non-canonical root),
-    /// but it means this constructor cannot assume canonicality — only
-    /// the resolvers' checks make the invariant hold.
+    /// `path` must be canonical. All three callers canonicalize before
+    /// calling: `enable_studio`, the folder picker, and
+    /// `with_recents_file`. The confinement checks build on it, and a
+    /// non-canonical root does not fail cleanly — it fails EVERY
+    /// resolver while the project still lists, which reads as a broken
+    /// project rather than a rejected one.
     fn new(path: PathBuf) -> Self {
         let name = path
             .file_name()
@@ -170,6 +170,24 @@ impl StudioConfig {
     pub fn with_recents_file(root: PathBuf, recents_file: PathBuf) -> Self {
         let mut granted = vec![GrantedRoot::new(root)];
         for past in crate::commands::studio_recents::existing_from(&recents_file) {
+            // `record_in` only ever stores canonical roots, but the file
+            // outlives the paths in it: a project moved behind a symlink
+            // (autofs or NFS home, a restored recents file) leaves an
+            // entry that is no longer canonical. That does NOT fail
+            // closed the way a rejected root would — `list_files` at the
+            // root passes the confinement check trivially, so the
+            // project lists and browses while every open, save, validate
+            // and run answers `path escapes studio root`. Worse, it is
+            // self-perpetuating: `open_project` writes the bad spelling
+            // straight back.
+            //
+            // So canonicalize here and drop what cannot be resolved. The
+            // extra stat is on a path `existing_from` just touched, and
+            // a dropped entry costs one row in the switcher — against a
+            // project that looks fine and works for nothing.
+            let Ok(past) = std::fs::canonicalize(&past) else {
+                continue;
+            };
             if !granted.iter().any(|g| g.path == past) {
                 granted.push(GrantedRoot::new(past));
             }
@@ -375,7 +393,10 @@ async fn resolve_existing(canon_root: &Path, rel: &Path) -> Result<PathBuf, Stud
 /// un-canonicalized path: `symlink_metadata` follows intermediate
 /// links but not the last component, and where intermediates land is
 /// already the canonical policy's job. Not reachable from the sidebar
-/// today (`list_files` skips symlinks), so this guards direct callers.
+/// today (`list_files` skips symlinks), so this guards direct callers:
+/// the assistant, a script, a project that pins
+/// `procedure.yaml -> procedures/v2.yaml`. Every op that writes to or
+/// removes a path calls it.
 async fn refuse_final_symlink(canon_root: &Path, rel: &Path) -> Result<(), StudioResponse> {
     let full = canon_root.join(rel);
     if let Ok(meta) = tokio::fs::symlink_metadata(&full).await {
@@ -1088,14 +1109,14 @@ async fn discover_procedures(root: &Path) -> Vec<station_protocol::StudioProcedu
             break;
         }
         let abs_dir = root.join(&rel_dir);
-        for name in ["procedure.yaml", "procedure.yml"] {
+        for name in crate::commands::run::engine::PROCEDURE_FILENAMES {
             if tokio::fs::try_exists(abs_dir.join(name))
                 .await
                 .unwrap_or(false)
             {
                 found.push((rel_dir.clone(), rel_dir.join(name)));
                 // One procedure per directory: `.yaml` wins over
-                // `.yml`, matching `find_procedure_yaml`'s order.
+                // `.yml`, which is the shared list's order.
                 break;
             }
         }
@@ -1146,6 +1167,12 @@ async fn discover_procedures(root: &Path) -> Vec<station_protocol::StudioProcedu
     procedures
 }
 
+/// Answer for the two ops that discover against the authorization
+/// snapshot and then commit under the lock. Phrased for the dashboard,
+/// which retries by refreshing after the switch it just made.
+const PROJECT_MOVED_UNDER_REQUEST: &str =
+    "the active project changed while this request was in flight; retry";
+
 async fn project_info(state: &AppState, root: &Path) -> StudioResponse {
     let name = root
         .file_name()
@@ -1161,6 +1188,18 @@ async fn project_info(state: &AppState, root: &Path) -> StudioResponse {
     // dispatcher all resolve the same procedure this reply names.
     let mut guard = state.studio.lock().await;
     let procedure_path = if let Some(config) = guard.as_mut() {
+        // `root` is from the authorization snapshot and discovery above
+        // awaited, so an `open_project` or `pick_project` may have
+        // landed in between. Writing now would leave `active_procedure`
+        // naming a path under the project we walked while `active()` is
+        // another one — `get_sequence` then answers NotFound for a
+        // procedure the UI is displaying, and a run dies in
+        // `prepare_run` with a synthetic crash. Refuse instead: the
+        // switch that overtook us triggers its own refresh, so this
+        // reply was already superseded.
+        if config.active() != root {
+            return err(StudioErrorCode::Busy, PROJECT_MOVED_UNDER_REQUEST);
+        }
         let still_there = config
             .active_procedure()
             .map(|rel| rel.to_string_lossy().replace('\\', "/"))
@@ -1219,6 +1258,13 @@ async fn open_procedure(state: &AppState, root: &Path, path: &str) -> StudioResp
     let Some(config) = guard.as_mut() else {
         return err(StudioErrorCode::Forbidden, "studio surface is not enabled");
     };
+    // Same snapshot race as `project_info`: the membership check above
+    // ran against the root this request was authorized on, so committing
+    // the selection after a project switch would authorize a path under
+    // project A into project B's session.
+    if config.active() != root {
+        return err(StudioErrorCode::Busy, PROJECT_MOVED_UNDER_REQUEST);
+    }
     config.set_active_procedure(PathBuf::from(&procedure.path));
     StudioResponse::ProcedureOpened { procedure }
 }
@@ -1720,6 +1766,14 @@ async fn write_file(
             format!("content is {} bytes (cap {MAX_WRITE_BYTES})", content.len()),
         );
     }
+    // Same refusal delete/move/copy make. `resolve_for_write` already
+    // re-confines a symlinked target, so nothing escapes the root — but
+    // the write would land on the pointee while the reply names the
+    // link, and the sha the editor then holds belongs to a file the
+    // user was not editing.
+    if let Err(e) = refuse_final_symlink(root, &rel).await {
+        return e;
+    }
     // Auto-create missing parent directories: agent/user writes may
     // target new subtrees (plugs/multimeter.py). Confined descent, not
     // `create_dir_all`: clamp_rel proves the NAME is clean, but an
@@ -2090,6 +2144,12 @@ async fn write_resource(
                 bytes.len()
             ),
         );
+    }
+    // Same symlink refusal as write_file and the destructive ops: the
+    // pointee is what would be overwritten, while the reply names the
+    // link.
+    if let Err(e) = refuse_final_symlink(root, &rel).await {
+        return e;
     }
     // Same parent auto-creation as write_file: resources/ typically
     // does not exist before the first upload. Same confined descent —
@@ -2645,6 +2705,42 @@ mod tests {
         assert_eq!(config.granted().len(), 2, "no duplicate on re-activation");
     }
 
+    /// A recents entry that stopped being canonical must not be granted
+    /// as written. Every resolver compares against the granted root
+    /// with `starts_with` AFTER canonicalizing the target, so the
+    /// symlinked spelling matches nothing — while `list_files` at the
+    /// root passes trivially. The result is a project that lists and
+    /// browses and cannot open a single file.
+    #[cfg(unix)]
+    #[test]
+    fn recents_roots_are_canonicalized_on_the_way_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let real = base.join("real-project");
+        std::fs::create_dir(&real).unwrap();
+        let link = base.join("link-to-project");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let launched = base.join("launched");
+        std::fs::create_dir(&launched).unwrap();
+
+        let recents = base.join("studio-recents.json");
+        // `is_dir()` follows the link, so `existing_from` keeps this
+        // entry — the drop only happens for paths that cannot resolve.
+        std::fs::write(
+            &recents,
+            format!("{{\"roots\":[{:?}]}}", link.to_str().unwrap()),
+        )
+        .unwrap();
+
+        let config = StudioConfig::with_recents_file(launched.clone(), recents);
+        let paths: Vec<&Path> = config.granted().iter().map(|g| g.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![launched.as_path(), real.as_path()],
+            "the symlinked spelling must be replaced by its target"
+        );
+    }
+
     /// The monorepo shape this exists for: one procedure per named
     /// subdirectory, sharing the root's pyproject and having none of
     /// their own. Anchoring discovery on `pyproject.toml` (what the git
@@ -2845,6 +2941,64 @@ mod tests {
             "got {refused:?}"
         );
         assert!(root.join("keep.py").exists(), "the project must survive");
+    }
+
+    /// The write paths refuse the same in-project symlink the
+    /// destructive ops do. `resolve_for_write` re-confines the pointee,
+    /// so nothing escapes the root either way — what is at stake is that
+    /// the write would land on the pointee while the reply names the
+    /// link, leaving the editor holding a sha for a file the user was
+    /// not editing.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_paths_refuse_an_in_project_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("procedures")).unwrap();
+        std::fs::write(root.join("procedures/v2.yaml"), "name: V2\n").unwrap();
+        std::os::unix::fs::symlink(root.join("procedures/v2.yaml"), root.join("procedure.yaml"))
+            .unwrap();
+        std::fs::create_dir(root.join("resources")).unwrap();
+        std::fs::write(root.join("resources/real.png"), b"png").unwrap();
+        std::os::unix::fs::symlink(
+            root.join("resources/real.png"),
+            root.join("resources/link.png"),
+        )
+        .unwrap();
+
+        let refused = write_file(root, "procedure.yaml", "name: HIJACKED\n", None).await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "write_file got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("procedures/v2.yaml")).unwrap(),
+            "name: V2\n",
+            "the pointee must be untouched"
+        );
+
+        let refused = write_resource(root, "resources/link.png", "aGk=", true).await;
+        assert!(
+            matches!(
+                refused,
+                StudioResponse::Error {
+                    code: StudioErrorCode::Forbidden,
+                    ..
+                }
+            ),
+            "write_resource got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("resources/real.png")).unwrap(),
+            b"png",
+            "the pointee must be untouched"
+        );
     }
 
     /// An in-project symlink is refused by delete and move alike: the

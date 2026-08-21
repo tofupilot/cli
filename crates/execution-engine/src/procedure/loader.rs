@@ -341,6 +341,34 @@ plugs:
         result
     }
 
+    /// Public API on a shared crate: the CLI reads it to name a
+    /// procedure, and Studio's project discovery labels every row in the
+    /// switcher with it. A blank name has to read as "no name" so the
+    /// caller falls back to the holding directory, rather than
+    /// labelling the row with an empty string.
+    #[test]
+    fn procedure_name_from_str_reads_the_name_or_nothing() {
+        assert_eq!(
+            procedure_name_from_str("name: Board Test\nversion: 1.0.0\n").as_deref(),
+            Some("Board Test")
+        );
+        // Trimmed, because the YAML carries whatever the author typed.
+        assert_eq!(
+            procedure_name_from_str("name: \"  Padded  \"\n").as_deref(),
+            Some("Padded")
+        );
+        // Present but empty, and whitespace-only, are both "no name".
+        assert_eq!(procedure_name_from_str("name: \"\"\n"), None);
+        assert_eq!(procedure_name_from_str("name: \"   \"\n"), None);
+        // No `name:` key at all, and not a mapping at all.
+        assert_eq!(procedure_name_from_str("version: 1.0.0\n"), None);
+        assert_eq!(procedure_name_from_str("- just\n- a list\n"), None);
+        // Unparseable YAML answers None instead of panicking: this runs
+        // over files the operator is in the middle of editing.
+        assert_eq!(procedure_name_from_str("name: [unclosed\n"), None);
+        assert_eq!(procedure_name_from_str(""), None);
+    }
+
     #[test]
     fn version_may_be_omitted() {
         let result = load_from_str(

@@ -164,7 +164,8 @@ enum Commands {
     // Remove `hide` when Studio ships.
     #[command(hide = true)]
     Studio {
-        /// Project directory to serve (defaults to the current directory)
+        /// Project directory to serve (default: here if it holds a
+        /// procedure.yaml, else the last project opened)
         #[arg(value_name = "PATH")]
         path: Option<std::path::PathBuf>,
         /// Print the Studio URL without opening a browser

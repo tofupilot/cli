@@ -7,6 +7,7 @@ No external dependencies beyond the Python standard library.
 
 import sys
 import json
+import logging
 import math
 import os
 import re
@@ -115,6 +116,21 @@ def _debug_this_thread():
 # Logging (inlined from tp_logs.py)
 # ============================================================================
 
+def _relativize_log_path(file_path):
+    """Strip the worker's base directory prefix so log origins render as
+    project-relative paths in the console."""
+    import os as _os
+
+    try:
+        if file_path and file_path.startswith("/"):
+            base_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+            if file_path.startswith(base_dir):
+                return _os.path.relpath(file_path, base_dir)
+    except Exception:
+        pass
+    return file_path
+
+
 class Logs:
     def __init__(self, job_id=None, event_queue=None):
         self.entries = []
@@ -125,32 +141,24 @@ class Logs:
         # reaches its natural completion).
         self.event_queue = event_queue
 
-    def _add_log(self, level: str, message: str):
+    def _add_log(self, level: str, message: str, file=None, line=None):
         from datetime import datetime, timezone
         import inspect as _inspect
-        import os as _os
 
-        frame = _inspect.currentframe()
-        caller_frame = (
-            frame.f_back.f_back
-            if frame and frame.f_back and frame.f_back.f_back
-            else None
-        )
-
-        file_path = None
-        line_number = None
-        if caller_frame:
-            file_path = caller_frame.f_code.co_filename
-            line_number = caller_frame.f_lineno
-            try:
-                if file_path.startswith("/"):
-                    base_dir = _os.path.dirname(
-                        _os.path.dirname(_os.path.abspath(__file__))
-                    )
-                    if file_path.startswith(base_dir):
-                        file_path = _os.path.relpath(file_path, base_dir)
-            except:
-                pass
+        file_path = file
+        line_number = line
+        if file_path is None and line_number is None:
+            # Called through info()/warning()/... — walk two frames up to
+            # find the phase code that made the call.
+            frame = _inspect.currentframe()
+            caller_frame = (
+                frame.f_back.f_back
+                if frame and frame.f_back and frame.f_back.f_back
+                else None
+            )
+            if caller_frame:
+                file_path = _relativize_log_path(caller_frame.f_code.co_filename)
+                line_number = caller_frame.f_lineno
 
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -248,6 +256,32 @@ class LogCapturingStream:
 
     def flush(self):
         pass
+
+
+class StdlibLoggingBridge(logging.Handler):
+    """Forwards stdlib `logging` records into the phase's Logs pipeline.
+
+    Without this, a phase using `logging.getLogger(...)` gets its records
+    written to stderr by Python's last-resort handler, where the stderr
+    capture flattens every level to WARNING and drops DEBUG/INFO entirely.
+    Attaching a real handler preserves the record's level, file and line —
+    and silences the last-resort stderr output, so lines aren't doubled.
+    """
+
+    def __init__(self, logs_obj):
+        super().__init__()
+        self.logs = logs_obj
+
+    def emit(self, record):
+        try:
+            self.logs._add_log(
+                record.levelname,
+                self.format(record),
+                file=_relativize_log_path(record.pathname),
+                line=record.lineno,
+            )
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -1643,6 +1677,20 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
     sys.stdout = LogCapturingStream(logs, level="INFO", job_id=job_id, event_queue=event_queue)
     sys.stderr = LogCapturingStream(logs, level="WARNING", job_id=job_id, event_queue=event_queue)
 
+    # Bridge stdlib logging into this job's log pipeline (same per-job,
+    # process-global pattern as the stdout/stderr swap above). The root
+    # logger's default WARNING threshold would hide INFO records before
+    # the bridge sees them, so lower it for the duration of the job;
+    # loggers with an explicit level still filter as configured. DEBUG
+    # records are deliberately not displayed in phase logs.
+    logging_bridge = StdlibLoggingBridge(logs)
+    logging_bridge.setLevel(logging.INFO)
+    root_logger = logging.getLogger()
+    previous_root_level = root_logger.level
+    root_logger.addHandler(logging_bridge)
+    if root_logger.getEffectiveLevel() > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+
     phase_result_container = {"error": None, "result": None}
 
     def run_phase():
@@ -1885,6 +1933,8 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         event_queue.close()
         sys.stdout = original_stdout_stream
         sys.stderr = original_stderr_stream
+        root_logger.removeHandler(logging_bridge)
+        root_logger.setLevel(previous_root_level)
 
 
 # ============================================================================

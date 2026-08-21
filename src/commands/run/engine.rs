@@ -31,12 +31,19 @@ use super::event_router::{EventRouter, PhaseFinished};
 use super::identify_host;
 use super::queue::QueuedRun;
 
+/// The canonical procedure file names, in precedence order: `.yaml`
+/// wins over `.yml`. One directory holds one procedure, and this is
+/// what makes it one — the CLI, the git integration and Studio's
+/// project discovery all decide "is this a procedure?" by this list, so
+/// it is shared rather than spelled out per caller.
+pub const PROCEDURE_FILENAMES: [&str; 2] = ["procedure.yaml", "procedure.yml"];
+
 /// Locate the YAML procedure file inside a root directory. Returns
 /// `Some(path)` if `procedure.yaml` (or `.yml`) is present, `None`
 /// otherwise. Caller has already resolved `package_dir` — this is just an
 /// on-disk file lookup.
 pub fn find_procedure_yaml(package_dir: &Path) -> Option<std::path::PathBuf> {
-    for name in ["procedure.yaml", "procedure.yml"] {
+    for name in PROCEDURE_FILENAMES {
         let path = package_dir.join(name);
         if path.exists() {
             return Some(path);

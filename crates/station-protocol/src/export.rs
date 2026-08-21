@@ -65,18 +65,19 @@ fn main() {
     }
 
     // Internal codegen tool: emits the TypeScript bindings for these wire
-    // types. Output dir: STATION_PROTOCOL_TS_OUT when set, else the ONE
-    // tracked location, resolved from the crate's own directory so the
-    // bare `cargo run --bin export-types` does the right thing from any
-    // cwd. The old default (".") wrote a stray copy next to the crate
-    // that the CI gate then never diffed — a gate that could not fail.
-    let out_dir = std::env::var("STATION_PROTOCOL_TS_OUT").unwrap_or_else(|_| {
-        format!(
-            "{}/../../packages/shared/types/generated",
-            env!("CARGO_MANIFEST_DIR")
-        )
-    });
-    let out_dir = std::path::Path::new(&out_dir);
+    // types. Exactly one output location, resolved from the crate's own
+    // directory so the bare `cargo run --bin export-types` does the
+    // right thing from any cwd. The old default (".") wrote a stray copy
+    // next to the crate that the CI gate then never diffed — a gate that
+    // could not fail — and the env override that replaced it had no
+    // setter anywhere in the repo, which is the same hazard one step
+    // removed: a redirect nothing exercises, on the path the gate
+    // checks.
+    let out_dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/shared/types/generated"
+    );
+    let out_dir = std::path::Path::new(out_dir);
     std::fs::create_dir_all(out_dir).expect("create output dir");
     std::fs::write(out_dir.join("station-protocol.ts"), &output).expect("write TS types");
 
