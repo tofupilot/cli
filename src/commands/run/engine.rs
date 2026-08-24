@@ -1624,8 +1624,8 @@ pub async fn run_yaml_procedure(
     });
     let ref_problems = match &main_filter {
         Some(Err(_)) => Vec::new(),
-        Some(Ok(set)) => procedure_def.resolve_python_refs(procedure_dir, Some(set)),
-        None => procedure_def.resolve_python_refs(procedure_dir, None),
+        Some(Ok(set)) => procedure_def.resolve_runtime_refs(procedure_dir, Some(set)),
+        None => procedure_def.resolve_runtime_refs(procedure_dir, None),
     };
     if !ref_problems.is_empty() {
         emit_crash(
@@ -1635,10 +1635,7 @@ pub async fn run_yaml_procedure(
             execution_id,
             "load_error",
             1,
-            format!(
-                "Procedure has Python references that cannot be resolved:\n{}",
-                ref_problems.join("\n")
-            ),
+            format!("Procedure cannot start:\n{}", ref_problems.join("\n")),
         );
         return (1, None);
     }

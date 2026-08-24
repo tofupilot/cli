@@ -55,6 +55,7 @@ fn main() {
         specta::ts::export::<StudioPlugMethod>(&config).unwrap(),
         specta::ts::export::<StudioPlugParam>(&config).unwrap(),
         specta::ts::export::<StudioSequencePhase>(&config).unwrap(),
+        specta::ts::export::<StudioSequenceExecutable>(&config).unwrap(),
         specta::ts::export::<StudioSequenceRetry>(&config).unwrap(),
         specta::ts::export::<StudioSequenceUi>(&config).unwrap(),
         specta::ts::export::<StudioSequenceMeasurement>(&config).unwrap(),

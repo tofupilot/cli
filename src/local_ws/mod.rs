@@ -1046,12 +1046,23 @@ impl Server {
         // placeholder against an older daemon instead of a 404 error.
         // `plug_debug`: the dispatcher handles the PlugMethods /
         // PlugDebug* requests; without it the page hides the debugger.
+        // `phase_executable`: `get_sequence` carries a phase's
+        // `executable:` block (command, shell, working directory), not
+        // just the flag saying it has one. Without it the dashboard
+        // cannot read a command back, so the Inspector shows "update
+        // the CLI" in place of the block's fields. Informational only:
+        // switching a phase's runtime is NOT gated on it, so a daemon
+        // this old can still be handed `command: ""`, which its engine
+        // (`min = 1` back then) refuses at load. Accepted — daemons
+        // that predate this capability sit below Studio's recommended
+        // version and get the update warning, not support.
         for cap in [
             "studio-rpc-v1",
             "partial_run",
             "upload_run",
             "idle_files",
             "plug_debug",
+            "phase_executable",
         ] {
             if !hello.capabilities.iter().any(|c| c == cap) {
                 hello.capabilities.push(cap.to_string());

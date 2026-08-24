@@ -1072,6 +1072,16 @@ pub enum StudioResponse {
         /// the dashboard; all request paths stay root-relative.
         root: String,
         name: String,
+        /// The daemon's own semver (`CARGO_PKG_VERSION`), so the
+        /// dashboard can warn below its manually-set recommendation
+        /// (`RECOMMENDED_DAEMON_VERSION`, apps/web
+        /// `studio/daemon-version.ts`) — a "please update, some
+        /// features may not work" toast, never a refusal. Optional on
+        /// the wire because released daemons predate the field —
+        /// exactly the daemons worth warning about, which is why the
+        /// dashboard treats "absent" as below any recommendation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
         /// Root-relative path of the ACTIVE procedure definition (e.g.
         /// `procedure.yaml`), when the project holds one. Kept as the
         /// single active path it always was: older dashboards read only
@@ -1362,6 +1372,34 @@ pub struct StudioSequenceUnitField {
     pub max_length: Option<u32>,
 }
 
+/// A phase's `executable:` block, projected for the editor.
+///
+/// Separate from the `executable` flag next to it for the same reason
+/// `ui_components` sits next to `ui`: the flag answers the tree's badge
+/// in one byte, this answers the Inspector's fields. It also keeps the
+/// flag's meaning stable for a dashboard talking to an older daemon,
+/// which sends the flag and not this. The dashboard edits the block's
+/// fields only when the block arrived, and reads the
+/// `phase_executable` capability for the fallback message's wording
+/// alone — switching a phase's runtime is deliberately not gated on
+/// either (the trade-off is stated on the Runtime Select,
+/// `phase-edit-page.tsx`).
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioSequenceExecutable {
+    /// May be empty: "runtime declared, command not chosen yet" is a
+    /// legal state of the file. The engine loads it,
+    /// `resolve_runtime_refs` reports it (Code's issues panel, the
+    /// assistant), and the runner refuses to start on it — it is never
+    /// refused at load.
+    pub command: String,
+    /// `bash|sh|zsh|powershell|pwsh|cmd`, absent when the file states
+    /// none — the engine then defaults per platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Type, Clone)]
 pub struct StudioSequencePhase {
     pub key: String,
@@ -1378,6 +1416,12 @@ pub struct StudioSequencePhase {
     pub ui_components: u32,
     /// Phase runs an external executable (v2's shell equivalent).
     pub executable: bool,
+    /// The `executable:` block itself, for the Inspector's fields.
+    /// `None` on a Python or code-less phase — and also on any phase
+    /// projected by a daemon predating the `phase_executable`
+    /// capability, which is why an edit gates on the capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_config: Option<StudioSequenceExecutable>,
     /// Timeout in ms. u32 because the TS codegen forbids BigInt-mapped
     /// integers; the schema caps timeouts at 24h anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]

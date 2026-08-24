@@ -961,6 +961,13 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
                 .map(|c| c.len() as u32)
                 .unwrap_or(0),
             executable: p.executable.is_some(),
+            executable_config: p.executable.as_ref().map(|e| {
+                station_protocol::StudioSequenceExecutable {
+                    command: e.command.clone(),
+                    shell: e.shell.clone(),
+                    working_directory: e.working_directory.clone(),
+                }
+            }),
             // ms values saturate into the u32 the TS codegen requires;
             // the schema caps them below that anyway.
             timeout: p.timeout.map(|t| t.min(u32::MAX as u64) as u32),
@@ -1504,6 +1511,7 @@ async fn project_info(state: &AppState, root: &Path) -> StudioResponse {
     StudioResponse::ProjectInfo {
         root: root.to_string_lossy().into_owned(),
         name,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
         procedure_path,
         procedures: Some(procedures),
     }
@@ -2291,7 +2299,7 @@ async fn validate(config: &StudioConfig, root: &Path, path: Option<&str>) -> Stu
     let result = tokio::task::spawn_blocking(move || {
         execution_engine::procedure::loader::load_procedure_definition(&yaml_path).map(|def| {
             let procedure_dir = yaml_path.parent().unwrap_or(Path::new("."));
-            def.resolve_python_refs(procedure_dir, None)
+            def.resolve_runtime_refs(procedure_dir, None)
         })
     })
     .await;

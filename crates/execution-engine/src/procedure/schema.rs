@@ -973,7 +973,7 @@ impl PythonSpec {
     }
 
     /// Resolve the spec to (file_path, callable_name) WITHOUT requiring
-    /// the file on disk. Split from `parse` so `resolve_python_refs` can
+    /// the file on disk. Split from `parse` so `resolve_runtime_refs` can
     /// decide what a missing file means (a tree-bound spec is broken, a
     /// bare dot-syntax one may still import from site-packages) without
     /// duplicating the grammar.
@@ -1149,7 +1149,17 @@ impl PythonSpec {
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(deny_unknown_fields)]
 pub struct ExecutableConfig {
-    #[validate(length(min = 1, max = 10000))]
+    /// `max` only, deliberately: an EMPTY command loads.
+    ///
+    /// It used to be `min = 1`, which meant an editor could not write
+    /// "this phase runs a command, which is not chosen yet" — the only
+    /// file it could produce was one that fails to load, taking the
+    /// whole procedure (and Studio's Sequence view, which runs the same
+    /// loader) down with the edit that created it. Emptiness is now
+    /// caught by `resolve_runtime_refs`, which `validate` reports and
+    /// the runner refuses to start on — the same treatment a dangling
+    /// `python:` ref gets, and for the same reason.
+    #[validate(length(max = 10000))]
     pub command: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1412,13 +1422,17 @@ impl ProcedureDefinition {
         self.iter_phases_with_stage().collect()
     }
 
-    /// Resolve every `python:` reference against the procedure directory
-    /// and return one message per reference that provably cannot load.
+    /// Everything that must hold before a run and that LOADING lets
+    /// through, one message per problem: every `python:` reference
+    /// resolved against the procedure directory, and an executable
+    /// phase whose command is still empty.
     ///
-    /// Loading is purely structural (no disk access), so a dangling
-    /// reference passes `load_procedure_definition` and would otherwise
-    /// surface mid-run — as a tp_worker traceback for a phase, or as a
-    /// silently omitted plug (`get_plug_configs_for_job` only logs).
+    /// Loading is purely structural (no disk access), so both pass
+    /// `load_procedure_definition` and would otherwise surface mid-run:
+    /// a dangling phase ref as a tp_worker traceback, a dangling plug
+    /// ref as a silently omitted plug (`get_plug_configs_for_job` only
+    /// logs) — and worse for an empty command, since `sh -c ""` exits 0,
+    /// so it is a phase that silently passes without doing anything.
     /// Callers decide the consequence: the studio daemon turns these
     /// into diagnostics, the run engine refuses to start.
     ///
@@ -1438,7 +1452,7 @@ impl ProcedureDefinition {
     /// - Phases the orchestrator never turns into a job don't gate:
     ///   `should_skip()` ones, and main phases outside `main_filter`
     ///   (a partial run's dependency closure) when one is given.
-    pub fn resolve_python_refs(
+    pub fn resolve_runtime_refs(
         &self,
         procedure_dir: &Path,
         main_filter: Option<&HashSet<String>>,
@@ -1484,6 +1498,14 @@ impl ProcedureDefinition {
             if let Some(filter) = main_filter {
                 if matches!(stage, StageScope::Main) && !filter.contains(&phase.key) {
                     continue;
+                }
+            }
+            if let Some(exec) = &phase.executable {
+                if exec.command.trim().is_empty() {
+                    problems.push(format!(
+                        "Phase `{}`: executable has no command",
+                        phase.key
+                    ));
                 }
             }
             let Some(spec) = &phase.python else { continue };
