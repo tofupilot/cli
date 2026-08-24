@@ -46,6 +46,54 @@ impl Introspection {
     }
 }
 
+/// One method of a plug class, as reported by the worker's `"plugs"`
+/// introspection: the class's own methods (`vars(cls)`), source order,
+/// `__init__` and underscore methods included.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlugMethodInfo {
+    pub name: String,
+    /// First non-empty line of the method's own docstring.
+    #[serde(default)]
+    pub doc: Option<String>,
+    /// Line of the `def` in the source file (the sort key).
+    pub lineno: u32,
+    #[serde(default)]
+    pub params: Vec<PlugParamInfo>,
+}
+
+/// One parameter of a plug method, `self` excluded.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlugParamInfo {
+    pub name: String,
+    /// `positional_or_keyword` | `keyword_only` | `positional_only` |
+    /// `var_positional` | `var_keyword`.
+    pub kind: String,
+    /// No default and not var_* — a value must be supplied.
+    pub required: bool,
+    /// The signature default as JSON, when representable.
+    #[serde(default)]
+    pub default_json: Option<String>,
+    /// The annotation's display string, when annotated.
+    #[serde(default)]
+    pub annotation: Option<String>,
+}
+
+/// One plug's introspection result: methods, or the import/lookup error.
+#[derive(Debug, Deserialize)]
+struct PlugIntrospection {
+    #[serde(default)]
+    methods: Option<Vec<PlugMethodInfo>>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// The worker's reply to a plugs-only introspection request.
+#[derive(Debug, Deserialize)]
+struct PlugIntrospectionReply {
+    #[serde(default)]
+    plugs: HashMap<String, PlugIntrospection>,
+}
+
 /// Upper bound on the whole introspection pass. Importing phase modules
 /// runs their module-level code, which can block (e.g. opening a serial
 /// port that never answers); a hung import must not hang run startup
@@ -80,6 +128,62 @@ pub async fn introspect_procedure(
         return Ok(Introspection::default());
     }
 
+    let request = serde_json::json!({ "phases": phases }).to_string();
+    let stdout = run_introspection_worker(procedure_dir, python_path, &request).await?;
+
+    serde_json::from_slice(&stdout).map_err(|e| {
+        format!(
+            "Failed to parse introspection output: {} (stdout: {})",
+            e,
+            String::from_utf8_lossy(&stdout)
+        )
+    })
+}
+
+/// Introspect one plug class's own methods, through the same worker
+/// `--introspect` pass phases use. Errors carry the Python error text
+/// (import failure, missing class) — that IS what the caller shows for
+/// a broken plug file.
+pub async fn introspect_plug_methods(
+    python_path: &Option<std::path::PathBuf>,
+    procedure_dir: &Path,
+    module: &str,
+    class: &str,
+) -> Result<Vec<PlugMethodInfo>, String> {
+    let request = serde_json::json!({
+        "phases": {},
+        "plugs": { "target": { "module": module, "class": class } },
+    })
+    .to_string();
+    let stdout = run_introspection_worker(procedure_dir, python_path, &request).await?;
+
+    let mut reply: PlugIntrospectionReply = serde_json::from_slice(&stdout).map_err(|e| {
+        format!(
+            "Failed to parse introspection output: {} (stdout: {})",
+            e,
+            String::from_utf8_lossy(&stdout)
+        )
+    })?;
+    let entry = reply
+        .plugs
+        .remove("target")
+        .ok_or_else(|| "Introspection worker reported nothing for the plug".to_string())?;
+    if let Some(error) = entry.error {
+        return Err(error);
+    }
+    entry
+        .methods
+        .ok_or_else(|| "Introspection worker reported neither methods nor an error".to_string())
+}
+
+/// Spawn the worker in `--introspect` mode, feed it `request` on stdin
+/// and return its stdout. Shared by phase and plug introspection: same
+/// interpreter resolution, timeout and kill discipline.
+async fn run_introspection_worker(
+    procedure_dir: &Path,
+    python_path: &Option<std::path::PathBuf>,
+    request: &str,
+) -> Result<Vec<u8>, String> {
     let python_cmd = crate::python::resolve_or_walk(python_path, procedure_dir).await?;
     let worker_script = crate::worker::Worker::find_worker_script_cli()?;
     let abs_dir = crate::path_utils::canonicalize_for_spawn(procedure_dir)
@@ -97,7 +201,6 @@ pub async fn introspect_procedure(
         .spawn()
         .map_err(|e| format!("Failed to spawn introspection worker: {}", e))?;
 
-    let request = serde_json::json!({ "phases": phases }).to_string();
     {
         use tokio::io::AsyncWriteExt;
         let mut stdin = child
@@ -129,13 +232,7 @@ pub async fn introspect_procedure(
         ));
     }
 
-    serde_json::from_slice(&output.stdout).map_err(|e| {
-        format!(
-            "Failed to parse introspection output: {} (stdout: {})",
-            e,
-            String::from_utf8_lossy(&output.stdout)
-        )
-    })
+    Ok(output.stdout)
 }
 
 impl ProcedureDefinition {
@@ -323,5 +420,70 @@ main:
         let intr = introspection(&[]);
         let phase = def.main.iter().find(|p| p.key == "with_plug").unwrap();
         assert_eq!(def.plug_keys_for_phase(phase, &intr), None);
+    }
+
+    /// The worker's `"plugs"` reply, exactly as tp_worker.py prints it:
+    /// `__init__` and underscore methods, JSON and non-JSON defaults,
+    /// annotations present and absent.
+    #[test]
+    fn plug_methods_reply_parses() {
+        let json = r#"{
+            "phases": {},
+            "plugs": {
+                "target": {
+                    "methods": [
+                        {
+                            "name": "__init__",
+                            "doc": null,
+                            "lineno": 4,
+                            "params": [
+                                {"name": "port", "kind": "positional_or_keyword", "required": false, "default_json": "\"/dev/ttyUSB0\"", "annotation": "str"},
+                                {"name": "session", "kind": "keyword_only", "required": false, "default_json": null, "annotation": null}
+                            ]
+                        },
+                        {
+                            "name": "measure",
+                            "doc": "Read one voltage sample.",
+                            "lineno": 9,
+                            "params": [
+                                {"name": "channel", "kind": "positional_or_keyword", "required": true, "default_json": null, "annotation": "int"},
+                                {"name": "extras", "kind": "var_keyword", "required": false, "default_json": null, "annotation": null}
+                            ]
+                        },
+                        {"name": "_flush", "doc": null, "lineno": 14, "params": []}
+                    ]
+                }
+            }
+        }"#;
+        let reply: PlugIntrospectionReply = serde_json::from_str(json).unwrap();
+        let entry = &reply.plugs["target"];
+        assert!(entry.error.is_none());
+        let methods = entry.methods.as_ref().unwrap();
+        assert_eq!(
+            methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["__init__", "measure", "_flush"],
+        );
+        let init = &methods[0];
+        assert_eq!(init.lineno, 4);
+        assert_eq!(init.params[0].default_json.as_deref(), Some("\"/dev/ttyUSB0\""));
+        assert!(!init.params[0].required);
+        assert_eq!(init.params[1].kind, "keyword_only");
+        // A non-JSON default: optional, but the value stays unstated.
+        assert!(init.params[1].default_json.is_none());
+        let measure = &methods[1];
+        assert_eq!(measure.doc.as_deref(), Some("Read one voltage sample."));
+        assert!(measure.params[0].required);
+        assert_eq!(measure.params[0].annotation.as_deref(), Some("int"));
+        assert!(!measure.params[1].required, "var_keyword is never required");
+    }
+
+    /// A broken plug file reports its error per entry, like phases do.
+    #[test]
+    fn plug_methods_error_entry_parses() {
+        let json = r#"{"phases": {}, "plugs": {"target": {"error": "No module named 'serial'"}}}"#;
+        let reply: PlugIntrospectionReply = serde_json::from_str(json).unwrap();
+        let entry = &reply.plugs["target"];
+        assert_eq!(entry.error.as_deref(), Some("No module named 'serial'"));
+        assert!(entry.methods.is_none());
     }
 }

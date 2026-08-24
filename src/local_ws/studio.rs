@@ -38,10 +38,11 @@ use axum::{
 use sha2::{Digest, Sha256};
 use station_protocol::{
     StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
-    StudioProject, StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation,
-    StudioSequenceAxis, StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug,
-    StudioSequencePlugConfigEntry, StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi,
-    StudioSequenceUnit, StudioSequenceUnitField, StudioSequenceValidator,
+    StudioPlugMethod, StudioPlugParam, StudioProject, StudioRequest, StudioResponse,
+    StudioSequence, StudioSequenceAggregation, StudioSequenceAxis, StudioSequenceMeasurement,
+    StudioSequencePhase, StudioSequencePlug, StudioSequencePlugConfigEntry, StudioSequenceRetry,
+    StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit, StudioSequenceUnitField,
+    StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -525,6 +526,30 @@ async fn dispatch(
             overwrite,
         } => write_resource(root, &path, &content_base64, overwrite).await,
         StudioRequest::GetSequence {} => get_sequence(config, root).await,
+        StudioRequest::PlugMethods { plug_key } => plug_methods(config, root, &plug_key).await,
+        StudioRequest::PlugDebugStart {
+            plug_key,
+            config_overrides_json,
+        } => {
+            plug_debug_start(
+                state,
+                config,
+                root,
+                &plug_key,
+                config_overrides_json.as_deref(),
+            )
+            .await
+        }
+        StudioRequest::PlugDebugStop { plug_key } => plug_debug_stop(state, plug_key).await,
+        StudioRequest::PlugDebugCall {
+            plug_key,
+            method,
+            args_json,
+            kwargs_json,
+        } => plug_debug_call(state, plug_key, method, args_json, kwargs_json).await,
+        StudioRequest::PlugDebugSessions {} => StudioResponse::PlugDebugSessionList {
+            plug_keys: state.plug_debug.session_keys().await,
+        },
     }
 }
 
@@ -592,6 +617,10 @@ async fn open_project(state: &AppState, path: &str) -> StudioResponse {
             // Persist so the next launch reopens it, and so the head of
             // the recents file and the head of the granted set agree.
             crate::commands::studio_recents::record_in_or_warn(&config.recents_file, &root.path);
+            drop(guard);
+            // Debug sessions belong to the project they were started
+            // in; a switch invalidates every one of them.
+            state.plug_debug.teardown_all().await;
             StudioResponse::Opened {
                 project: to_wire(&root),
             }
@@ -846,6 +875,13 @@ fn map_plug_config(
                 key: key.clone(),
                 value: rendered,
                 kind: kind.to_string(),
+                // The debugger seeds session overrides from the value
+                // itself, which the summary above cannot provide.
+                value_json: matches!(
+                    value,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                )
+                .then(|| value.to_string()),
             }
         })
         .collect()
@@ -1076,6 +1112,249 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
     }
 }
 
+/// The active procedure's holding directory plus the plug `plug_key`
+/// names in it. The daemon resolves the file/class from the YAML
+/// itself — the browser never sends a path. Exact key match first;
+/// case-insensitive as a fallback, mirroring the worker's own plug
+/// matching.
+async fn resolve_plug(
+    config: &StudioConfig,
+    root: &Path,
+    plug_key: &str,
+) -> Result<(PathBuf, execution_engine::procedure::schema::PlugDefinition), StudioResponse> {
+    let yaml_path = active_procedure_yaml(config, root).await?;
+    let procedure_dir = yaml_path.parent().map(Path::to_path_buf).ok_or_else(|| {
+        err(
+            StudioErrorCode::Internal,
+            "the procedure file has no parent directory",
+        )
+    })?;
+    let loaded = tokio::task::spawn_blocking(move || {
+        let content = std::fs::read_to_string(&yaml_path)
+            .map_err(|e| format!("Failed to read {}: {}", yaml_path.display(), e))?;
+        execution_engine::procedure::loader::load_procedure_definition_from_str(&content)
+    })
+    .await;
+    let def = match loaded {
+        Ok(Ok(def)) => def,
+        Ok(Err(message)) => return Err(err(StudioErrorCode::Invalid, message)),
+        Err(join_err) => {
+            return Err(err(
+                StudioErrorCode::Internal,
+                format!("procedure load failed: {join_err}"),
+            ))
+        }
+    };
+    let plug = def
+        .plugs
+        .iter()
+        .find(|p| p.key == plug_key)
+        .or_else(|| {
+            def.plugs
+                .iter()
+                .find(|p| p.key.eq_ignore_ascii_case(plug_key))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            err(
+                StudioErrorCode::NotFound,
+                format!("no plug '{plug_key}' in the active procedure"),
+            )
+        })?;
+    Ok((procedure_dir, plug))
+}
+
+/// The interpreter plug introspection and debug sessions spawn under:
+/// the exact venv discipline Studio runs use (`ensure_venv`,
+/// non-interactive), so the debugger can never disagree with Run about
+/// which environment the plug's imports come from. The engine's own
+/// walk-up fallback would silently pick a global Python without the
+/// project's deps on a project whose venv doesn't exist yet — here
+/// that venv gets provisioned instead, exactly as pressing Run would.
+async fn resolve_plug_python(procedure_dir: &Path) -> Result<PathBuf, String> {
+    crate::commands::run::bootstrap::ensure_venv(
+        procedure_dir,
+        crate::commands::run::bootstrap::BootstrapPolicy::Auto,
+    )
+    .await
+    .map(|venv| venv.python)
+    .map_err(|e| format!("Python environment error: {e}"))
+}
+
+/// `PlugMethods`: list a plug class's own methods without instantiating
+/// it — a one-shot introspection subprocess imports the module and
+/// reads the class object, so browsing a plug never touches hardware.
+async fn plug_methods(config: &StudioConfig, root: &Path, plug_key: &str) -> StudioResponse {
+    let (procedure_dir, plug) = match resolve_plug(config, root, plug_key).await {
+        Ok(resolved) => resolved,
+        Err(e) => return e,
+    };
+    let python = match resolve_plug_python(&procedure_dir).await {
+        Ok(p) => Some(p),
+        Err(message) => return err(StudioErrorCode::Internal, message),
+    };
+    let module = plug.python.get_module();
+    let class = plug.python.get_callable_name();
+    match execution_engine::procedure::introspect::introspect_plug_methods(
+        &python,
+        &procedure_dir,
+        &module,
+        &class,
+    )
+    .await
+    {
+        Ok(methods) => StudioResponse::PlugMethodList {
+            plug_key: plug.key,
+            methods: methods
+                .into_iter()
+                .map(|m| StudioPlugMethod {
+                    name: m.name,
+                    doc: m.doc,
+                    lineno: m.lineno,
+                    params: m
+                        .params
+                        .into_iter()
+                        .map(|p| StudioPlugParam {
+                            name: p.name,
+                            kind: p.kind,
+                            required: p.required,
+                            default_json: p.default_json,
+                            annotation: p.annotation,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        },
+        // The message carries the Python error text (import failure,
+        // missing class) — that IS the UX for a broken plug file.
+        Err(message) => err(StudioErrorCode::Internal, message),
+    }
+}
+
+/// What both run-contention refusals say: a run's plugs would contend
+/// for the same instruments as a debug session.
+const RUN_HOLDS_HARDWARE: &str = "a run is in progress; stop it before debugging a plug";
+
+/// `PlugDebugStart`: spawn the plug's service process outside any run.
+async fn plug_debug_start(
+    state: &AppState,
+    config: &StudioConfig,
+    root: &Path,
+    plug_key: &str,
+    config_overrides_json: Option<&str>,
+) -> StudioResponse {
+    // Early refusal only — the YAML read and venv resolution below can
+    // take seconds, so the authoritative check is `start`'s own,
+    // under its session lock.
+    if state
+        .studio_run_active
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return err(StudioErrorCode::Busy, RUN_HOLDS_HARDWARE);
+    }
+
+    let (procedure_dir, plug) = match resolve_plug(config, root, plug_key).await {
+        Ok(resolved) => resolved,
+        Err(e) => return e,
+    };
+    let mut config_json = match plug.to_config_json(&procedure_dir) {
+        Ok(c) => c,
+        Err(message) => return err(StudioErrorCode::Invalid, message),
+    };
+    if let Some(overrides) = config_overrides_json {
+        let parsed: serde_json::Value = match serde_json::from_str(overrides) {
+            Ok(v) => v,
+            Err(e) => {
+                return err(
+                    StudioErrorCode::Invalid,
+                    format!("config_overrides_json is not valid JSON: {e}"),
+                )
+            }
+        };
+        let serde_json::Value::Object(overrides) = parsed else {
+            return err(
+                StudioErrorCode::Invalid,
+                "config_overrides_json must be a JSON object",
+            );
+        };
+        // Merged over the YAML `config` map for THIS session only —
+        // the file is never written.
+        let config_slot = &mut config_json["config"];
+        if !config_slot.is_object() {
+            *config_slot = serde_json::Value::Object(Default::default());
+        }
+        if let Some(map) = config_slot.as_object_mut() {
+            map.extend(overrides);
+        }
+    }
+
+    let python = match resolve_plug_python(&procedure_dir).await {
+        Ok(p) => p,
+        Err(message) => return err(StudioErrorCode::Internal, message),
+    };
+    match state
+        .plug_debug
+        .start(
+            procedure_dir,
+            python,
+            &plug.key,
+            config_json,
+            &state.studio_run_active,
+        )
+        .await
+    {
+        Ok(()) => StudioResponse::PlugDebugStarted { plug_key: plug.key },
+        Err(super::plug_debug::StartError::RunActive) => {
+            err(StudioErrorCode::Busy, RUN_HOLDS_HARDWARE)
+        }
+        Err(super::plug_debug::StartError::Failed(message)) => {
+            err(StudioErrorCode::Internal, message)
+        }
+    }
+}
+
+/// `PlugDebugStop`: always answers `PlugDebugStopped` — teardown must
+/// be idempotent so every owner (mode exit, run start, tab close) can
+/// fire it.
+async fn plug_debug_stop(state: &AppState, plug_key: String) -> StudioResponse {
+    state.plug_debug.stop(&plug_key).await;
+    StudioResponse::PlugDebugStopped { plug_key }
+}
+
+/// `PlugDebugCall`: one method call on a debug-session plug. A Python
+/// exception inside the method is a RESULT (`success: false` + the
+/// traceback), not an `Error` — the call itself completed.
+async fn plug_debug_call(
+    state: &AppState,
+    plug_key: String,
+    method: String,
+    args_json: Option<String>,
+    kwargs_json: Option<String>,
+) -> StudioResponse {
+    if !state.plug_debug.has_session(&plug_key).await {
+        return err(
+            StudioErrorCode::NotFound,
+            format!("no debug session for plug '{plug_key}'"),
+        );
+    }
+    let started = std::time::Instant::now();
+    match state
+        .plug_debug
+        .call(&plug_key, &method, args_json, kwargs_json)
+        .await
+    {
+        Ok(response) => StudioResponse::PlugDebugResult {
+            plug_key,
+            method,
+            success: response.success,
+            result_json: response.result_json,
+            error: response.error,
+            duration_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+        },
+        Err(message) => err(StudioErrorCode::Internal, message),
+    }
+}
+
 /// The definition's own `name:`, read cheaply. Deliberately NOT the
 /// engine loader: this runs for every discovered procedure on every
 /// `project_info`, and a display label must not depend on the whole
@@ -1266,6 +1545,10 @@ async fn open_procedure(state: &AppState, root: &Path, path: &str) -> StudioResp
         return err(StudioErrorCode::Busy, PROJECT_MOVED_UNDER_REQUEST);
     }
     config.set_active_procedure(PathBuf::from(&procedure.path));
+    drop(guard);
+    // Debug sessions belong to the procedure they were started in; a
+    // switch invalidates every one of them.
+    state.plug_debug.teardown_all().await;
     StudioResponse::ProcedureOpened { procedure }
 }
 

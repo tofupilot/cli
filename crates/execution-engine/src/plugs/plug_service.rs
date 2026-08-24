@@ -13,7 +13,7 @@ use crate::event_sink::{EventSink, ExecutionEvent};
 use crate::events::PlugLogEvent;
 use crate::log::LogEntry;
 use crate::plugs::process::ChildProcess;
-use crate::protocol::{PlugRequest, PlugResponse};
+use crate::protocol::{MethodRequest, PlugRequest, PlugResponse};
 use crate::transport;
 use serde_json;
 
@@ -38,6 +38,29 @@ pub async fn probe_plug_health(port: u16) -> Result<(), String> {
             .error
             .unwrap_or_else(|| "plug reported unhealthy status".to_string()))
     }
+}
+
+/// Call one method on a running plug service, bounded by `timeout`.
+/// Used by Studio debug sessions to drive a plug outside any run; the
+/// bound exists because the method is arbitrary user code — a call that
+/// never returns must fail the RPC, not wedge the caller.
+pub async fn call_plug_method(
+    port: u16,
+    method: &str,
+    args_json: Option<String>,
+    kwargs_json: Option<String>,
+    timeout: std::time::Duration,
+) -> Result<PlugResponse, String> {
+    let request = PlugRequest::CallMethod(MethodRequest {
+        method: method.to_string(),
+        // The wire field predates kwargs and is a plain string: "" is
+        // its established spelling for "no positional arguments".
+        args_json: args_json.unwrap_or_default(),
+        kwargs_json,
+    });
+    tokio::time::timeout(timeout, plug_rpc(port, &request))
+        .await
+        .map_err(|_| format!("method call timed out after {}s", timeout.as_secs()))?
 }
 
 /// Send a plug request and read a response over a fresh TCP connection.

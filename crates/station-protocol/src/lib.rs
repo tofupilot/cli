@@ -989,6 +989,48 @@ pub enum StudioRequest {
     /// human ever said yes to. Always answers `PickDiscarded`;
     /// discarding when nothing is parked is a no-op, not an error.
     DiscardPick {},
+    /// List the methods of a plug's Python class, WITHOUT instantiating
+    /// it — a one-shot introspection subprocess imports the module and
+    /// reads the class object, so browsing a plug never touches
+    /// hardware. `plug_key` must name a plug of the active procedure;
+    /// the daemon resolves the file/class from the YAML itself and
+    /// never takes a path from the browser. Answers `PlugMethodList`.
+    PlugMethods { plug_key: String },
+    /// Start a debug session: spawn the plug's service process outside
+    /// any run. Refused `Busy` while a run is active — a run's plugs
+    /// would contend for the same instruments. `config_overrides_json`,
+    /// when present, is a JSON object merged over the YAML `config`
+    /// map for THIS session only (the file is never written); it is an
+    /// opaque string because specta cannot export `serde_json::Value`.
+    /// Answers `PlugDebugStarted`; log lines stream as `plug_log`
+    /// events with no `execution_id`.
+    PlugDebugStart {
+        plug_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_overrides_json: Option<String>,
+    },
+    /// End a debug session: Cleanup + Shutdown of the plug's service
+    /// process. Stopping a plug with no session is a no-op answered
+    /// `PlugDebugStopped`, not an error — teardown must be idempotent
+    /// so every owner (mode exit, run start, tab close) can fire it.
+    PlugDebugStop { plug_key: String },
+    /// Call one method on a debug-session plug. `args_json` is a JSON
+    /// array of positional arguments, `kwargs_json` a JSON object of
+    /// keyword arguments — both optional. Answers `PlugDebugResult`
+    /// whether the Python call succeeded or raised; transport-level
+    /// failures (no session, service dead) answer `Error`.
+    PlugDebugCall {
+        plug_key: String,
+        method: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kwargs_json: Option<String>,
+    },
+    /// List the plug keys with a live debug session. The page calls it
+    /// on mount to resync after a reload — sessions live in the daemon
+    /// and survive the browser.
+    PlugDebugSessions {},
 }
 
 /// A project root the session can switch to.
@@ -1113,10 +1155,73 @@ pub enum StudioResponse {
     ProcedureOpened {
         procedure: StudioProcedure,
     },
+    /// `PlugMethods`' answer: the class's own methods, source order.
+    PlugMethodList {
+        plug_key: String,
+        methods: Vec<StudioPlugMethod>,
+    },
+    PlugDebugStarted {
+        plug_key: String,
+    },
+    PlugDebugStopped {
+        plug_key: String,
+    },
+    /// `PlugDebugCall`'s answer. `success: false` with `error` set is a
+    /// Python-level failure (an exception inside the method) — the call
+    /// itself completed, which is why it is not a `StudioResponse::Error`.
+    PlugDebugResult {
+        plug_key: String,
+        method: String,
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        duration_ms: u32,
+    },
+    PlugDebugSessionList {
+        plug_keys: Vec<String>,
+    },
     Error {
         code: StudioErrorCode,
         message: String,
     },
+}
+
+/// One method of a plug class, as reported by `PlugMethods`. Only
+/// methods defined in the class's own body are listed (inherited
+/// library members are noise on a bench); `__init__` is included —
+/// its parameters are what the YAML `config` map feeds.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioPlugMethod {
+    pub name: String,
+    /// First line of the method's own docstring, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    /// Line of the `def` in the source file — the list's sort key, so
+    /// the UI reads like the file does.
+    pub lineno: u32,
+    pub params: Vec<StudioPlugParam>,
+}
+
+/// One parameter of a plug method, `self` excluded.
+#[derive(Debug, Serialize, Deserialize, Type, Clone)]
+pub struct StudioPlugParam {
+    pub name: String,
+    /// Python parameter kind: `positional_or_keyword`, `keyword_only`,
+    /// `positional_only`, `var_positional`, `var_keyword`.
+    pub kind: String,
+    /// True when the signature has no default — the UI must collect a
+    /// value (or find one in the YAML config) before calling.
+    pub required: bool,
+    /// The signature default rendered as JSON, when representable
+    /// (`None` for required params and non-JSON defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_json: Option<String>,
+    /// The annotation's display string (`float`, `str | None`, …),
+    /// when annotated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
 }
 
 /// Structured procedure view for the Studio UI, derived from the
@@ -1200,6 +1305,13 @@ pub struct StudioSequencePlugConfigEntry {
     /// A String rather than an enum, matching `scope` on the parent: the
     /// Builder only needs the canonical spelling to pick a write mode.
     pub kind: String,
+    /// For `complex` only: the value itself as compact JSON. The plug
+    /// debugger seeds session overrides from it — `value`'s summary is
+    /// right for the Inspector (whose line editor cannot rewrite a
+    /// structure in place) and wrong there. Absent for scalars, where
+    /// `value` already IS the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_json: Option<String>,
 }
 
 /// Unit identification projection (`unit:` at the procedure root):

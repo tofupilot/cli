@@ -180,6 +180,10 @@ pub enum PlugRequest {
 pub struct MethodRequest {
     pub method: String,
     pub args_json: String,
+    /// JSON object of keyword arguments. Optional and skipped when
+    /// absent so pre-kwargs plug services keep parsing requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kwargs_json: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

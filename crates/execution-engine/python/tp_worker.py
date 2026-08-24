@@ -2187,17 +2187,87 @@ def serve(procedure_dir: Path):
         server.close()
 
 
+_PARAM_KIND_NAMES = {
+    inspect.Parameter.POSITIONAL_OR_KEYWORD: "positional_or_keyword",
+    inspect.Parameter.KEYWORD_ONLY: "keyword_only",
+    inspect.Parameter.POSITIONAL_ONLY: "positional_only",
+    inspect.Parameter.VAR_POSITIONAL: "var_positional",
+    inspect.Parameter.VAR_KEYWORD: "var_keyword",
+}
+
+
+def _describe_plug_param(param: inspect.Parameter) -> dict:
+    is_var = param.kind in (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    )
+    has_default = param.default is not inspect.Parameter.empty
+    default_json = None
+    if has_default:
+        try:
+            default_json = json.dumps(param.default)
+        except (TypeError, ValueError):
+            # Non-JSON default (an object, a set, ...): report the
+            # parameter as optional but leave the value unstated.
+            default_json = None
+    annotation = None
+    if param.annotation is not inspect.Parameter.empty:
+        ann = param.annotation
+        annotation = ann.__name__ if isinstance(ann, type) else str(ann)
+    return {
+        "name": param.name,
+        "kind": _PARAM_KIND_NAMES[param.kind],
+        "required": not has_default and not is_var,
+        "default_json": default_json,
+        "annotation": annotation,
+    }
+
+
+def _describe_plug_methods(cls) -> list:
+    """The class's own methods (inherited members are noise on a bench),
+    in source order. `vars(cls)` naturally includes `__init__` and
+    underscore methods and excludes inherited members and properties."""
+    methods = []
+    for name, value in vars(cls).items():
+        if not inspect.isfunction(value):
+            continue
+        doc = None
+        if value.__doc__:
+            doc = next(
+                (line.strip() for line in value.__doc__.splitlines() if line.strip()),
+                None,
+            )
+        methods.append(
+            {
+                "name": name,
+                "doc": doc,
+                "lineno": value.__code__.co_firstlineno,
+                "params": [
+                    _describe_plug_param(param)
+                    for pname, param in inspect.signature(value).parameters.items()
+                    if pname != "self"
+                ],
+            }
+        )
+    methods.sort(key=lambda m: m["lineno"])
+    return methods
+
+
 def run_introspection(procedure_dir: Path):
     """--introspect mode: report each requested phase's real parameter
     names before the job graph is built.
 
     Reads one JSON object from stdin:
-        {"phases": {"<phase_key>": {"module": "...", "function": "..."}}}
-    imports each callable exactly the way execution would
-    (load_phase_module), and prints one JSON object to stdout:
-        {"phases": {"<phase_key>": {"params": [...]} | {"error": "..."}}}
+        {"phases": {"<phase_key>": {"module": "...", "function": "..."}},
+         "plugs": {"<key>": {"module": "...", "class": "..."}}}
+    ("plugs" is optional), imports each callable exactly the way
+    execution would (load_phase_module), and prints one JSON object to
+    stdout:
+        {"phases": {"<phase_key>": {"params": [...]} | {"error": "..."}},
+         "plugs": {"<key>": {"methods": [...]} | {"error": "..."}}}
+    with "plugs" present only when requested.
 
-    Per-phase errors are reported, not fatal: a phase whose module won't
+    Per-entry errors are reported, not fatal: a phase whose module won't
     import would fail at run time anyway, and if it isn't in the partial
     set its import error must not stop the run from starting.
     """
@@ -2209,6 +2279,8 @@ def run_introspection(procedure_dir: Path):
     sys.stdout = sys.stderr
 
     results = {}
+    plug_results = {}
+    plug_requests = request.get("plugs") or {}
     try:
         for phase_key, spec in (request.get("phases") or {}).items():
             try:
@@ -2223,10 +2295,26 @@ def run_introspection(procedure_dir: Path):
                 results[phase_key] = {"params": list(sig.parameters)}
             except BaseException as exc:
                 results[phase_key] = {"error": str(exc) or type(exc).__name__}
+        for plug_key, spec in plug_requests.items():
+            try:
+                module_name = spec["module"]
+                class_name = spec["class"]
+                module = load_phase_module(module_name, procedure_dir)
+                if not hasattr(module, class_name):
+                    raise AttributeError(
+                        f"Class {class_name} not found in {module_name}"
+                    )
+                cls = getattr(module, class_name)
+                plug_results[plug_key] = {"methods": _describe_plug_methods(cls)}
+            except BaseException as exc:
+                plug_results[plug_key] = {"error": str(exc) or type(exc).__name__}
     finally:
         sys.stdout = out_stream
 
-    print(json.dumps({"phases": results}), flush=True)
+    output = {"phases": results}
+    if plug_requests:
+        output["plugs"] = plug_results
+    print(json.dumps(output), flush=True)
 
 
 def main():

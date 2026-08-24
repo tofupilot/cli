@@ -55,6 +55,8 @@
 
 pub mod studio;
 
+mod plug_debug;
+
 #[cfg(test)]
 mod e2e_tests;
 
@@ -551,6 +553,9 @@ struct AppState {
     /// `pick_project` (compare-exchange, so only one wins) and cleared
     /// by the JOB's Drop on the host side — see `StudioDialogJob`.
     studio_dialog_open: Arc<std::sync::atomic::AtomicBool>,
+    /// Out-of-run plug debug sessions (Studio's plug debugger). Torn
+    /// down by run start, project/procedure switch, and daemon exit.
+    plug_debug: Arc<plug_debug::PlugDebugState>,
 }
 
 /// One folder-dialog request: the reply channel `pick_project` waits
@@ -858,6 +863,7 @@ impl Server {
             studio_dialog_tx: Arc::new(Mutex::new(None)),
             studio_pending_pick: Arc::new(Mutex::new(None)),
             studio_dialog_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            plug_debug: Arc::new(plug_debug::PlugDebugState::new()),
         };
 
         /// Origins allowed to call `/studio/rpc`: the dashboard this
@@ -1038,7 +1044,15 @@ impl Server {
         // `idle_files`: `/files/*` serves the project root between runs.
         // Gated so the dashboard previews keep their neutral image
         // placeholder against an older daemon instead of a 404 error.
-        for cap in ["studio-rpc-v1", "partial_run", "upload_run", "idle_files"] {
+        // `plug_debug`: the dispatcher handles the PlugMethods /
+        // PlugDebug* requests; without it the page hides the debugger.
+        for cap in [
+            "studio-rpc-v1",
+            "partial_run",
+            "upload_run",
+            "idle_files",
+            "plug_debug",
+        ] {
             if !hello.capabilities.iter().any(|c| c == cap) {
                 hello.capabilities.push(cap.to_string());
             }
@@ -1154,6 +1168,23 @@ impl Server {
     /// `AppState::studio_dialog_tx`).
     pub async fn set_studio_dialog_host(&self, tx: mpsc::Sender<StudioDialogJob>) {
         *self.state.studio_dialog_tx.lock().await = Some(tx);
+    }
+
+    /// Install the sender debug-session plug events flow into: the
+    /// studio command loop pumps its receiving end to `publish_event`,
+    /// which is how out-of-run `plug_status`/`plug_log` (no
+    /// `execution_id`) reach the page.
+    pub async fn set_plug_debug_event_sender(
+        &self,
+        tx: mpsc::UnboundedSender<station_protocol::StationEvent>,
+    ) {
+        self.state.plug_debug.set_event_sender(tx).await;
+    }
+
+    /// Stop every plug debug session. Idempotent; fired by run start,
+    /// project/procedure switch, and daemon shutdown.
+    pub async fn teardown_plug_debug(&self) {
+        self.state.plug_debug.teardown_all().await;
     }
 
     /// Pin (or release) the run-in-flight flag directly. The run

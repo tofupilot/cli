@@ -257,9 +257,11 @@ class PlugHandler:
 
             args_json = request.get("args_json", "")
             args = json.loads(args_json) if args_json else []
+            kwargs_json = request.get("kwargs_json", "")
+            kwargs = json.loads(kwargs_json) if kwargs_json else {}
 
             method_func = getattr(self.plug_instance, method_name)
-            result = method_func(*args)
+            result = method_func(*args, **kwargs)
 
             result_json = json.dumps(result) if result is not None else None
 

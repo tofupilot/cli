@@ -110,6 +110,20 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
     // station-level commands) land here.
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<station_protocol::StationCommand>(16);
     server.set_station_cmd_sink(cmd_tx).await;
+
+    // Bridge plug debug-session events (`plug_status` / `plug_log`
+    // with no execution id) onto the loopback WS, same shape as the
+    // upload bus in `run_dispatcher`: the RPC layer's sink sends here,
+    // this pump publishes on the page's event stream.
+    let (plug_debug_tx, mut plug_debug_rx) =
+        tokio::sync::mpsc::unbounded_channel::<station_protocol::StationEvent>();
+    server.set_plug_debug_event_sender(plug_debug_tx).await;
+    let plug_debug_server = server.clone();
+    let plug_debug_bridge = tokio::spawn(async move {
+        while let Some(ev) = plug_debug_rx.recv().await {
+            plug_debug_server.publish_event(ev).await;
+        }
+    });
     // Explicit shutdown signal: the dispatcher holds an Arc of the
     // server, and the server holds the cmd sink, so neither channel
     // closes on its own at Ctrl-C — without this the only exit would
@@ -283,6 +297,11 @@ pub async fn run_cmd(path: Option<PathBuf>, no_open: bool) -> i32 {
         crate::log::warn("studio: dispatcher shutdown timed out; aborting it");
         dispatcher.abort();
     }
+    // Same exit-skips-Drop reason as the run teardown above: debug
+    // sessions hold Python children with instrument connections, and
+    // their kill_on_drop never fires through `std::process::exit`.
+    server.teardown_plug_debug().await;
+    plug_debug_bridge.abort();
     drop(server);
     exit_code
 }
@@ -469,6 +488,9 @@ async fn run_dispatcher(
                 // while the engine boots project A. The run's terminal
                 // events release the flag as before.
                 server.set_studio_run_active(true);
+                // Debug sessions hold the same instruments the run's
+                // plugs are about to open: stop them all first.
+                server.teardown_plug_debug().await;
                 if let Some(mut handle) = active_run.take() {
                     crate::log::info("studio: aborting in-flight run (Run again)");
                     handle.request_cancel();
