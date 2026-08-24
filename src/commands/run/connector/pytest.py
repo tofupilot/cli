@@ -54,15 +54,22 @@ def _readline_interruptible():
     """
     fd = _STDIN_FD
     buf = bytearray()
+    # Poll on Unix only. Windows `select` accepts socket handles, never a
+    # pipe fd, and raises OSError on the one the CLI hands us. Blocking there
+    # costs nothing: the polling exists so a signal handler can run between
+    # iterations, and the CLI never signals a Windows child — it terminates
+    # it (`graceful_shutdown` in `run/python.rs` sends SIGTERM under
+    # cfg(unix) and calls `child.kill()` on Windows).
+    poll = sys.platform != "win32"
     while True:
-        ready, _, _ = select.select([fd], [], [], 0.2)
-        if ready:
-            chunk = os.read(fd, 4096)
-            if not chunk:
-                return buf.decode("utf-8", errors="replace")
-            buf.extend(chunk)
-            if b"\n" in chunk:
-                return buf.decode("utf-8", errors="replace")
+        if poll and not select.select([fd], [], [], 0.2)[0]:
+            continue
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            return buf.decode("utf-8", errors="replace")
+        buf.extend(chunk)
+        if b"\n" in chunk:
+            return buf.decode("utf-8", errors="replace")
 
 
 def _exit_on_term(_signum, _frame):
@@ -77,8 +84,12 @@ def _install_signal_handlers():
     try:
         signal.signal(signal.SIGTERM, _exit_on_term)
         signal.signal(signal.SIGINT, _exit_on_term)
-        signal.siginterrupt(signal.SIGTERM, True)
-        signal.siginterrupt(signal.SIGINT, True)
+        # Unix only: Windows has no `siginterrupt`, and an unguarded
+        # access raises AttributeError, which the except below does not
+        # catch — it killed every Windows run for four months (TP-1074).
+        if hasattr(signal, "siginterrupt"):
+            signal.siginterrupt(signal.SIGTERM, True)
+            signal.siginterrupt(signal.SIGINT, True)
     except (ValueError, OSError):
         pass
 

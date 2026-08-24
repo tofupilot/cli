@@ -226,9 +226,17 @@ def normalize(event):
 
 
 def run_connector(python, connector_path, probe_path):
+    # Match production: `run/python.rs` spawns the connector with
+    # PYTHONIOENCODING=utf-8, and a fidelity harness must not exercise it
+    # under an encoding no station uses. Without both of these, parent and
+    # child fall back to the locale codepage on Windows and the connector's
+    # own notices round-trip by accident.
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     out = subprocess.run(
         [python, connector_path, probe_path],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+        encoding="utf-8", env=env,
     )
     events = []
     for line in out.stdout.splitlines():
@@ -305,7 +313,13 @@ def main():
     pythons = [a for a in sys.argv[1:] if not a.startswith("-")] or [sys.executable]
     with tempfile.TemporaryDirectory() as tmp:
         probe = os.path.join(tmp, "probe_main.py")
-        with open(probe, "w") as fh:
+        # Explicit UTF-8 everywhere below. Python's default text encoding
+        # is the locale codepage on Windows (cp1252), so a probe containing
+        # any non-ASCII character — an em dash in a docstring is enough — is
+        # written in cp1252 and then read back as UTF-8 by the interpreter
+        # running it, which fails with a SyntaxError before the connector is
+        # reached.
+        with open(probe, "w", encoding="utf-8") as fh:
             fh.write(PROBE)
 
         # Copy the connector out of its source tree under a different name.
@@ -314,7 +328,8 @@ def main():
         # the connector itself. The CLI writes it to a temp dir, so this
         # mirrors production rather than working around it.
         connector = os.path.join(tmp, "_tp_connector.py")
-        with open(os.path.abspath(CONNECTOR)) as src, open(connector, "w") as dst:
+        with open(os.path.abspath(CONNECTOR), encoding="utf-8") as src, \
+                open(connector, "w", encoding="utf-8") as dst:
             dst.write(src.read())
 
         failures = []
@@ -347,7 +362,16 @@ def main():
             if not events:
                 failures.append(f"[{label}] connector produced no events\n{proc.stderr[-2000:]}")
                 continue
+            # The connector prints `bridge_ready` before it does anything
+            # else, so a process that dies immediately after still yields a
+            # non-empty stream and skips the branch above. Without this, a
+            # startup crash is reported as "no test_end event" with the
+            # traceback that explains it thrown away.
+            before = len(failures)
             check(events, label, failures)
+            if len(failures) > before and proc.stderr.strip():
+                failures.append(
+                    f"[{label}] connector stderr:\n{proc.stderr[-2000:]}")
             streams[label] = [normalize(e) for e in events]
             logs[label] = user_logs(events)
             print(f"    {len(events)} events")
@@ -361,12 +385,12 @@ def main():
             first_label = list(streams)[0]
             actual = {"events": streams[first_label], "user_logs": logs[first_label]}
             if write_golden:
-                with open(GOLDEN, "w") as fh:
+                with open(GOLDEN, "w", encoding="utf-8") as fh:
                     json.dump(actual, fh, indent=2, sort_keys=True)
                     fh.write("\n")
                 print(f"    wrote golden from {first_label}")
             elif os.path.exists(GOLDEN):
-                with open(GOLDEN) as fh:
+                with open(GOLDEN, encoding="utf-8") as fh:
                     golden = json.load(fh)
                 for label in streams:
                     # Round-trip through JSON: tuples become lists on load, so

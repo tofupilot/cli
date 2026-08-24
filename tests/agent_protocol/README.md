@@ -3,9 +3,17 @@
 Test suite for the `tofupilot run --json` agent protocol.
 
 `ci_smoke.py` is the CI gate (`.github/workflows/test-cli.yml` → `e2e-smoke`):
-it drives the in-repo `demo-operator-ui` procedure end-to-end, answers every
-`ui_request`, and asserts the run reaches `run_finished`. It exits non-zero on
-failure.
+it drives a procedure end-to-end, answers every `ui_request` **and**
+`identify_request`, and asserts the run executed at least one phase and ended
+on a `PASS` outcome. It exits non-zero on failure.
+
+Reaching `run_finished` is not on its own a pass: a procedure whose
+interpreter dies at import time still emits `run_started` … `run_crashed` …
+`run_finished`, so a gate asserting only that pair stays green while running
+zero phases.
+
+CI drives it over four legs — `demo-operator-ui` (YAML framework) and
+`scenarios/ohtf_test` (OpenHTF connector), each on Linux and Windows.
 
 The remaining scripts below are a deeper local regression harness; they hard-
 code `/tmp/` paths and require manual venv setup, so they are **not** in CI.

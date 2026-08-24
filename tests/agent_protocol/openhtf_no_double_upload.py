@@ -188,10 +188,16 @@ def run(python, connector, probe, extra_env=None):
     env.pop("TOFUPILOT_API_KEY", None)  # the CLI strips it; so does the test
     if extra_env:
         env.update(extra_env)
+    # Match production: `run/python.rs` spawns the connector with
+    # PYTHONIOENCODING=utf-8, and a fidelity harness must not exercise it
+    # under an encoding no station uses. Without both of these, parent and
+    # child fall back to the locale codepage on Windows and the connector's
+    # own notices round-trip by accident.
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     proc = subprocess.run(
         [python, connector, probe],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
-        env=env,
+        encoding="utf-8", env=env,
     )
     events = []
     for line in proc.stdout.splitlines():
@@ -201,7 +207,7 @@ def run(python, connector, probe, extra_env=None):
                 events.append(json.loads(line))
             except ValueError:
                 pass
-    return events, proc.stdout
+    return events, proc.stdout, proc.stderr
 
 
 def main():
@@ -210,18 +216,26 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmp:
         probe = os.path.join(tmp, "probe_main.py")
-        with open(probe, "w") as fh:
+        # Explicit UTF-8 everywhere below. Python's default text encoding
+        # is the locale codepage on Windows (cp1252), so a probe containing
+        # any non-ASCII character — an em dash in a docstring is enough — is
+        # written in cp1252 and then read back as UTF-8 by the interpreter
+        # running it, which fails with a SyntaxError before the connector is
+        # reached.
+        with open(probe, "w", encoding="utf-8") as fh:
             fh.write(PROBE)
         # Copied out of its source tree: Python puts a script's own directory
         # first on sys.path, so running connector/openhtf.py directly makes
         # `import openhtf` resolve to the connector itself.
         connector = os.path.join(tmp, "_tp_connector.py")
-        with open(os.path.abspath(CONNECTOR)) as src, open(connector, "w") as dst:
+        with open(os.path.abspath(CONNECTOR), encoding="utf-8") as src, \
+                open(connector, "w", encoding="utf-8") as dst:
             dst.write(src.read())
 
         for python in pythons:
             print(f"=== {python}")
-            events, stdout = run(python, connector, probe)
+            before = len(failures)
+            events, stdout, stderr = run(python, connector, probe)
 
             test_ends = [e for e in events if e.get("type") == "test_end"]
             if len(test_ends) != 1:
@@ -258,6 +272,13 @@ def main():
                     f"[{python}] expected 4 dropped-callback notices "
                     f"(direct, subclass, partial, lambda), got {len(warnings)}")
 
+            # A connector that dies at startup fails every count above with
+            # a zero and explains none of them. Its traceback is on stderr,
+            # which this harness used to drop on the floor.
+            if len(failures) > before and stderr.strip():
+                failures.append(
+                    f"[{python}] connector stderr:\n{stderr[-2000:]}")
+
             print(f"    {len(events)} events, {len(warnings)} notice(s)")
 
             # --- Real-package probe: construction crash + configure() bypass.
@@ -265,17 +286,18 @@ def main():
             up_dir = os.path.join(pkg_dir, "tofupilot", "openhtf")
             os.makedirs(up_dir, exist_ok=True)
             for rel in ("tofupilot/__init__.py",):
-                with open(os.path.join(pkg_dir, rel), "w") as fh:
+                with open(os.path.join(pkg_dir, rel), "w", encoding="utf-8") as fh:
                     fh.write("")
-            with open(os.path.join(up_dir, "__init__.py"), "w") as fh:
+            with open(os.path.join(up_dir, "__init__.py"), "w", encoding="utf-8") as fh:
                 fh.write("from .upload import upload\n")
-            with open(os.path.join(up_dir, "upload.py"), "w") as fh:
+            with open(os.path.join(up_dir, "upload.py"), "w", encoding="utf-8") as fh:
                 fh.write(FAKE_TOFUPILOT_UPLOAD)
             probe_real = os.path.join(tmp, "probe_real.py")
-            with open(probe_real, "w") as fh:
+            with open(probe_real, "w", encoding="utf-8") as fh:
                 fh.write(PROBE_REAL_PACKAGE)
 
-            events2, stdout2 = run(
+            before2 = len(failures)
+            events2, stdout2, stderr2 = run(
                 python, connector, probe_real,
                 extra_env={"PYTHONPATH": pkg_dir},
             )
@@ -303,6 +325,11 @@ def main():
                 failures.append(
                     f"[{python}] real-package probe: no neutralization notice "
                     f"— the user was not told their callback is ignored")
+
+            if len(failures) > before2 and stderr2.strip():
+                failures.append(
+                    f"[{python}] real-package probe, connector stderr:\n"
+                    f"{stderr2[-2000:]}")
 
             print(f"    real-package probe: {len(events2)} events, "
                   f"{len(neutralized)} neutralization notice(s)")
