@@ -45,6 +45,8 @@ fn main() {
         specta::ts::export::<StudioEntryKind>(&config).unwrap(),
         specta::ts::export::<StudioDiagnostic>(&config).unwrap(),
         specta::ts::export::<StudioDiagnosticSeverity>(&config).unwrap(),
+        specta::ts::export::<StudioDiagnosticLocation>(&config).unwrap(),
+        specta::ts::export::<StudioDiagnosticList>(&config).unwrap(),
         specta::ts::export::<StudioErrorCode>(&config).unwrap(),
         specta::ts::export::<StudioSequence>(&config).unwrap(),
         specta::ts::export::<StudioSequenceUnit>(&config).unwrap(),

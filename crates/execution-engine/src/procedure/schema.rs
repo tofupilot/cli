@@ -421,6 +421,93 @@ impl From<ProcedureYaml> for ProcedureDefinition {
     }
 }
 
+/// The top-level list of the procedure YAML an entry lives in. Mirrors the
+/// web's `EntryLocation.list` so a diagnostic's place resolves to a line
+/// with the helper the Sequence view already trusts (`findListEntryLine`)
+/// instead of by re-searching the message text in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefList {
+    Plugs,
+    Setup,
+    Main,
+    Teardown,
+}
+
+impl RefList {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefList::Plugs => "plugs",
+            RefList::Setup => "setup",
+            RefList::Main => "main",
+            RefList::Teardown => "teardown",
+        }
+    }
+}
+
+/// Where a lint finding points: an entry of a top-level list, by
+/// position (the payload preserves file order, so this is the file's
+/// index too), and optionally the key inside that entry (`python`,
+/// `executable.command`, `config.<name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefLocation {
+    pub list: RefList,
+    pub index: usize,
+    pub key: Option<String>,
+}
+
+impl RefLocation {
+    pub fn entry(list: RefList, index: usize) -> Self {
+        Self {
+            list,
+            index,
+            key: None,
+        }
+    }
+    pub fn key(list: RefList, index: usize, key: impl Into<String>) -> Self {
+        Self {
+            list,
+            index,
+            key: Some(key.into()),
+        }
+    }
+}
+
+/// `Error`: the run would fail or silently do the wrong thing — reported
+/// by `validate`, refused by the runner. `Warning`: a likely mistake the
+/// lint cannot be certain of — reported, never blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefSeverity {
+    Error,
+    Warning,
+}
+
+/// One finding of `resolve_runtime_refs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefProblem {
+    pub severity: RefSeverity,
+    pub message: String,
+    pub location: RefLocation,
+}
+
+impl std::fmt::Display for RefProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl RefProblem {
+    pub fn error(message: impl Into<String>, location: RefLocation) -> Self {
+        Self {
+            severity: RefSeverity::Error,
+            message: message.into(),
+            location,
+        }
+    }
+    pub fn is_error(&self) -> bool {
+        self.severity == RefSeverity::Error
+    }
+}
+
 impl ProcedureDefinition {
     /// NOTE: no production code path writes this back to disk today —
     /// only tests round-trip it. If that ever changes, mind the scope
@@ -1422,19 +1509,31 @@ impl ProcedureDefinition {
         self.iter_phases_with_stage().collect()
     }
 
-    /// Everything that must hold before a run and that LOADING lets
-    /// through, one message per problem: every `python:` reference
-    /// resolved against the procedure directory, and an executable
-    /// phase whose command is still empty.
+    /// The procedure lint: everything that must hold before a run and
+    /// that LOADING lets through, one finding per problem with the entry
+    /// it points at. Every `python:` reference resolved against the
+    /// procedure directory, the referenced symbol present in its file, a
+    /// plug's `config:` keys matching its class's `__init__`, and an
+    /// executable phase whose command is still empty.
     ///
-    /// Loading is purely structural (no disk access), so both pass
-    /// `load_procedure_definition` and would otherwise surface mid-run:
-    /// a dangling phase ref as a tp_worker traceback, a dangling plug
-    /// ref as a silently omitted plug (`get_plug_configs_for_job` only
-    /// logs) — and worse for an empty command, since `sh -c ""` exits 0,
-    /// so it is a phase that silently passes without doing anything.
-    /// Callers decide the consequence: the studio daemon turns these
-    /// into diagnostics, the run engine refuses to start.
+    /// Loading is purely structural (no disk access), so all of these
+    /// pass `load_procedure_definition` and would otherwise surface
+    /// mid-run: a dangling phase ref as a tp_worker traceback, a dangling
+    /// plug ref as a silently omitted plug (`get_plug_configs_for_job`
+    /// only logs), a typo in a class name or a config key as a
+    /// `TypeError` at setup — on a bench, with hardware committed — and
+    /// worse for an empty command, since `sh -c ""` exits 0, so it is a
+    /// phase that silently passes without doing anything. Callers decide
+    /// the consequence: the studio daemon turns these into diagnostics,
+    /// the run engine refuses to start on the `Error` ones.
+    ///
+    /// The symbol and config rules read the `.py` file as TEXT, never
+    /// importing it (`pysource`) — the same column-0 scan the Studio
+    /// Inspector already applies, so both surfaces agree, and safe to run
+    /// on every save and every keystroke. A signature read off annotated
+    /// attributes of a plain class (no `@dataclass`, no `BaseModel`) may
+    /// belong to a base in another file, so mismatches against it are
+    /// `Warning`s; a `def __init__` or a generated constructor is certain.
     ///
     /// Mirrors what actually happens at run time, no stricter:
     /// - Plugs go through `parse` at job build (`to_config_json`), so on a
@@ -1456,7 +1555,9 @@ impl ProcedureDefinition {
         &self,
         procedure_dir: &Path,
         main_filter: Option<&HashSet<String>>,
-    ) -> Vec<String> {
+    ) -> Vec<RefProblem> {
+        use super::pysource;
+
         // The dotted-class spelling (`plugs.psu.PowerSupply` for class
         // PowerSupply in plugs/psu.py) is the most common way to land
         // here: every dot is a directory, the class needs a ':'. When
@@ -1480,50 +1581,186 @@ impl ProcedureDefinition {
         };
         let mut problems = Vec::new();
         if main_filter.is_none() {
-            for plug in &self.plugs {
-                if let Err(e) = plug.python.parse(procedure_dir) {
-                    problems.push(format!(
-                        "Plug `{}`: {}{}",
-                        plug.key,
-                        e,
-                        colon_hint(&plug.python)
+            for (index, plug) in self.plugs.iter().enumerate() {
+                let at = |key: &str| RefLocation::key(RefList::Plugs, index, key);
+                let (file, class) = match plug.python.parse(procedure_dir) {
+                    Err(e) => {
+                        problems.push(RefProblem::error(
+                            format!("Plug `{}`: {}{}", plug.key, e, colon_hint(&plug.python)),
+                            at("python"),
+                        ));
+                        continue;
+                    }
+                    Ok(resolved) => resolved,
+                };
+                // Unreadable (permissions, binary): cannot tell, say nothing.
+                let Ok(source) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                if !pysource::binds_top_level(&source, &class) {
+                    problems.push(RefProblem::error(
+                        format!(
+                            "Plug `{}`: class `{}` not found in {} — no top-level `class {}` (or import) defines it",
+                            plug.key,
+                            class,
+                            file.display(),
+                            class
+                        ),
+                        at("python"),
                     ));
+                    continue;
+                }
+                // `config:` is splatted into the class as kwargs
+                // (`plug_class(**config)`), so a key the constructor does
+                // not take, or a required one it does not get, is a
+                // TypeError at setup. `None`: the signature is not
+                // knowable from this file — issue nothing.
+                let Some(sig) = pysource::init_signature(&source, &class) else {
+                    continue;
+                };
+                let severity = if sig.certain {
+                    RefSeverity::Error
+                } else {
+                    RefSeverity::Warning
+                };
+                let keys: Vec<&String> = plug
+                    .config
+                    .as_ref()
+                    .map(|m| m.keys().collect())
+                    .unwrap_or_default();
+                if !sig.kwargs {
+                    for key in &keys {
+                        if sig.params.iter().any(|p| &p.name == *key) {
+                            continue;
+                        }
+                        let hint = pysource::suggestion_for(key, &sig.params)
+                            .map(|s| format!(" — did you mean `{s}`?"))
+                            .unwrap_or_default();
+                        problems.push(RefProblem {
+                            severity,
+                            message: format!(
+                                "Plug `{}`: `{}` is not a parameter of `{}.__init__`{}",
+                                plug.key, key, class, hint
+                            ),
+                            location: at(&format!("config.{key}")),
+                        });
+                    }
+                }
+                for param in sig.params.iter().filter(|p| p.required) {
+                    if keys.iter().any(|k| **k == param.name) {
+                        continue;
+                    }
+                    problems.push(RefProblem {
+                        severity,
+                        message: format!(
+                            "Plug `{}`: `{}.__init__` requires `{}`, which `config:` does not set — the plug will fail to initialize",
+                            plug.key, class, param.name
+                        ),
+                        location: if plug.config.is_some() {
+                            at("config")
+                        } else {
+                            RefLocation::entry(RefList::Plugs, index)
+                        },
+                    });
                 }
             }
         }
-        for (stage, phase) in self.iter_phases_with_stage() {
-            if phase.should_skip() {
-                continue;
-            }
-            if let Some(filter) = main_filter {
-                if matches!(stage, StageScope::Main) && !filter.contains(&phase.key) {
+        let lists = [
+            (RefList::Setup, &self.setup),
+            (RefList::Main, &self.main),
+            (RefList::Teardown, &self.teardown),
+        ];
+        for (list, phases) in lists {
+            for (index, phase) in phases.iter().enumerate() {
+                if phase.should_skip() {
                     continue;
                 }
-            }
-            if let Some(exec) = &phase.executable {
-                if exec.command.trim().is_empty() {
-                    problems.push(format!(
-                        "Phase `{}`: executable has no command",
-                        phase.key
-                    ));
+                if let Some(filter) = main_filter {
+                    if list == RefList::Main && !filter.contains(&phase.key) {
+                        continue;
+                    }
                 }
-            }
-            let Some(spec) = &phase.python else { continue };
-            match spec.resolve_path(procedure_dir) {
-                Err(e) => problems.push(format!("Phase `{}`: {}", phase.key, e)),
-                Ok((file, callable)) => {
-                    if !crate::python::is_valid_python_identifier(&callable) {
-                        problems.push(format!(
-                            "Phase `{}`: Invalid Python identifier: '{}'",
-                            phase.key, callable
+                let at = |key: &str| RefLocation::key(list, index, key);
+                // Two specs under one key: the worker records both under
+                // the same name, so validators and aggregations read
+                // whichever landed last — wrong data, silently. A v1 rule.
+                let mut seen = HashSet::new();
+                for m in &phase.measurements {
+                    if !seen.insert(m.key.as_str()) {
+                        problems.push(RefProblem::error(
+                            format!(
+                                "Phase `{}`: duplicate measurement key `{}` — every measurement of a phase needs its own key",
+                                phase.key, m.key
+                            ),
+                            at("measurements"),
                         ));
-                    } else if !file.exists() && spec.is_tree_bound(procedure_dir) {
-                        problems.push(format!(
-                            "Phase `{}`: Python file not found: {}{}",
-                            phase.key,
-                            file.display(),
-                            colon_hint(spec)
+                    }
+                }
+                if let Some(exec) = &phase.executable {
+                    if exec.command.trim().is_empty() {
+                        problems.push(RefProblem::error(
+                            format!("Phase `{}`: executable has no command", phase.key),
+                            at("executable.command"),
                         ));
+                    }
+                }
+                let Some(spec) = &phase.python else { continue };
+                match spec.resolve_path(procedure_dir) {
+                    Err(e) => problems.push(RefProblem::error(
+                        format!("Phase `{}`: {}", phase.key, e),
+                        at("python"),
+                    )),
+                    Ok((file, callable)) => {
+                        if !crate::python::is_valid_python_identifier(&callable) {
+                            problems.push(RefProblem::error(
+                                format!(
+                                    "Phase `{}`: Invalid Python identifier: '{}'",
+                                    phase.key, callable
+                                ),
+                                at("python"),
+                            ));
+                        } else if !file.exists() {
+                            if spec.is_tree_bound(procedure_dir) {
+                                problems.push(RefProblem::error(
+                                    format!(
+                                        "Phase `{}`: Python file not found: {}{}",
+                                        phase.key,
+                                        file.display(),
+                                        colon_hint(spec)
+                                    ),
+                                    at("python"),
+                                ));
+                            } else {
+                                // Not in the tree: tp_worker falls back to
+                                // importlib, so this may be a package in the
+                                // environment — or a typo the runtime will
+                                // catch. Say so, without blocking.
+                                problems.push(RefProblem {
+                                    severity: RefSeverity::Warning,
+                                    message: format!(
+                                        "Phase `{}`: Python file not found in the project: {} — `{}` will be imported from the Python environment at run time; check the spelling if that is not intended{}",
+                                        phase.key,
+                                        file.display(),
+                                        spec.get_module(),
+                                        colon_hint(spec)
+                                    ),
+                                    location: at("python"),
+                                });
+                            }
+                        } else if let Ok(source) = std::fs::read_to_string(&file) {
+                            if !pysource::binds_top_level(&source, &callable) {
+                                problems.push(RefProblem::error(
+                                    format!(
+                                        "Phase `{}`: `{}` not found in {} — no top-level `def {}` (or class/import) defines it",
+                                        phase.key,
+                                        callable,
+                                        file.display(),
+                                        callable
+                                    ),
+                                    at("python"),
+                                ));
+                            }
+                        }
                     }
                 }
             }

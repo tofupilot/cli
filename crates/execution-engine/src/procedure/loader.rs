@@ -1,5 +1,5 @@
 use super::error::CommandError;
-use crate::procedure::schema::{ProcedureDefinition, ProcedureYaml};
+use crate::procedure::schema::{ProcedureDefinition, ProcedureYaml, RefList, RefLocation};
 use std::collections::HashSet;
 use std::path::Path;
 use validator::Validate;
@@ -114,37 +114,175 @@ pub fn read_procedure_name(file_path: &Path) -> Option<String> {
 /// so proposed content can be checked before it is written.
 #[must_use = "procedure definition should be checked for validation errors"]
 pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefinition, String> {
-    let raw: ProcedureYaml =
-        serde_yaml::from_str(content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
+    load_procedure_definition_from_str_located(content).map_err(join_messages)
+}
+
+/// The one-string form of a refusal: every collected rule failure, one
+/// per line, so a caller printing the error shows all of them.
+fn join_messages(errors: Vec<LoadError>) -> String {
+    errors
+        .into_iter()
+        .map(|e| e.message)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A refusal to load, with where it points when the loader knows: the
+/// YAML position of a parse error, or the entry a post-parse rule refused
+/// (a duplicate key, a bad `depends_on`). Rules that judge the whole file
+/// carry neither. `message` alone is what `load_procedure_definition`
+/// callers see; Studio uses the rest to underline the right line.
+///
+/// A parse or schema failure is returned alone — nothing after it can be
+/// judged. The post-parse rules are all evaluated and returned together,
+/// so fixing one does not reveal the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadError {
+    pub message: String,
+    /// 1-based, serde_yaml's own position of a parse error.
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub location: Option<RefLocation>,
+}
+
+impl LoadError {
+    fn text(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            line: None,
+            column: None,
+            location: None,
+        }
+    }
+    fn at(message: impl Into<String>, location: RefLocation) -> Self {
+        Self {
+            message: message.into(),
+            line: None,
+            column: None,
+            location: Some(location),
+        }
+    }
+}
+
+impl From<String> for LoadError {
+    fn from(message: String) -> Self {
+        Self::text(message)
+    }
+}
+
+/// `load_procedure_definition` over a file, keeping positions.
+pub fn load_procedure_definition_located(
+    file_path: &Path,
+) -> Result<ProcedureDefinition, Vec<LoadError>> {
+    let content = std::fs::read_to_string(file_path).map_err(|e| {
+        vec![LoadError::text(format!(
+            "Failed to read {}: {}",
+            file_path.display(),
+            e
+        ))]
+    })?;
+    load_procedure_definition_from_str_located(&content)
+}
+
+/// `load_procedure_definition_from_str`, keeping positions. Refuses the
+/// definition when any rule failed — the runner's contract.
+pub fn load_procedure_definition_from_str_located(
+    content: &str,
+) -> Result<ProcedureDefinition, Vec<LoadError>> {
+    let outcome = inspect_procedure_definition(content);
+    match (outcome.definition, outcome.errors.is_empty()) {
+        (Some(def), true) => Ok(def),
+        (_, _) => Err(outcome.errors),
+    }
+}
+
+/// Everything the loader can say about a procedure text: the definition
+/// whenever the text PARSED, and every schema or rule failure found on it.
+///
+/// Loading is a refusal ("can the runner execute this?"); inspecting is
+/// not. A duplicate phase key makes a procedure unrunnable, but the
+/// struct behind it is fully built and safe to look at — so Studio lints
+/// it and shows the duplicate next to the dangling `python:` three lines
+/// below, instead of revealing one problem per fix. Only a parse failure
+/// leaves nothing to inspect.
+pub struct LoadOutcome {
+    pub definition: Option<ProcedureDefinition>,
+    pub errors: Vec<LoadError>,
+}
+
+/// `inspect_procedure_definition` over a file; an unreadable file is a
+/// single error with no definition.
+pub fn inspect_procedure_definition_file(file_path: &Path) -> LoadOutcome {
+    match std::fs::read_to_string(file_path) {
+        Ok(content) => inspect_procedure_definition(&content),
+        Err(e) => LoadOutcome {
+            definition: None,
+            errors: vec![LoadError::text(format!(
+                "Failed to read {}: {}",
+                file_path.display(),
+                e
+            ))],
+        },
+    }
+}
+
+pub fn inspect_procedure_definition(content: &str) -> LoadOutcome {
+    let raw: ProcedureYaml = match serde_yaml::from_str(content) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return LoadOutcome {
+                definition: None,
+                errors: vec![LoadError {
+                    message: format!("Failed to parse YAML: {}", e),
+                    line: e.location().map(|l| l.line() as u32),
+                    column: e.location().map(|l| l.column() as u32),
+                    location: None,
+                }],
+            }
+        }
+    };
 
     let procedure_def = ProcedureDefinition::from(raw);
 
-    procedure_def
-        .validate()
-        .map_err(|e| format!("Validation failed: {}", e))?;
+    // Every check below is evaluated; the failures are returned together.
+    let mut errors: Vec<LoadError> = Vec::new();
+
+    if let Err(e) = procedure_def.validate() {
+        errors.push(LoadError::text(format!("Validation failed: {}", e)));
+    }
 
     if let Some(unit) = &procedure_def.unit {
-        unit.validate_auto_identify()
-            .map_err(|e| format!("Validation failed: {}", e))?;
+        if let Err(e) = unit.validate_auto_identify() {
+            errors.push(LoadError::text(format!("Validation failed: {}", e)));
+        }
 
         if let Some(md) = &unit.metadata {
-            crate::procedure::schema::validate_metadata_keys(
+            if let Err(e) = crate::procedure::schema::validate_metadata_keys(
                 md.keys().map(|k| k.as_str()),
                 "unit.metadata",
-            )
-            .map_err(|e| format!("Validation failed: {}", e))?;
+            ) {
+                errors.push(LoadError::text(format!("Validation failed: {}", e)));
+            }
         }
     }
 
     for (_, phase) in procedure_def.get_all_phases_with_stage_scope() {
-        phase.validate_single_runtime()?;
+        if let Err(e) = phase.validate_single_runtime() {
+            errors.push(LoadError::text(e));
+        }
         if let Some(ui) = &phase.ui {
             if let Some(components) = &ui.components {
                 for comp in components {
-                    comp.validate_width()?;
-                    comp.validate_aspect()?;
-                    comp.validate_fit()?;
-                    comp.validate_options_count()?;
+                    for check in [
+                        comp.validate_width(),
+                        comp.validate_aspect(),
+                        comp.validate_fit(),
+                        comp.validate_options_count(),
+                    ] {
+                        if let Err(e) = check {
+                            errors.push(LoadError::text(e));
+                        }
+                    }
 
                     // Option-driven components become "choose nothing from
                     // nothing" at runtime if the options list is empty or
@@ -158,10 +296,10 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
                     if needs_options {
                         let empty = comp.options.as_ref().map(|o| o.is_empty()).unwrap_or(true);
                         if empty {
-                            return Err(format!(
+                            errors.push(LoadError::text(format!(
                                 "UI component `{}` (type `{:?}`) requires a non-empty `options` list",
                                 comp.key, comp.component_type,
-                            ));
+                            )));
                         }
                     }
                 }
@@ -181,29 +319,34 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
         .chain(procedure_def.teardown.iter())
     {
         if phase.scope == Some(crate::procedure::schema::Scope::Station) {
-            return Err(format!(
+            errors.push(LoadError::text(format!(
                 "Phase `{}` has `scope: station`, which is only valid on plugs. \
                  Use `scope: execution` (execution-wide) or `scope: slot` (per-slot) on phases",
                 phase.key
-            ));
+            )));
         }
     }
 
     // A procedure with no main phases isn't a test — the runner would exit
     // PASS without doing anything, which is misleading.
     if procedure_def.main.is_empty() {
-        return Err("Procedure has no `main` phases — at least one is required".into());
+        errors.push(LoadError::text(
+            "Procedure has no `main` phases — at least one is required",
+        ));
     }
 
     // Phase keys must be unique across `main`. Duplicates corrupt the
     // dependency graph and produce phantom duplicate phase events at runtime
     // because the scheduler indexes jobs by key.
     let mut seen_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for phase in &procedure_def.main {
+    for (index, phase) in procedure_def.main.iter().enumerate() {
         if !seen_keys.insert(phase.key.as_str()) {
-            return Err(format!(
-                "Duplicate phase key `{}` — every main phase must have a unique key",
-                phase.key
+            errors.push(LoadError::at(
+                format!(
+                    "Duplicate phase key `{}` — every main phase must have a unique key",
+                    phase.key
+                ),
+                RefLocation::key(RefList::Main, index, "key"),
             ));
         }
     }
@@ -221,13 +364,16 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
     // two distinct names that derive the same key.
     let mut seen_plug_keys: std::collections::HashMap<String, &str> =
         std::collections::HashMap::new();
-    for plug in &procedure_def.plugs {
+    for (index, plug) in procedure_def.plugs.iter().enumerate() {
         if let Some(first) = seen_plug_keys.insert(plug.key.to_lowercase(), plug.name.as_str()) {
-            return Err(format!(
-                "Duplicate plug key `{}` (plugs `{}` and `{}`) — every plug must have a \
-                 unique key, because a phase receives a plug by naming that key as a \
-                 parameter. Set an explicit `key:` on one of them",
-                plug.key, first, plug.name
+            errors.push(LoadError::at(
+                format!(
+                    "Duplicate plug key `{}` (plugs `{}` and `{}`) — every plug must have a \
+                     unique key, because a phase receives a plug by naming that key as a \
+                     parameter. Set an explicit `key:` on one of them",
+                    plug.key, first, plug.name
+                ),
+                RefLocation::entry(RefList::Plugs, index),
             ));
         }
     }
@@ -236,14 +382,17 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
     // Silently ignoring unknown dependencies lets a typo mask broken ordering.
     let known_keys: std::collections::HashSet<&str> =
         procedure_def.main.iter().map(|p| p.key.as_str()).collect();
-    for phase in &procedure_def.main {
+    for (index, phase) in procedure_def.main.iter().enumerate() {
         for dep in &phase.depends_on {
             if !known_keys.contains(dep.as_str()) {
-                return Err(format!(
-                    "Phase `{}` depends on unknown phase `{}` (known phases: {})",
-                    phase.key,
-                    dep,
-                    known_keys.iter().copied().collect::<Vec<_>>().join(", ")
+                errors.push(LoadError::at(
+                    format!(
+                        "Phase `{}` depends on unknown phase `{}` (known phases: {})",
+                        phase.key,
+                        dep,
+                        known_keys.iter().copied().collect::<Vec<_>>().join(", ")
+                    ),
+                    RefLocation::key(RefList::Main, index, "depends_on"),
                 ));
             }
         }
@@ -252,21 +401,42 @@ pub fn load_procedure_definition_from_str(content: &str) -> Result<ProcedureDefi
     // Belt: explicit self-reference pre-check. Three-color DFS below
     // catches this too, but the error text is clearer when handled
     // directly ("depends on itself" vs "a -> a").
-    for phase in &procedure_def.main {
+    let mut self_dependent = false;
+    for (index, phase) in procedure_def.main.iter().enumerate() {
         if phase.depends_on.iter().any(|d| d == &phase.key) {
-            return Err(format!("Phase `{}` depends on itself", phase.key));
+            self_dependent = true;
+            errors.push(LoadError::at(
+                format!("Phase `{}` depends on itself", phase.key),
+                RefLocation::key(RefList::Main, index, "depends_on"),
+            ));
         }
     }
 
-    // Braces: full cycle detection in the dependency graph.
-    if let Some(cycle) = find_dependency_cycle(&procedure_def.main) {
-        return Err(format!(
-            "Circular dependency detected in `depends_on`: {}",
-            cycle.join(" -> ")
-        ));
+    // Braces: full cycle detection in the dependency graph. Skipped when a
+    // self-reference was already reported, which the DFS would repeat as
+    // `a -> a`.
+    if !self_dependent {
+        if let Some(cycle) = find_dependency_cycle(&procedure_def.main) {
+            // Point at the first phase of the cycle as written in the file.
+            let index = procedure_def
+                .main
+                .iter()
+                .position(|p| cycle.contains(&p.key))
+                .unwrap_or(0);
+            errors.push(LoadError::at(
+                format!(
+                    "Circular dependency detected in `depends_on`: {}",
+                    cycle.join(" -> ")
+                ),
+                RefLocation::key(RefList::Main, index, "depends_on"),
+            ));
+        }
     }
 
-    Ok(procedure_def)
+    LoadOutcome {
+        definition: Some(procedure_def),
+        errors,
+    }
 }
 
 #[cfg(test)]
@@ -315,8 +485,10 @@ plugs:
         assert!(plugs_with_explicit_scope("name: P\n").is_empty());
         // An invalid scope value is still a stated one — the page shows
         // the parse's spelling, and the parse is what rejects it.
-        assert!(plugs_with_explicit_scope("plugs:\n  - name: Bad\n    scope: nonsense\n")
-            .contains("Bad"));
+        assert!(
+            plugs_with_explicit_scope("plugs:\n  - name: Bad\n    scope: nonsense\n")
+                .contains("Bad")
+        );
     }
 
     /// Names are trimmed to match `PlugDefinitionYaml.name`, which
@@ -329,10 +501,7 @@ plugs:
     }
 
     fn load_from_str(yaml: &str) -> Result<ProcedureDefinition, String> {
-        let dir = std::env::temp_dir().join(format!(
-            "tp-loader-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("tp-loader-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("procedure.yaml");
         std::fs::write(&path, yaml).unwrap();
@@ -487,7 +656,10 @@ main:
 "#,
         )
         .expect_err("`DMM` and `dmm` are one binding for a phase");
-        assert!(err.contains("Duplicate plug key"), "unexpected error: {err}");
+        assert!(
+            err.contains("Duplicate plug key"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The check must not fire on the ordinary case.
@@ -570,15 +742,20 @@ main:
         let problems = def.resolve_runtime_refs(&dir, None);
         assert_eq!(problems.len(), 1, "unexpected: {problems:?}");
         assert!(
-            problems[0].contains("`flash`") && problems[0].contains("no command"),
+            problems[0].message.contains("`flash`") && problems[0].message.contains("no command"),
             "got: {}",
-            problems[0]
+            problems[0].message
         );
 
         // A partial run that does not include the phase is not blocked by
         // it — same rule as the python refs beside it.
         let filter: HashSet<String> = ["measure".to_string()].into_iter().collect();
-        assert!(def.resolve_runtime_refs(&dir, Some(&filter)).is_empty());
+        assert!(
+            def.resolve_runtime_refs(&dir, Some(&filter))
+                .iter()
+                .all(|p| !p.is_error()),
+            "a partial run must not be gated by an unrelated plug or phase"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -614,10 +791,18 @@ main:
             .expect("structural loading must let dangling refs through");
         let problems = def.resolve_runtime_refs(&dir, None);
         assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
-        assert!(problems[0].starts_with("Plug `psu`"), "got: {}", problems[0]);
-        assert!(problems[1].starts_with("Phase `p1`"), "got: {}", problems[1]);
+        assert!(
+            problems[0].message.starts_with("Plug `psu`"),
+            "got: {}",
+            problems[0]
+        );
+        assert!(
+            problems[1].message.starts_with("Phase `p1`"),
+            "got: {}",
+            problems[1]
+        );
         for p in &problems {
-            assert!(p.contains("Python file not found"), "got: {p}");
+            assert!(p.message.contains("Python file not found"), "got: {p}");
         }
 
         // The ':' spelling resolves both against the same files.
@@ -642,6 +827,387 @@ main:
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Scaffold for the lint tests: a procedure dir with one plug file and
+    /// one phase file, and the YAML written by the caller.
+    fn lint_fixture(
+        plug_py: &str,
+        phase_py: &str,
+        yaml: &str,
+    ) -> (std::path::PathBuf, ProcedureDefinition) {
+        let dir = std::env::temp_dir().join(format!("tp-lint-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("phases")).unwrap();
+        std::fs::create_dir_all(dir.join("plugs")).unwrap();
+        std::fs::write(dir.join("plugs/psu.py"), plug_py).unwrap();
+        std::fs::write(dir.join("phases/main.py"), phase_py).unwrap();
+        let path = dir.join("procedure.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let def = load_procedure_definition(&path).expect("fixture must load");
+        (dir, def)
+    }
+
+    #[test]
+    fn resolve_runtime_refs_reports_a_symbol_the_file_does_not_define() {
+        // The file exists, the identifier is valid — and the name is a
+        // typo. Before this rule the first signal was an import failure
+        // on the bench.
+        let (dir, def) = lint_fixture(
+            "class PowerSupply:\n    def __init__(self, address):\n        pass\n",
+            "def check():\n    pass\n",
+            r#"
+name: Typos
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PowerSuply
+main:
+  - key: p1
+    name: P1
+    python: phases.main:chek
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
+        assert!(
+            problems[0].message.contains("class `PowerSuply` not found"),
+            "got: {}",
+            problems[0]
+        );
+        assert_eq!(
+            problems[0].location,
+            RefLocation::key(RefList::Plugs, 0, "python")
+        );
+        assert!(
+            problems[1].message.contains("`chek` not found"),
+            "got: {}",
+            problems[1]
+        );
+        assert_eq!(
+            problems[1].location,
+            RefLocation::key(RefList::Main, 0, "python")
+        );
+        assert!(problems.iter().all(|p| p.is_error()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_runtime_refs_accepts_re_exports_and_factories() {
+        // A lint that blocks a run must not call a working reference
+        // broken: `module:Name` resolves through a top-level import or
+        // assignment just as well as through `class Name`.
+        let (dir, def) = lint_fixture(
+            "from .impl import PowerSupply\nMeter = make_plug('dmm')\n",
+            "from .steps import check\n",
+            r#"
+name: Indirect
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PowerSupply
+  - name: DMM
+    key: dmm
+    python: plugs.psu:Meter
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert!(problems.is_empty(), "unexpected: {problems:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_runtime_refs_checks_plug_config_against_init() {
+        // `config:` is splatted into the class as kwargs: an unknown key
+        // and a missing required one are both a TypeError at setup. The
+        // suggestion uses the same two-edit threshold as the Inspector.
+        let (dir, def) = lint_fixture(
+            "class PowerSupply:\n    def __init__(self, address: str, port: int = 5025, initial_voltage: float = 0.0):\n        pass\n",
+            "def check():\n    pass\n",
+            r#"
+name: Config
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PowerSupply
+    config:
+      port: 1
+      intial_voltage: 3.3
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
+        let unknown = problems
+            .iter()
+            .find(|p| p.message.contains("`intial_voltage` is not a parameter"))
+            .expect("unknown key reported");
+        assert!(
+            unknown.message.contains("did you mean `initial_voltage`"),
+            "got: {unknown}"
+        );
+        assert_eq!(
+            unknown.location,
+            RefLocation::key(RefList::Plugs, 0, "config.intial_voltage")
+        );
+        assert!(unknown.is_error(), "a def __init__ is authoritative");
+        let missing = problems
+            .iter()
+            .find(|p| p.message.contains("requires `address`"))
+            .expect("missing required reported");
+        assert_eq!(
+            missing.location,
+            RefLocation::key(RefList::Plugs, 0, "config")
+        );
+        assert!(missing.is_error());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_runtime_refs_does_not_read_a_docstring_as_dataclass_fields() {
+        // A Google-style docstring is the house style, and its
+        // `Attributes:` / `Raises:` entries are indented `name: text` —
+        // the shape of an annotated field. Read as fields on a
+        // `@dataclass`, which is a certain constructor, every one becomes
+        // an Error there is no `config:` the author can write to satisfy.
+        let (dir, def) = lint_fixture(
+            concat!(
+                "from dataclasses import dataclass\n",
+                "\n",
+                "@dataclass\n",
+                "class PowerSupply:\n",
+                "    \"\"\"A PSU config.\n",
+                "\n",
+                "    Attributes:\n",
+                "        address: the VISA address\n",
+                "    Raises:\n",
+                "        ValueError: if bad\n",
+                "    \"\"\"\n",
+                "\n",
+                "    address: str = \"192.168.1.1\"\n",
+                "    port: int = 5025\n",
+            ),
+            "def check():\n    pass\n",
+            r#"
+name: Docstring
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PowerSupply
+    config:
+      port: 1
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert!(problems.is_empty(), "unexpected: {problems:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_runtime_refs_config_rules_are_warnings_off_attributes_and_silent_on_kwargs() {
+        // No `def __init__`: the annotated attributes may be a dataclass —
+        // or a plain class inheriting its constructor from another file.
+        // The lint cannot tell, so it warns and never refuses.
+        let (dir, def) = lint_fixture(
+            "class PowerSupply(Base):\n    address: str\n    port: int = 1\n\nclass Meter:\n    def __init__(self, **kwargs):\n        pass\n\nclass Opaque(Base):\n    pass\n",
+            "def check():\n    pass\n",
+            r#"
+name: Uncertain
+plugs:
+  - name: PSU
+    key: psu
+    python: plugs.psu:PowerSupply
+    config:
+      baud: 9600
+  - name: DMM
+    key: dmm
+    python: plugs.psu:Meter
+    config:
+      anything: goes
+  - name: Opaque
+    key: opaque
+    python: plugs.psu:Opaque
+    config:
+      whatever: 1
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        // PSU: unknown `baud` + missing `address`, both warnings. DMM takes
+        // **kwargs: nothing. Opaque: signature unknowable: nothing.
+        assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
+        assert!(problems.iter().all(|p| !p.is_error()), "got: {problems:?}");
+        assert!(
+            problems.iter().all(|p| p.message.starts_with("Plug `psu`")),
+            "got: {problems:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_runtime_refs_reports_duplicate_measurement_keys() {
+        let (dir, def) = lint_fixture(
+            "class PowerSupply:\n    pass\n",
+            "def check():\n    pass\n",
+            r#"
+name: Dup Measurements
+main:
+  - key: p1
+    name: P1
+    python: phases.main:check
+    measurements:
+      - key: voltage
+        name: Voltage
+      - key: current
+        name: Current
+      - key: voltage
+        name: Voltage again
+"#,
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert_eq!(problems.len(), 1, "unexpected: {problems:?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("duplicate measurement key `voltage`"),
+            "got: {}",
+            problems[0]
+        );
+        assert_eq!(
+            problems[0].location,
+            RefLocation::key(RefList::Main, 0, "measurements")
+        );
+        assert!(problems[0].is_error());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn located_load_errors_point_at_the_entry_or_the_parse_position() {
+        let dup = "name: A\nplugs:\n  - name: Power Supply\n    python: plugs.a:A\n  - name: Power-Supply\n    python: plugs.b:B\nmain:\n  - key: p\n    name: P\n";
+        let errs = load_procedure_definition_from_str_located(dup).unwrap_err();
+        assert_eq!(errs.len(), 1, "got: {errs:?}");
+        let err = &errs[0];
+        assert!(
+            err.message.contains("Duplicate plug key"),
+            "got: {}",
+            err.message
+        );
+        assert_eq!(err.location, Some(RefLocation::entry(RefList::Plugs, 1)));
+        assert_eq!((err.line, err.column), (None, None));
+
+        let cycle = "name: A\nmain:\n  - key: a\n    name: A\n    depends_on: [b]\n  - key: b\n    name: B\n    depends_on: [a]\n";
+        let errs = load_procedure_definition_from_str_located(cycle).unwrap_err();
+        assert!(
+            errs[0].message.contains("Circular"),
+            "got: {}",
+            errs[0].message
+        );
+        assert_eq!(
+            errs[0].location,
+            Some(RefLocation::key(RefList::Main, 0, "depends_on"))
+        );
+
+        let bad_yaml = "name: A\nmain:\n  - key: [unclosed\n";
+        let errs = load_procedure_definition_from_str_located(bad_yaml).unwrap_err();
+        let err = &errs[0];
+        assert!(
+            err.message.starts_with("Failed to parse YAML"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.line.is_some() && err.column.is_some(), "got: {err:?}");
+        assert_eq!(err.location, None);
+
+        // The string-returning entry point is unchanged for its callers.
+        assert_eq!(
+            load_procedure_definition_from_str(dup).unwrap_err(),
+            load_procedure_definition_from_str_located(dup).unwrap_err()[0].message
+        );
+    }
+
+    #[test]
+    fn inspect_keeps_the_definition_when_only_rules_fail() {
+        let dup = "name: A\nplugs:\n  - name: P\n    key: p\n    python: plugs.a:A\nmain:\n  - key: m\n    name: M\n  - key: m\n    name: M2\n";
+        let outcome = inspect_procedure_definition(dup);
+        assert_eq!(outcome.errors.len(), 1, "got: {:?}", outcome.errors);
+        let def = outcome
+            .definition
+            .expect("a duplicate key is unrunnable, not uninspectable");
+        assert_eq!(def.plugs.len(), 1);
+        // The runner-facing loaders still refuse it.
+        assert!(load_procedure_definition_from_str_located(dup).is_err());
+        assert!(load_procedure_definition_from_str(dup).is_err());
+
+        // A parse failure leaves nothing to inspect.
+        let broken = inspect_procedure_definition("name: A\nmain:\n  - key: [x\n");
+        assert!(broken.definition.is_none());
+        assert_eq!(broken.errors.len(), 1);
+    }
+
+    #[test]
+    fn loader_reports_every_failed_rule_not_just_the_first() {
+        // A duplicate plug key AND an unknown depends_on AND a duplicate
+        // phase key: fixing one must not be how you discover the next.
+        let yaml = "name: A\nplugs:\n  - name: P\n    key: p\n    python: plugs.a:A\n  - name: P2\n    key: p\n    python: plugs.b:B\nmain:\n  - key: a\n    name: A\n    depends_on: [zzz]\n  - key: a\n    name: A2\n";
+        let errs = load_procedure_definition_from_str_located(yaml).unwrap_err();
+        let msgs: Vec<&str> = errs.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(errs.len(), 3, "got: {msgs:?}");
+        assert!(
+            msgs.iter().any(|m| m.contains("Duplicate phase key `a`")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("Duplicate plug key `p`")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("unknown phase `zzz`")),
+            "{msgs:?}"
+        );
+        // One line each in the string form.
+        assert_eq!(
+            load_procedure_definition_from_str(yaml)
+                .unwrap_err()
+                .lines()
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_refs_warns_on_a_phase_module_outside_the_tree() {
+        // `phases2` is not a directory here, so the spec may resolve to an
+        // installed package at run time: say so, do not block.
+        let (dir, def) = lint_fixture(
+            "class PowerSupply:\n    pass\n",
+            "def check():\n    pass\n",
+            "name: Outside\nmain:\n  - key: p1\n    name: P1\n    python: phases2.measure:check\n",
+        );
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert_eq!(problems.len(), 1, "unexpected: {problems:?}");
+        assert!(!problems[0].is_error());
+        assert!(
+            problems[0].message.contains("not found in the project"),
+            "got: {}",
+            problems[0]
+        );
+        // Inside the tree the same miss is an error, as before.
+        std::fs::create_dir_all(dir.join("phases2")).unwrap();
+        let problems = def.resolve_runtime_refs(&dir, None);
+        assert!(problems[0].is_error(), "got: {problems:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn resolve_runtime_refs_suggests_the_colon_spelling() {
         let dir = std::env::temp_dir().join(format!("tp-loader-test-{}", uuid::Uuid::new_v4()));
@@ -675,17 +1241,19 @@ main:
         // The dotted-class spelling whose ':' variant resolves gets the
         // did-you-mean; a spec that is broken either way does not.
         assert!(
-            problems[0].contains("did you mean `plugs.psu:PSU`"),
+            problems[0].message.contains("did you mean `plugs.psu:PSU`"),
             "got: {}",
             problems[0]
         );
         assert!(
-            !problems[1].contains("did you mean"),
+            !problems[1].message.contains("did you mean"),
             "got: {}",
             problems[1]
         );
         assert!(
-            problems[2].contains("did you mean `phases.main:check`"),
+            problems[2]
+                .message
+                .contains("did you mean `phases.main:check`"),
             "got: {}",
             problems[2]
         );
@@ -731,10 +1299,29 @@ main:
         // not the gate's call. `phases.gone` IS tree-bound (phases/ exists)
         // but its phase is disabled — no job, no gate. On a full run the
         // dangling `plugs/dmm.py` gates too: every declared plug is built.
-        let problems = def.resolve_runtime_refs(&dir, None);
+        let all = def.resolve_runtime_refs(&dir, None);
+        // The wheel-style spec is reported, but as a warning: it may
+        // resolve through importlib at run time, so it must not gate.
+        let warnings: Vec<_> = all.iter().filter(|p| !p.is_error()).collect();
+        assert_eq!(warnings.len(), 1, "unexpected: {all:?}");
+        assert!(
+            warnings[0].message.starts_with("Phase `wheel`")
+                && warnings[0].message.contains("not found in the project"),
+            "got: {}",
+            warnings[0]
+        );
+        let problems: Vec<_> = all.iter().filter(|p| p.is_error()).collect();
         assert_eq!(problems.len(), 2, "unexpected: {problems:?}");
-        assert!(problems[0].starts_with("Plug `dmm`"), "got: {}", problems[0]);
-        assert!(problems[1].starts_with("Phase `broken`"), "got: {}", problems[1]);
+        assert!(
+            problems[0].message.starts_with("Plug `dmm`"),
+            "got: {}",
+            problems[0]
+        );
+        assert!(
+            problems[1].message.starts_with("Phase `broken`"),
+            "got: {}",
+            problems[1]
+        );
 
         // Partial run on `ok`: `broken` is outside the dependency closure,
         // and plugs don't gate at all (the runtime narrows the plug set by

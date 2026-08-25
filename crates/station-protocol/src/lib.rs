@@ -1538,8 +1538,40 @@ pub enum StudioEntryKind {
 pub struct StudioDiagnostic {
     pub severity: StudioDiagnosticSeverity,
     pub message: String,
+    /// Root-relative file the finding is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The YAML entry the finding points at, when the lint knows it.
+    /// The web resolves it to a line with the same helper the Sequence
+    /// view uses for its own jumps, so an Issues click lands on the
+    /// entry rather than on a guess mined from the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<StudioDiagnosticLocation>,
+    /// 1-based position, when the source has one (a YAML parse error).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+}
+
+/// A top-level list of the procedure YAML — the web's `EntryLocation.list`.
+#[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioDiagnosticList {
+    Plugs,
+    Setup,
+    Main,
+    Teardown,
+}
+
+/// An entry of a top-level list by position, and optionally the key
+/// inside it (`python`, `executable.command`, `config.<name>`).
+#[derive(Debug, Serialize, Deserialize, Type, Clone, PartialEq, Eq)]
+pub struct StudioDiagnosticLocation {
+    pub list: StudioDiagnosticList,
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Type, Clone, Copy, PartialEq, Eq)]

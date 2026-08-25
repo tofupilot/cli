@@ -1622,11 +1622,17 @@ pub async fn run_yaml_procedure(
     let main_filter = only_phase.as_deref().map(|target| {
         execution_engine::orchestrator::partial_main_phase_set(&procedure_def, target)
     });
-    let ref_problems = match &main_filter {
+    // Errors only: a `Warning` is a likely mistake the lint cannot be
+    // certain of, reported by `validate` and never a reason to refuse.
+    let ref_problems: Vec<String> = match &main_filter {
         Some(Err(_)) => Vec::new(),
         Some(Ok(set)) => procedure_def.resolve_runtime_refs(procedure_dir, Some(set)),
         None => procedure_def.resolve_runtime_refs(procedure_dir, None),
-    };
+    }
+    .into_iter()
+    .filter(|p| p.is_error())
+    .map(|p| p.message)
+    .collect();
     if !ref_problems.is_empty() {
         emit_crash(
             &event_tx,

@@ -37,12 +37,12 @@ use axum::{
 };
 use sha2::{Digest, Sha256};
 use station_protocol::{
-    StudioDiagnostic, StudioDiagnosticSeverity, StudioEntryKind, StudioErrorCode, StudioFileEntry,
-    StudioPlugMethod, StudioPlugParam, StudioProject, StudioRequest, StudioResponse,
-    StudioSequence, StudioSequenceAggregation, StudioSequenceAxis, StudioSequenceMeasurement,
-    StudioSequencePhase, StudioSequencePlug, StudioSequencePlugConfigEntry, StudioSequenceRetry,
-    StudioSequenceSubUnit, StudioSequenceUi, StudioSequenceUnit, StudioSequenceUnitField,
-    StudioSequenceValidator,
+    StudioDiagnostic, StudioDiagnosticList, StudioDiagnosticLocation, StudioDiagnosticSeverity,
+    StudioEntryKind, StudioErrorCode, StudioFileEntry, StudioPlugMethod, StudioPlugParam,
+    StudioProject, StudioRequest, StudioResponse, StudioSequence, StudioSequenceAggregation,
+    StudioSequenceAxis, StudioSequenceMeasurement, StudioSequencePhase, StudioSequencePlug,
+    StudioSequencePlugConfigEntry, StudioSequenceRetry, StudioSequenceSubUnit, StudioSequenceUi,
+    StudioSequenceUnit, StudioSequenceUnitField, StudioSequenceValidator,
 };
 
 use super::AppState;
@@ -519,7 +519,9 @@ async fn dispatch(
         StudioRequest::MoveEntry { from, to } => move_entry(root, &from, &to).await,
         StudioRequest::CopyEntry { from, to } => copy_entry(root, &from, &to).await,
         StudioRequest::Validate { path } => validate(config, root, path.as_deref()).await,
-        StudioRequest::ValidateContent { path, content } => validate_content(&path, content).await,
+        StudioRequest::ValidateContent { path, content } => {
+            validate_content(root, &path, content).await
+        }
         StudioRequest::WriteResource {
             path,
             content_base64,
@@ -2291,55 +2293,122 @@ async fn validate(config: &StudioConfig, root: &Path, path: Option<&str>) -> Stu
         .ok()
         .map(|p| p.to_string_lossy().replace('\\', "/"));
     // Loader runs on a blocking thread: it does synchronous file IO,
-    // and on success every `python:` reference is resolved against the
-    // procedure directory. Structural loading alone lets a dangling ref
-    // through, and it then fails only mid-run (tp_worker traceback for
-    // a phase, silently omitted plug) — this op validates the project
-    // as it is on disk, so here the missing file is an error.
+    // and on success the procedure lint (`resolve_runtime_refs`) runs
+    // against the procedure directory. Structural loading alone lets a
+    // dangling ref, a misspelt class or a bad `config:` key through, and
+    // it then fails only mid-run — this op validates the project as it
+    // is on disk, so here those are diagnostics.
     let result = tokio::task::spawn_blocking(move || {
-        execution_engine::procedure::loader::load_procedure_definition(&yaml_path).map(|def| {
-            let procedure_dir = yaml_path.parent().unwrap_or(Path::new("."));
-            def.resolve_runtime_refs(procedure_dir, None)
-        })
+        let outcome =
+            execution_engine::procedure::loader::inspect_procedure_definition_file(&yaml_path);
+        let procedure_dir = yaml_path.parent().unwrap_or(Path::new("."));
+        lint_outcome(outcome, procedure_dir)
     })
     .await;
-    let diagnostics = match result {
-        Ok(Ok(ref_problems)) => ref_problems
+    StudioResponse::Diagnostics {
+        diagnostics: lint_diagnostics(result, diag_path),
+    }
+}
+
+/// Loader failures and lint findings, together. Inspecting rather than
+/// loading is what lets a duplicate key and a dangling `python:` show up
+/// in the same list; a definition that did not even parse has no
+/// findings to add.
+fn lint_outcome(
+    outcome: execution_engine::procedure::loader::LoadOutcome,
+    procedure_dir: &Path,
+) -> (
+    Vec<execution_engine::procedure::loader::LoadError>,
+    Vec<execution_engine::procedure::schema::RefProblem>,
+) {
+    let problems = outcome
+        .definition
+        .as_ref()
+        .map(|def| def.resolve_runtime_refs(procedure_dir, None))
+        .unwrap_or_default();
+    (outcome.errors, problems)
+}
+
+/// Wire form of `lint_outcome`: one diagnostic per loader failure, then
+/// one per lint finding. Shared by `validate` and `validate_content` so
+/// the two surfaces can never report different rules again.
+fn lint_diagnostics(
+    result: Result<
+        (
+            Vec<execution_engine::procedure::loader::LoadError>,
+            Vec<execution_engine::procedure::schema::RefProblem>,
+        ),
+        tokio::task::JoinError,
+    >,
+    path: Option<String>,
+) -> Vec<StudioDiagnostic> {
+    use execution_engine::procedure::schema::{RefList, RefLocation, RefSeverity};
+    fn location(loc: &RefLocation) -> StudioDiagnosticLocation {
+        StudioDiagnosticLocation {
+            list: match loc.list {
+                RefList::Plugs => StudioDiagnosticList::Plugs,
+                RefList::Setup => StudioDiagnosticList::Setup,
+                RefList::Main => StudioDiagnosticList::Main,
+                RefList::Teardown => StudioDiagnosticList::Teardown,
+            },
+            index: loc.index as u32,
+            key: loc.key.clone(),
+        }
+    }
+    match result {
+        Ok((errors, problems)) => errors
             .into_iter()
-            .map(|message| StudioDiagnostic {
+            .map(|e| StudioDiagnostic {
                 severity: StudioDiagnosticSeverity::Error,
-                message,
-                path: diag_path.clone(),
+                message: e.message,
+                path: path.clone(),
+                location: e.location.as_ref().map(location),
+                line: e.line,
+                column: e.column,
             })
+            .chain(problems.into_iter().map(|p| StudioDiagnostic {
+                severity: match p.severity {
+                    RefSeverity::Error => StudioDiagnosticSeverity::Error,
+                    RefSeverity::Warning => StudioDiagnosticSeverity::Warning,
+                },
+                message: p.message,
+                path: path.clone(),
+                location: Some(location(&p.location)),
+                line: None,
+                column: None,
+            }))
             .collect(),
-        Ok(Err(message)) => vec![StudioDiagnostic {
-            severity: StudioDiagnosticSeverity::Error,
-            message,
-            path: diag_path,
-        }],
         Err(join_err) => vec![StudioDiagnostic {
             severity: StudioDiagnosticSeverity::Error,
             message: format!("validation task failed: {join_err}"),
             path: None,
+            location: None,
+            line: None,
+            column: None,
         }],
-    };
-    StudioResponse::Diagnostics { diagnostics }
+    }
 }
 
-/// Validate proposed procedure content without touching the disk. The
-/// loader chain after the file read is purely structural
-/// (`load_procedure_definition_from_str`), so no temp file is needed;
-/// the target file need not exist yet. `path` keeps the addressing
-/// rules of `validate` (clamped, YAML-only) so a proposal is refused
-/// exactly where a disk validation of the same path would be.
+/// Validate proposed procedure content — the buffer, not the file. The
+/// same lint as `validate`: the loader chain after the file read is
+/// purely structural (`load_procedure_definition_from_str`), so the
+/// proposal is loaded from the string, and `resolve_runtime_refs` then
+/// runs against the procedure directory the target path sits in — the
+/// buffer is YAML, the Python files it points at are on disk anyway.
+/// `path` keeps the addressing rules of `validate` (clamped, YAML-only)
+/// so a proposal is refused exactly where a disk validation of the same
+/// path would be.
 ///
-/// Deliberately does NOT resolve `python:` references: proposed YAML
-/// legitimately precedes the modules it references (the agent writes
-/// procedure.yaml before the phase/plug files in one edit sequence),
-/// and the browser pre-validation hook auto-rejects on ANY diagnostic
-/// — flagging a not-yet-written module here would reject valid edits.
-/// The disk-based `validate` catches dangling refs once writes land.
-async fn validate_content(path: &str, content: String) -> StudioResponse {
+/// This used to stop at the loader, on the argument that a proposal may
+/// legitimately precede the modules it references. That left the two
+/// consumers of this op — the Chat's pre-approval guardrail and the
+/// live squiggles in Code mode — blind to every rule the disk path
+/// enforces, so the user was asked to approve a YAML already known to
+/// be broken and then asked again to approve the fix. Now the guardrail
+/// sees the same findings and tells the model to write the referenced
+/// file first; a procedure whose folder does not exist yet simply
+/// reports its references as not found, which is the truth.
+async fn validate_content(root: &Path, path: &str, content: String) -> StudioResponse {
     let rel = match clamp_rel(path) {
         Ok(r) => r,
         Err(e) => return e,
@@ -2356,28 +2425,25 @@ async fn validate_content(path: &str, content: String) -> StudioResponse {
             format!("content is {} bytes (cap {MAX_WRITE_BYTES})", content.len()),
         );
     }
+    // Same procedure dir `validate` would use for this path once written.
+    let procedure_dir = root
+        .join(&rel)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
     // Blocking thread for symmetry with `validate`: parsing large YAML
-    // is CPU-bound work that should not sit on the async executor.
+    // and reading the referenced sources is CPU/IO work that should not
+    // sit on the async executor.
     let result = tokio::task::spawn_blocking(move || {
-        execution_engine::procedure::loader::load_procedure_definition_from_str(&content)
+        let outcome = execution_engine::procedure::loader::inspect_procedure_definition(&content);
+        lint_outcome(outcome, &procedure_dir)
     })
     .await;
-    let diagnostics = match result {
-        Ok(Ok(_)) => Vec::new(),
-        Ok(Err(message)) => vec![StudioDiagnostic {
-            severity: StudioDiagnosticSeverity::Error,
-            message,
-            // The caller named the file it asked about; echo it so the
-            // UI can jump there, same as `validate`.
-            path: Some(rel.to_string_lossy().replace('\\', "/")),
-        }],
-        Err(join_err) => vec![StudioDiagnostic {
-            severity: StudioDiagnosticSeverity::Error,
-            message: format!("validation task failed: {join_err}"),
-            path: None,
-        }],
-    };
-    StudioResponse::Diagnostics { diagnostics }
+    StudioResponse::Diagnostics {
+        // The caller named the file it asked about; echo it so the UI
+        // can jump there, same as `validate`.
+        diagnostics: lint_diagnostics(result, Some(rel.to_string_lossy().replace('\\', "/"))),
+    }
 }
 
 /// Write a binary integration resource (base64 payload) under
@@ -2557,7 +2623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_flags_dangling_python_refs_but_validate_content_does_not() {
+    async fn validate_and_validate_content_both_flag_dangling_python_refs() {
         let dir = tempfile::tempdir().unwrap();
         // macOS: temp dirs live behind a /var -> /private/var symlink and
         // the handler canonicalizes, so the root must be canonical too.
@@ -2590,14 +2656,33 @@ mod tests {
             diagnostics[0].message
         );
 
-        // Same content through validate_content: silent by contract — a
-        // proposal's referenced modules may not be written yet, and the
-        // browser hook auto-rejects on any diagnostic.
-        let ok = validate_content("procedure.yaml", dangling.to_string()).await;
-        let StudioResponse::Diagnostics { diagnostics } = ok else {
-            panic!("expected Diagnostics, got {ok:?}");
+        // The disk finding points at the entry, so the editor can land
+        // on it without mining the message.
+        assert_eq!(
+            diagnostics[0].location,
+            Some(StudioDiagnosticLocation {
+                list: StudioDiagnosticList::Main,
+                index: 0,
+                key: Some("python".into()),
+            })
+        );
+
+        // Same content through validate_content: the SAME lint. The Chat
+        // guardrail and the live squiggles are fed by this op, so a rule
+        // enforced on disk and silent here was exactly the gap TP-949
+        // describes.
+        let buf = validate_content(&root, "procedure.yaml", dangling.to_string()).await;
+        let StudioResponse::Diagnostics { diagnostics } = buf else {
+            panic!("expected Diagnostics, got {buf:?}");
         };
-        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert_eq!(diagnostics.len(), 1, "unexpected: {diagnostics:?}");
+        assert!(
+            diagnostics[0].message.contains("Python file not found"),
+            "unexpected message: {}",
+            diagnostics[0].message
+        );
+        assert_eq!(diagnostics[0].path.as_deref(), Some("procedure.yaml"));
+        assert_eq!(diagnostics[0].location.as_ref().map(|l| l.index), Some(0));
 
         // The correct ':' spelling validates clean on disk.
         std::fs::write(
@@ -2613,10 +2698,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_shows_loader_failures_and_lint_findings_together() {
+        // Manon's report: "errors on measure (duplication) override the
+        // error on the plug python file". A duplicate phase key is a
+        // loader rule; a dangling plug ref is a lint finding. Both, at once.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("plugs")).unwrap();
+        let yaml = "name: A\nplugs:\n  - name: PSU\n    key: psu\n    python: plugs.psu:PowerSupply\nmain:\n  - key: measure\n    name: M1\n  - key: measure\n    name: M2\n";
+        std::fs::write(root.join("procedure.yaml"), yaml).unwrap();
+        let config = config_with(&[root.to_str().unwrap()]);
+        let res = validate(&config, &root, None).await;
+        let StudioResponse::Diagnostics { diagnostics } = res else {
+            panic!("expected Diagnostics, got {res:?}");
+        };
+        let msgs: Vec<&str> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(diagnostics.len(), 2, "got: {msgs:?}");
+        assert!(
+            msgs[0].contains("Duplicate phase key `measure`"),
+            "got: {msgs:?}"
+        );
+        assert!(
+            msgs[1].contains("Plug `psu`: Python file not found"),
+            "got: {msgs:?}"
+        );
+        // Same through the buffer path.
+        let buf = validate_content(&root, "procedure.yaml", yaml.to_string()).await;
+        let StudioResponse::Diagnostics { diagnostics } = buf else {
+            panic!("expected Diagnostics, got {buf:?}");
+        };
+        assert_eq!(diagnostics.len(), 2, "got: {diagnostics:?}");
+    }
+
+    #[tokio::test]
     async fn validate_content_checks_a_proposal_without_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         // A minimal valid procedure passes with no diagnostics.
         let valid = "name: A\nmain:\n  - name: P1\n";
-        let ok = validate_content("procedure.yaml", valid.to_string()).await;
+        let ok = validate_content(&root, "procedure.yaml", valid.to_string()).await;
         let StudioResponse::Diagnostics { diagnostics } = ok else {
             panic!("expected Diagnostics, got {ok:?}");
         };
@@ -2624,14 +2744,14 @@ mod tests {
 
         // A schema violation is reported as a diagnostic, not an error.
         let invalid = "name: A\nmain: []\n";
-        let bad = validate_content("procedure.yaml", invalid.to_string()).await;
+        let bad = validate_content(&root, "procedure.yaml", invalid.to_string()).await;
         let StudioResponse::Diagnostics { diagnostics } = bad else {
             panic!("expected Diagnostics, got {bad:?}");
         };
         assert_eq!(diagnostics.len(), 1);
 
         // Non-YAML targets are refused like `validate` refuses them.
-        let refused = validate_content("phases/main.py", "x = 1".to_string()).await;
+        let refused = validate_content(&root, "phases/main.py", "x = 1".to_string()).await;
         assert!(matches!(
             refused,
             StudioResponse::Error {
