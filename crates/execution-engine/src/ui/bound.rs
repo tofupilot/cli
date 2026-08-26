@@ -20,21 +20,21 @@ use super::types::{ComponentType, UiComponent};
 /// - `measurements.X` / `measurement.X` → typed scalar under `X`
 /// - `unit.X` → string under `__unit__.X`
 /// - `unit.sub_units.X` → string under `__unit__.sub_units.X`
+/// - `run.operated_by` → string under `__run__.operated_by` (run
+///   attribution; the only run-scoped bind target today)
 ///
 /// Type coercion mirrors the web client: number/slider → JSON number
 /// (empty or unparseable skipped), switch → bool, everything else → the
 /// string as-is. Empty bind names (`bind: measurements.`) are skipped to
 /// match the web regex `^measurements?\.(.+)$`, which requires a name.
-pub fn build_bound_measurements_payload<F>(
-    components: &[UiComponent],
-    resolve: F,
-) -> Option<String>
+pub fn build_bound_measurements_payload<F>(components: &[UiComponent], resolve: F) -> Option<String>
 where
     F: Fn(&UiComponent) -> Option<String>,
 {
     let mut measurements = serde_json::Map::new();
     let mut unit_fields = serde_json::Map::new();
     let mut sub_units = serde_json::Map::new();
+    let mut run_fields = serde_json::Map::new();
 
     for comp in components {
         let Some(bind) = comp.bind.as_deref() else {
@@ -74,10 +74,19 @@ where
             } else if !field.is_empty() {
                 unit_fields.insert(field.to_string(), serde_json::Value::String(raw));
             }
+        } else if let Some(field) = bind.strip_prefix("run.") {
+            // Run properties are strings too (operated_by email).
+            if !field.is_empty() {
+                run_fields.insert(field.to_string(), serde_json::Value::String(raw));
+            }
         }
     }
 
-    if measurements.is_empty() && unit_fields.is_empty() && sub_units.is_empty() {
+    if measurements.is_empty()
+        && unit_fields.is_empty()
+        && sub_units.is_empty()
+        && run_fields.is_empty()
+    {
         return None;
     }
 
@@ -85,7 +94,10 @@ where
     if !unit_fields.is_empty() || !sub_units.is_empty() {
         let mut unit_obj = unit_fields;
         if !sub_units.is_empty() {
-            unit_obj.insert("sub_units".to_string(), serde_json::Value::Object(sub_units));
+            unit_obj.insert(
+                "sub_units".to_string(),
+                serde_json::Value::Object(sub_units),
+            );
         }
         // Ship `__unit__` as a JSON string, byte-identical to the web
         // client (`run-state.ts`: `out.__unit__ = JSON.stringify(unitObj)`).
@@ -95,6 +107,12 @@ where
         // that string-matches `__unit__` diverging by launch method.
         if let Ok(unit_str) = serde_json::to_string(&serde_json::Value::Object(unit_obj)) {
             out.insert("__unit__".to_string(), serde_json::Value::String(unit_str));
+        }
+    }
+    if !run_fields.is_empty() {
+        // Same JSON-string form as `__unit__` — see the comment above.
+        if let Ok(run_str) = serde_json::to_string(&serde_json::Value::Object(run_fields)) {
+            out.insert("__run__".to_string(), serde_json::Value::String(run_str));
         }
     }
     serde_json::to_string(&serde_json::Value::Object(out)).ok()
@@ -121,8 +139,7 @@ mod tests {
     #[test]
     fn packs_measurement_bind() {
         let comps = vec![radio("m", "measurements.m", false)];
-        let json =
-            build_bound_measurements_payload(&comps, |_| Some("A".into())).expect("present");
+        let json = build_bound_measurements_payload(&comps, |_| Some("A".into())).expect("present");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["m"], "A");
     }
@@ -140,7 +157,11 @@ mod tests {
             ..UiComponent::new(ComponentType::Switch)
         };
         let json = build_bound_measurements_payload(&[num, sw], |c| {
-            Some(if c.key == "n" { "42".into() } else { "true".into() })
+            Some(if c.key == "n" {
+                "42".into()
+            } else {
+                "true".into()
+            })
         })
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -161,7 +182,11 @@ mod tests {
             ..UiComponent::new(ComponentType::TextInput)
         };
         let json = build_bound_measurements_payload(&[serial, battery], |c| {
-            Some(if c.key == "sn" { "SN-1".into() } else { "BAT-9".into() })
+            Some(if c.key == "sn" {
+                "SN-1".into()
+            } else {
+                "BAT-9".into()
+            })
         })
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();

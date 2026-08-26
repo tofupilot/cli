@@ -12,6 +12,15 @@ pub struct UnitInfo {
     pub part_number: Option<String>,
     pub revision_number: Option<String>,
     pub batch_number: Option<String>,
+    /// Operator attributed to the run (member email or free-text
+    /// name) — a RUN property, not a
+    /// unit field. Like `metadata` below, it is engine-side carriage
+    /// only (identify form → Python `run.operated_by` → job results),
+    /// deliberately NOT on the station-protocol wire `UnitInfo`; the
+    /// CLI reads it here and forwards it to `runs.create` as
+    /// `operated_by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by: Option<String>,
     /// Sub-units as label -> serial_number mapping
     pub sub_units: Option<HashMap<String, String>>,
     pub status: String,
@@ -22,6 +31,17 @@ pub struct UnitInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
 }
+
+/// Server ceiling on `operated_by` (`runs.create` rejects longer, and the
+/// `run_operated_by_name_len` CHECK caps the column at the same width).
+/// Enforced here independently of the procedure's own `max_length` so a
+/// procedure that declares a larger bound — or none at all, the common case —
+/// still cannot produce a value the upload will refuse after the test has run.
+///
+/// Counted in CHARACTERS, unlike the `min_length` / `max_length` checks below
+/// which have always compared bytes: this bound mirrors a server limit, and
+/// counting bytes here would falsely reject a short accented operator name.
+pub const OPERATED_BY_MAX_CHARS: usize = 254;
 
 /// Validate a single unit field against its configuration
 fn validate_unit_field(
@@ -188,7 +208,24 @@ fn validate_sub_units(
 pub fn validate_unit_info(
     unit_info: &UnitInfo,
     unit_config: &Option<crate::procedure::UnitConfig>,
+    // Procedure-root `operated_by:` (run attribution) — validated here
+    // because its value rides the same identify response.
+    operated_by_config: Option<&crate::procedure::UnitFieldConfig>,
 ) -> Result<(), String> {
+    if let Some(operated_config) = operated_by_config {
+        validate_unit_field("operated_by", &unit_info.operated_by, operated_config)?;
+    }
+    // Independent of the config above: the ceiling holds even when the
+    // procedure declares no `operated_by:` block at all.
+    if let Some(value) = unit_info.operated_by.as_deref() {
+        let chars = value.trim().chars().count();
+        if chars > OPERATED_BY_MAX_CHARS {
+            return Err(format!(
+                "operated_by must be at most {OPERATED_BY_MAX_CHARS} characters (got {chars})"
+            ));
+        }
+    }
+
     let config = match unit_config {
         Some(c) => c,
         None => return Ok(()), // No config = no validation
@@ -244,6 +281,46 @@ pub struct PendingUnitInput {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operated_by_over_the_ceiling_is_rejected_without_any_config() {
+        // The common case is a procedure that declares no `operated_by:` block
+        // at all. The ceiling still has to hold, otherwise the value only
+        // fails later at `runs.create`, once the test has run.
+        let mut unit_info = UnitInfo {
+            serial_number: Some("SN-1".to_string()),
+            part_number: Some("PN-1".to_string()),
+            revision_number: None,
+            batch_number: None,
+            operated_by: Some("x".repeat(OPERATED_BY_MAX_CHARS + 1)),
+            sub_units: None,
+            status: "tested".to_string(),
+            metadata: None,
+        };
+        let err = validate_unit_info(&unit_info, &None, None).unwrap_err();
+        assert!(err.contains("operated_by"), "got: {err}");
+        assert!(err.contains("at most"), "got: {err}");
+
+        unit_info.operated_by = Some("x".repeat(OPERATED_BY_MAX_CHARS));
+        assert!(validate_unit_info(&unit_info, &None, None).is_ok());
+    }
+
+    #[test]
+    fn operated_by_ceiling_counts_characters_not_bytes() {
+        // 200 accented characters are 400 bytes. A byte-based ceiling would
+        // reject a perfectly valid operator name the server accepts.
+        let unit_info = UnitInfo {
+            serial_number: Some("SN-1".to_string()),
+            part_number: Some("PN-1".to_string()),
+            revision_number: None,
+            batch_number: None,
+            operated_by: Some("é".repeat(200)),
+            sub_units: None,
+            status: "tested".to_string(),
+            metadata: None,
+        };
+        assert!(validate_unit_info(&unit_info, &None, None).is_ok());
+    }
+
     use super::*;
     use crate::procedure::{SubUnitItemConfig, SubUnitsConfig, UnitFieldConfig};
 
@@ -629,6 +706,7 @@ mod tests {
             part_number: Some("PN-001".to_string()),
             revision_number: None,
             batch_number: None,
+            operated_by: None,
             sub_units: Some(sub_units_map),
             status: "tested".to_string(),
             metadata: None,
@@ -642,7 +720,7 @@ mod tests {
             sub_units: None,
             metadata: None,
         });
-        let result = validate_unit_info(&unit_info, &config);
+        let result = validate_unit_info(&unit_info, &config, None);
         assert!(result.is_ok());
     }
 
@@ -657,6 +735,7 @@ mod tests {
             part_number: Some("PN-001".to_string()),
             revision_number: None,
             batch_number: None,
+            operated_by: None,
             sub_units: Some(sub_units_map),
             status: "tested".to_string(),
             metadata: None,
@@ -681,7 +760,7 @@ mod tests {
             ])),
             metadata: None,
         });
-        let result = validate_unit_info(&unit_info, &config);
+        let result = validate_unit_info(&unit_info, &config, None);
         assert!(result.is_ok());
     }
 
@@ -692,6 +771,7 @@ mod tests {
             part_number: Some("PN-001".to_string()),
             revision_number: None,
             batch_number: None,
+            operated_by: None,
             sub_units: None,
             status: "tested".to_string(),
             metadata: None,
@@ -716,7 +796,7 @@ mod tests {
             ])),
             metadata: None,
         });
-        let result = validate_unit_info(&unit_info, &config);
+        let result = validate_unit_info(&unit_info, &config, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Expected 2 sub-units"));
     }

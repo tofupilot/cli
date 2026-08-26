@@ -1091,10 +1091,14 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
                     if cfg.part_number.is_none() {
                         cfg.part_number = Some(Default::default());
                     }
-                    execution_engine::identify_unit::components::build_components(&cfg)
-                        .unwrap_or_default()
+                    execution_engine::identify_unit::components::build_components(
+                        &cfg,
+                        def.operated_by.as_ref(),
+                    )
+                    .unwrap_or_default()
                 },
             }),
+            operated_by: def.operated_by.as_ref().map(map_unit_field),
             plugs: def
                 .plugs
                 .iter()

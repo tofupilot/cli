@@ -30,6 +30,12 @@ pub struct UnitInfo {
     pub part_number: Option<String>,
     pub revision_number: Option<String>,
     pub batch_number: Option<String>,
+    /// Operator (member email or free-text name) forwarded to
+    /// `runs.create` as `operated_by`. A RUN property carried on the
+    /// unit pipeline for transport only — Python exposes it as
+    /// `run.operated_by` (see `unit.rs`), not as a unit field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by: Option<String>,
     #[serde(default)]
     pub sub_units: HashMap<String, String>,
     /// Operator-entered identify-form metadata, threaded to Python so

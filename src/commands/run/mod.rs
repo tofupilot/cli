@@ -217,6 +217,35 @@ struct ResolvedSource {
 /// case-insensitive). Used to classify a manifest-declared entry point
 /// as a YAML procedure regardless of its filename. The execution-engine
 /// loader applies the same extension rule when it opens the file.
+/// Last boundary guard on the run's operator before it reaches
+/// `runs.create`, shared by all four `build_request` paths (YAML engine,
+/// OpenHTF/generic connector, pytest, Robot).
+///
+/// Trims, drops a blank, and CLAMPS over-length rather than rejecting. By
+/// the time a value lands here the test has already run — from an identify
+/// prompt, a `run.operated_by` binding, a Python write or a framework's
+/// `test_record.metadata` — and nobody can correct it any more, so losing
+/// the operator label beats losing the run. Same trade the file importers
+/// make (`sanitizeImportOperator`); the engine's identify path refuses
+/// over-length up front instead, because a human is still standing there.
+///
+/// `chars()`, never a byte slice: a byte cut would panic on a multi-byte
+/// boundary, and the server counts characters too.
+pub(crate) fn clamp_operated_by(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let max = execution_engine::unit::OPERATED_BY_MAX_CHARS;
+    if trimmed.chars().count() > max {
+        crate::log::warn(&format!(
+            "operated_by is longer than {max} characters, recorded truncated"
+        ));
+        return Some(trimmed.chars().take(max).collect());
+    }
+    Some(trimmed.to_string())
+}
+
 fn has_yaml_extension(rel: &str) -> bool {
     Path::new(rel)
         .extension()
@@ -2384,5 +2413,34 @@ mod prepare_run_tests {
         let entry = resolve_entry_file(Some(&yaml), None, &Framework::Yaml(yaml.clone()), pkg)
             .expect("yaml entry should resolve");
         assert_eq!(entry, pkg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn clamp_operated_by_trims_and_drops_blank() {
+        assert_eq!(super::clamp_operated_by(None), None);
+        assert_eq!(super::clamp_operated_by(Some("   ")), None);
+        assert_eq!(
+            super::clamp_operated_by(Some("  Jean Dupont  ")).as_deref(),
+            Some("Jean Dupont")
+        );
+    }
+
+    #[test]
+    fn clamp_operated_by_cuts_at_the_ceiling_on_characters() {
+        let max = execution_engine::unit::OPERATED_BY_MAX_CHARS;
+        // Over-length is clamped, never dropped: the test has already run.
+        let clamped = super::clamp_operated_by(Some(&"x".repeat(300))).expect("kept");
+        assert_eq!(clamped.chars().count(), max);
+        // 200 accented chars are 400 bytes but under the ceiling: kept whole.
+        // A byte-based cut would also have panicked on the char boundary.
+        let accented = "é".repeat(200);
+        assert_eq!(
+            super::clamp_operated_by(Some(&accented)).as_deref(),
+            Some(accented.as_str())
+        );
     }
 }

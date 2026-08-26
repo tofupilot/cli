@@ -20,6 +20,9 @@ use crate::unit::{validate_unit_info, UnitInfo};
 /// fields with a clear error.
 pub fn resolve_response(
     cfg: &UnitConfig,
+    // Procedure-root `operated_by:` (run attribution). The response's
+    // `operated_by` key is only accepted when the procedure declares it.
+    operated_by_cfg: Option<&crate::procedure::UnitFieldConfig>,
     values: HashMap<String, String>,
 ) -> Result<UnitInfo, String> {
     let trim = |s: String| {
@@ -35,6 +38,7 @@ pub fn resolve_response(
     let mut part_number = None;
     let mut revision_number = None;
     let mut batch_number = None;
+    let mut operated_by = None;
     let mut sub_units: HashMap<String, String> = HashMap::new();
     let mut metadata: HashMap<String, String> = HashMap::new();
 
@@ -61,6 +65,7 @@ pub fn resolve_response(
                 "part_number" => part_number = trim(raw),
                 "revision_number" => revision_number = trim(raw),
                 "batch_number" => batch_number = trim(raw),
+                "operated_by" if operated_by_cfg.is_some() => operated_by = trim(raw),
                 // Unknown keys ignored to keep the wire forward-compatible.
                 _ => {}
             }
@@ -72,6 +77,7 @@ pub fn resolve_response(
         part_number,
         revision_number,
         batch_number,
+        operated_by,
         sub_units: if sub_units.is_empty() {
             None
         } else {
@@ -85,7 +91,7 @@ pub fn resolve_response(
         },
     };
 
-    validate_unit_info(&unit_info, &Some(cfg.clone()))?;
+    validate_unit_info(&unit_info, &Some(cfg.clone()), operated_by_cfg)?;
     Ok(unit_info)
 }
 
@@ -94,7 +100,10 @@ pub fn resolve_response(
 /// in-depth check; the procedure loader already enforces this at load
 /// time, but a stray code path that constructs a `UnitConfig`
 /// programmatically deserves the same guarantee.
-pub fn auto_identify_unit_info(cfg: &UnitConfig) -> Result<UnitInfo, String> {
+pub fn auto_identify_unit_info(
+    cfg: &UnitConfig,
+    operated_by_cfg: Option<&crate::procedure::UnitFieldConfig>,
+) -> Result<UnitInfo, String> {
     cfg.validate_auto_identify()?;
 
     let sub_units = cfg.sub_units.as_ref().and_then(|sub| {
@@ -147,12 +156,13 @@ pub fn auto_identify_unit_info(cfg: &UnitConfig) -> Result<UnitInfo, String> {
             .batch_number
             .as_ref()
             .and_then(|f| f.default_value.clone()),
+        operated_by: operated_by_cfg.and_then(|f| f.default_value.clone()),
         sub_units,
         status: "complete".to_string(),
         metadata,
     };
 
-    validate_unit_info(&unit_info, &Some(cfg.clone()))?;
+    validate_unit_info(&unit_info, &Some(cfg.clone()), operated_by_cfg)?;
     Ok(unit_info)
 }
 
@@ -203,7 +213,7 @@ mod tests {
         values.insert("serial_number".to_string(), "SN-1".to_string());
         values.insert("part_number".to_string(), "PCB".to_string());
 
-        let info = resolve_response(&cfg, values).unwrap();
+        let info = resolve_response(&cfg, None, values).unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-1"));
         assert_eq!(info.part_number.as_deref(), Some("PCB"));
         assert!(info.revision_number.is_none());
@@ -219,7 +229,7 @@ mod tests {
         values.insert("part_number".to_string(), "PCB".to_string());
         values.insert("revision_number".to_string(), "   ".to_string());
 
-        let info = resolve_response(&cfg, values).unwrap();
+        let info = resolve_response(&cfg, None, values).unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-2"));
         assert!(info.revision_number.is_none());
     }
@@ -233,10 +243,56 @@ mod tests {
         values.insert("sub_unit:battery".to_string(), "BAT-001".to_string());
         values.insert("sub_unit:motor".to_string(), "MOT-002".to_string());
 
-        let info = resolve_response(&cfg, values).unwrap();
+        let info = resolve_response(&cfg, None, values).unwrap();
         let sub = info.sub_units.expect("sub_units populated");
         assert_eq!(sub.get("battery").map(String::as_str), Some("BAT-001"));
         assert_eq!(sub.get("motor").map(String::as_str), Some("MOT-002"));
+    }
+
+    #[test]
+    fn resolve_response_routes_operated_by_when_declared() {
+        let cfg = cfg_minimal();
+        let operated = UnitFieldConfig::default();
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN".to_string());
+        values.insert("part_number".to_string(), "PN".to_string());
+        values.insert("operated_by".to_string(), " jane@acme.com ".to_string());
+
+        let info = resolve_response(&cfg, Some(&operated), values).unwrap();
+        assert_eq!(info.operated_by.as_deref(), Some("jane@acme.com"));
+    }
+
+    #[test]
+    fn resolve_response_ignores_operated_by_when_undeclared() {
+        let cfg = cfg_minimal();
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN".to_string());
+        values.insert("part_number".to_string(), "PN".to_string());
+        values.insert("operated_by".to_string(), "jane@acme.com".to_string());
+
+        let info = resolve_response(&cfg, None, values).unwrap();
+        assert!(info.operated_by.is_none());
+    }
+
+    #[test]
+    fn auto_identify_resolves_operated_by_default() {
+        let mut cfg = cfg_minimal();
+        cfg.auto_identify = true;
+        cfg.serial_number = Some(UnitFieldConfig {
+            default_value: Some("SN-AUTO".to_string()),
+            ..Default::default()
+        });
+        cfg.part_number = Some(UnitFieldConfig {
+            default_value: Some("PCB-AUTO".to_string()),
+            ..Default::default()
+        });
+        let operated = UnitFieldConfig {
+            default_value: Some("jane@acme.com".to_string()),
+            ..Default::default()
+        };
+
+        let info = auto_identify_unit_info(&cfg, Some(&operated)).unwrap();
+        assert_eq!(info.operated_by.as_deref(), Some("jane@acme.com"));
     }
 
     #[test]
@@ -247,14 +303,14 @@ mod tests {
         values.insert("part_number".to_string(), "PN".to_string());
         values.insert("future_field".to_string(), "ignored".to_string());
 
-        assert!(resolve_response(&cfg, values).is_ok());
+        assert!(resolve_response(&cfg, None, values).is_ok());
     }
 
     #[test]
     fn resolve_response_validation_error_on_missing_required() {
         let cfg = cfg_minimal();
         let values = HashMap::new();
-        let err = resolve_response(&cfg, values).unwrap_err();
+        let err = resolve_response(&cfg, None, values).unwrap_err();
         assert!(err.to_lowercase().contains("required"));
     }
 
@@ -268,7 +324,7 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("serial_number".to_string(), "   ".to_string());
         values.insert("part_number".to_string(), "PCB".to_string());
-        let err = resolve_response(&cfg, values).unwrap_err();
+        let err = resolve_response(&cfg, None, values).unwrap_err();
         assert!(
             err.contains("serial_number") && err.to_lowercase().contains("required"),
             "expected required-serial error, got: {err}"
@@ -302,7 +358,7 @@ mod tests {
             }])),
             metadata: None,
         };
-        let info = auto_identify_unit_info(&cfg).unwrap();
+        let info = auto_identify_unit_info(&cfg, None).unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         assert_eq!(info.part_number.as_deref(), Some("PCB-AUTO"));
         assert_eq!(info.revision_number.as_deref(), Some("A"));
@@ -324,7 +380,7 @@ mod tests {
             sub_units: None,
             metadata: None,
         };
-        let err = auto_identify_unit_info(&cfg).unwrap_err();
+        let err = auto_identify_unit_info(&cfg, None).unwrap_err();
         assert!(err.contains("serial_number.default_value"));
     }
 
@@ -363,7 +419,7 @@ mod tests {
             ])),
             metadata: None,
         };
-        let err = auto_identify_unit_info(&cfg).unwrap_err();
+        let err = auto_identify_unit_info(&cfg, None).unwrap_err();
         assert!(
             err.contains("sub_units.motor.serial_number.default_value"),
             "expected motor-named error, got: {err}"
@@ -395,7 +451,7 @@ mod tests {
         values.insert("metadata:amendment".to_string(), "".to_string()); // blank → absent
         values.insert("metadata:undeclared".to_string(), "x".to_string()); // ignored
 
-        let info = resolve_response(&cfg, values).unwrap();
+        let info = resolve_response(&cfg, None, values).unwrap();
         let md = info.metadata.expect("metadata populated");
         assert_eq!(md.get("modification").map(String::as_str), Some("MOD-42"));
         assert!(!md.contains_key("amendment"));
@@ -410,7 +466,7 @@ mod tests {
         values.insert("part_number".to_string(), "PCB".to_string());
         values.insert("metadata:modification".to_string(), "BAD-1".to_string());
 
-        let err = resolve_response(&cfg, values).unwrap_err();
+        let err = resolve_response(&cfg, None, values).unwrap_err();
         assert!(err.contains("modification"), "got: {err}");
     }
 
@@ -422,7 +478,7 @@ mod tests {
         values.insert("part_number".to_string(), "PCB".to_string());
         values.insert("metadata:modification".to_string(), "  ".to_string());
 
-        let info = resolve_response(&cfg, values).unwrap();
+        let info = resolve_response(&cfg, None, values).unwrap();
         assert!(info.metadata.is_none());
     }
 
@@ -455,7 +511,7 @@ mod tests {
         md.insert("amendment".to_string(), UnitFieldConfig::default());
         cfg.metadata = Some(md);
 
-        let info = auto_identify_unit_info(&cfg).unwrap();
+        let info = auto_identify_unit_info(&cfg, None).unwrap();
         let resolved = info.metadata.expect("metadata from defaults");
         assert_eq!(
             resolved.get("modification").map(String::as_str),

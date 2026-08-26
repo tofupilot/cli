@@ -123,6 +123,11 @@ struct RunData {
     unit_part: Option<String>,
     unit_revision: Option<String>,
     unit_batch: Option<String>,
+    /// Operated-by email resolved through the unit pipeline (identify
+    /// prompt, `unit.operated_by` binding, Python write). Takes
+    /// precedence over the session email forwarded on the WS run
+    /// command when building the upload request.
+    unit_operated_by: Option<String>,
     unit_sub_units: Option<Vec<String>>,
     /// Run-level metadata contributions in completion order, one entry
     /// per source (identify step or phase key). A retry REPLACES its
@@ -173,6 +178,15 @@ struct CliEventSink {
     /// `UiResponse` cycle to capture it from). Single-slot today;
     /// the last write wins (same as `RunData.unit_serial`).
     resolved_unit: Arc<std::sync::Mutex<Option<station_protocol::UnitInfo>>>,
+    /// Tickets of the deferred `RunData` writes spawned by `emit()`
+    /// (phase accumulation, stats, outcome, attachments, mid-run unit
+    /// updates). `emit` is sync, so each write runs as a spawned task;
+    /// collecting the JoinHandles lets `run_yaml_procedure` await them
+    /// all after engine shutdown, BEFORE `build_run_request` snapshots
+    /// RunData — closing the spawn-and-pray race where a fast-ending
+    /// run could upload without the last event's write (e.g. a
+    /// final-phase `run.operated_by` from a badge scan).
+    pending_writes: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     /// Deployment this run came from (local `PullState` lookup), None
     /// for ad-hoc local-path runs. Stamped on `RunStarted` so remote
     /// UIs can resolve relative component image paths against the
@@ -224,13 +238,27 @@ impl CliEventSink {
                 unit_part: None,
                 unit_revision: None,
                 unit_batch: None,
+                unit_operated_by: None,
                 unit_sub_units: None,
                 run_metadata_sources: Vec::new(),
                 unit_metadata_sources: Vec::new(),
                 attachments: Vec::new(),
             })),
             resolved_unit: Arc::new(std::sync::Mutex::new(None)),
+            pending_writes: Arc::new(std::sync::Mutex::new(Vec::new())),
             progressed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Spawn a deferred `RunData` write and keep its ticket for the
+    /// pre-upload barrier (see `pending_writes`).
+    fn spawn_run_data_write<F>(&self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(fut);
+        if let Ok(mut writes) = self.pending_writes.lock() {
+            writes.push(handle);
         }
     }
 }
@@ -447,7 +475,7 @@ impl EventSink for CliEventSink {
                 let run_md = run_metadata.clone();
                 let unit_md = unit_metadata.clone();
                 let source_key = phase_key.clone();
-                tokio::spawn(async move {
+                self.spawn_run_data_write(async move {
                     // Same lock acquisition keeps phase data and metadata
                     // atomic per event. Each phase key is one metadata
                     // source; a retry replaces the whole entry, so keys a
@@ -463,7 +491,7 @@ impl EventSink for CliEventSink {
                 if let Some(t) = start_time {
                     let data = self.data.clone();
                     let t = *t;
-                    tokio::spawn(async move {
+                    self.spawn_run_data_write(async move {
                         let mut d = data.lock().await;
                         if d.start_time.is_none() {
                             d.start_time = Some(t);
@@ -493,7 +521,7 @@ impl EventSink for CliEventSink {
                 let ro = *run_outcome;
                 let ri = run_id.clone();
                 let et = *end_time;
-                tokio::spawn(async move {
+                self.spawn_run_data_write(async move {
                     let mut d = data.lock().await;
                     d.run_outcome = ro;
                     d.run_id = ri;
@@ -797,7 +825,7 @@ impl EventSink for CliEventSink {
                         mimetype: mimetype.clone().unwrap_or_default(),
                         phase_key: phase_key.clone(),
                     };
-                    tokio::spawn(async move {
+                    self.spawn_run_data_write(async move {
                         data.lock().await.attachments.push(queued_attachment);
                     });
                 }
@@ -809,10 +837,21 @@ impl EventSink for CliEventSink {
                 // operator-UI never sees the unit on `auto_identify`
                 // runs (no `UiRequest`/`UiResponse` to capture from).
                 //
-                // RunData itself is populated synchronously upstream
-                // by `run_yaml_procedure` before `submit_procedure`
-                // runs — this arm is purely the wire-event surface
-                // for downstream UIs.
+                // Identify-time resolutions are also written into
+                // RunData synchronously upstream by `run_yaml_procedure`
+                // before `submit_procedure`; the async apply below is
+                // what carries MID-RUN updates (a `unit.<field>` UI
+                // binding, a Python `unit.<field> = ...` write) into
+                // the upload payload — without it those land on the
+                // wire for live UIs but the created run keeps the
+                // identify-time values.
+                {
+                    let data = self.data.clone();
+                    let info = unit_info.clone();
+                    self.spawn_run_data_write(async move {
+                        apply_unit_info_to_run_data(&data, &info).await;
+                    });
+                }
                 let wire_unit = unit_info_to_wire(unit_info);
                 if let Ok(mut guard) = self.resolved_unit.lock() {
                     *guard = Some(wire_unit.clone());
@@ -1450,8 +1489,23 @@ fn build_run_request(
         b = b.deployment_id(deployment_id);
     }
 
-    if let Some(email) = operated_by {
-        b = b.operated_by(email);
+    // Operated-by resolved through the identify pipeline (prompt,
+    // `run.operated_by` binding, Python write) wins over the session
+    // email forwarded on the WS run command. The value may be a member
+    // email (server links the account) or a free-text operator name
+    // (server records it verbatim). Blank values fall through: a
+    // cleared bound text input ships "" on the wire, and attributing a
+    // run to "" is never right (the server also rejects it).
+    // The blank filter drives the FALLBACK (an emptied prompt must fall
+    // through to the session email); clamp_operated_by is the boundary guard
+    // on whatever wins. See its doc comment for why over-length is clamped.
+    let candidate = data
+        .unit_operated_by
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(operated_by);
+    if let Some(value) = super::clamp_operated_by(candidate) {
+        b = b.operated_by(value);
     }
 
     b.build().map_err(|e| e.to_string().into())
@@ -1488,6 +1542,9 @@ fn wire_unit_to_engine(info: station_protocol::UnitInfo) -> execution_engine::un
         part_number: info.part_number,
         revision_number: info.revision_number,
         batch_number: info.batch_number,
+        // Run attribution is not on the wire UnitInfo — a "Run again"
+        // reuse re-attributes from the session email instead.
+        operated_by: None,
         sub_units,
         status: String::new(),
         // Wire UnitInfo carries no metadata — a "Run again" reuse
@@ -1502,10 +1559,11 @@ fn wire_unit_to_engine(info: station_protocol::UnitInfo) -> execution_engine::un
 /// instead of the "UNKNOWN" fallback used when identify is skipped.
 ///
 /// The synchronous CLI path calls this once per slot from
-/// `run_yaml_procedure`; doing the write here (with
-/// `lock().await`) instead of inside `EventSink::emit` (sync) avoids
-/// the spawn-and-pray race where a fast-failing run could race
-/// `build_run_request` ahead of a deferred write.
+/// `run_yaml_procedure`. `EventSink::emit` (sync) also calls it for
+/// mid-run updates, via `spawn_run_data_write`: those deferred writes
+/// are ticketed in `CliEventSink::pending_writes` and awaited after
+/// engine shutdown, before `build_run_request` snapshots RunData — so
+/// a fast-ending run can no longer race the upload ahead of them.
 ///
 /// Sub-units are flattened to a `Vec<String>` of serials sorted by
 /// key — the SDK's `RunCreateRequest.sub_units` is `Option<Vec<String>>`,
@@ -1527,6 +1585,9 @@ async fn apply_unit_info_to_run_data(
     }
     if let Some(ref bn) = info.batch_number {
         d.unit_batch = Some(bn.clone());
+    }
+    if let Some(ref ob) = info.operated_by {
+        d.unit_operated_by = Some(ob.clone());
     }
     if let Some(ref sub) = info.sub_units {
         let mut entries: Vec<(&String, &String)> = sub.iter().collect();
@@ -1727,6 +1788,10 @@ pub async fn run_yaml_procedure(
                 .get_or_insert_with(execution_engine::procedure::UnitFieldConfig::default);
             cfg
         });
+    // Same snapshot rationale: the procedure-root `operated_by:` (run
+    // attribution) is read by `identify(...)` after `procedure_def`
+    // moves into the orchestrator.
+    let operated_by_cfg = procedure_def.operated_by.clone();
 
     // Scratch dir the engine writes attachment bytes into so every
     // `AttachmentAdded` carries an on-disk path the CLI can upload then
@@ -1779,6 +1844,7 @@ pub async fn run_yaml_procedure(
         only_phase.clone(),
     );
     let run_data = sink.data.clone();
+    let pending_run_data_writes = sink.pending_writes.clone();
     let engine_progressed = sink.progressed.clone();
     let event_sink: Arc<dyn EventSink> = Arc::new(sink);
     orchestrator.set_event_sink(event_sink.clone());
@@ -1850,9 +1916,14 @@ pub async fn run_yaml_procedure(
                 // identify path runs after parsing the operator
                 // response.
                 let info = wire_unit_to_engine(reused);
-                if let Err(err) =
-                    execution_engine::unit::validate_unit_info(&info, &Some(cfg.clone()))
-                {
+                if let Err(err) = execution_engine::unit::validate_unit_info(
+                    &info,
+                    &Some(cfg.clone()),
+                    // The root `operated_by:` config too: a reused unit
+                    // carries the previous run's attribution, and the
+                    // identify path validates it against this same config.
+                    operated_by_cfg.as_ref(),
+                ) {
                     emit_crash(
                         &event_tx,
                         &agent,
@@ -1906,7 +1977,12 @@ pub async fn run_yaml_procedure(
                     // cancel loop (which only runs after identify
                     // resolves) ever sees the signal, and the operator
                     // is stuck on a prompt with no way out.
-                    let identify_fut = execution_engine::identify(cfg, Some(slot_id), &host);
+                    let identify_fut = execution_engine::identify(
+                        cfg,
+                        operated_by_cfg.as_ref(),
+                        Some(slot_id),
+                        &host,
+                    );
                     tokio::pin!(identify_fut);
                     let result = tokio::select! {
                         r = &mut identify_fut => Some(r),
@@ -2115,6 +2191,19 @@ pub async fn run_yaml_procedure(
     // dozen runs.
     if let Err(e) = orchestrator.shutdown().await {
         crate::log::warn(&format!("Orchestrator shutdown error: {e}"));
+    }
+
+    // Rendezvous barrier: emit() defers its RunData writes to spawned
+    // tasks (see CliEventSink::pending_writes). The engine is shut down,
+    // so nothing new can be queued — await every outstanding ticket
+    // before snapshotting, so the last event's write (e.g. a final-phase
+    // `run.operated_by`) can't lose the race against the upload payload.
+    let pending: Vec<tokio::task::JoinHandle<()>> = pending_run_data_writes
+        .lock()
+        .map(|mut writes| writes.drain(..).collect())
+        .unwrap_or_default();
+    for handle in pending {
+        let _ = handle.await;
     }
 
     // Build RunCreateRequest from accumulated data
@@ -2426,6 +2515,7 @@ mod tests {
             unit_part: None,
             unit_revision: None,
             unit_batch: None,
+            unit_operated_by: None,
             unit_sub_units: None,
             run_metadata_sources: Vec::new(),
             unit_metadata_sources: Vec::new(),
@@ -2475,6 +2565,50 @@ mod tests {
         assert_eq!(umd.get("asset_owner"), Some(&serde_json::json!("lab-3")));
         assert_eq!(umd.get("cycles"), Some(&serde_json::json!(3)));
         assert_eq!(umd.get("calibrated"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn operated_by_over_the_ceiling_is_clamped_not_dropped() {
+        // A 300-char badge scan reaching build_run_request means the test has
+        // already run: rejecting here would lose the whole run, so the value
+        // is clamped to the server ceiling instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut data = empty_run_data();
+        let max = execution_engine::unit::OPERATED_BY_MAX_CHARS;
+        data.unit_operated_by = Some("x".repeat(300));
+
+        let req = build_run_request(
+            &data,
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(req.operated_by.as_deref(), Some("x".repeat(max).as_str()));
+    }
+
+    #[test]
+    fn operated_by_is_clamped_on_characters_not_bytes() {
+        // 200 accented characters are 400 bytes: under the ceiling, so the
+        // value must survive whole. A byte-based clamp would cut it in half,
+        // and a byte slice would have panicked on the char boundary.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut data = empty_run_data();
+        let name = "é".repeat(200);
+        data.unit_operated_by = Some(name.clone());
+
+        let req = build_run_request(
+            &data,
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(req.operated_by.as_deref(), Some(name.as_str()));
     }
 
     #[test]
@@ -2587,6 +2721,7 @@ mod tests {
             part_number: None,
             revision_number: None,
             batch_number: None,
+            operated_by: None,
             sub_units: None,
             status: "complete".into(),
             metadata: Some(

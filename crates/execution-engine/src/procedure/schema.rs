@@ -346,6 +346,11 @@ pub struct ProcedureYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<UnitConfig>,
 
+    /// Operated-by prompt config — run attribution, see
+    /// `ProcedureDefinition::operated_by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by: Option<UnitFieldConfig>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugs: Vec<PlugDefinitionYaml>,
 
@@ -387,6 +392,14 @@ pub struct ProcedureDefinition {
     #[validate(nested)]
     pub unit: Option<UnitConfig>,
 
+    /// Operated-by prompt config. A RUN property, not a unit field:
+    /// the value is an email or free-text name forwarded to `runs.create` as
+    /// `operated_by` (run attribution). Declared at the procedure
+    /// root; when present, the identification screen prompts for it
+    /// alongside the unit fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by: Option<UnitFieldConfig>,
+
     #[serde(default)]
     #[validate(nested)]
     pub plugs: Vec<PlugDefinition>,
@@ -413,6 +426,7 @@ impl From<ProcedureYaml> for ProcedureDefinition {
             description: raw.description,
             execution: raw.execution,
             unit: raw.unit,
+            operated_by: raw.operated_by,
             plugs: raw.plugs.into_iter().map(|p| p.into()).collect(),
             setup: raw.setup.into_iter().map(|p| p.into()).collect(),
             main: raw.main.into_iter().map(|p| p.into()).collect(),
@@ -523,6 +537,7 @@ impl ProcedureDefinition {
             description: self.description.clone(),
             execution: self.execution.clone(),
             unit: self.unit.clone(),
+            operated_by: self.operated_by.clone(),
             plugs: self.plugs.iter().map(|p| p.to_yaml()).collect(),
             setup: self.setup.iter().map(|p| p.to_yaml()).collect(),
             main: self.main.iter().map(|p| p.to_yaml()).collect(),

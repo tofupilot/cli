@@ -154,6 +154,7 @@ struct ResolvedUnit {
     part_number: Option<String>,
     revision_number: Option<String>,
     batch_number: Option<String>,
+    operated_by: Option<String>,
     /// Map of sub-unit label → serial_number, mirroring
     /// `execution_engine::unit::UnitInfo::sub_units`. v2 API accepts a
     /// flat list of serial numbers; we collect `.values()` at request
@@ -192,6 +193,21 @@ fn build_unit_config_from_kwargs(
         sub_units: None,
         metadata: None,
     }
+}
+
+/// Procedure-root `operated_by` (run attribution) from the same kwargs
+/// map. Separate from `build_unit_config_from_kwargs` because it is a
+/// run property, not a unit field.
+fn operated_by_config_from_kwargs(
+    kwargs: &std::collections::HashMap<String, String>,
+) -> Option<execution_engine::procedure::UnitFieldConfig> {
+    kwargs
+        .get("operated_by")
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| execution_engine::procedure::UnitFieldConfig {
+            default_value: Some(v.clone()),
+            ..Default::default()
+        })
 }
 
 /// Convert a framework `UnitInfo` to the station-protocol wire shape.
@@ -494,6 +510,9 @@ pub async fn run_openhtf(
                                 part_number: reused.part_number.clone(),
                                 revision_number: reused.revision_number.clone(),
                                 batch_number: reused.batch_number.clone(),
+                                // Run attribution is not on the wire; a reuse
+                                // re-attributes from the session email.
+                                operated_by: None,
                                 sub_units: if reused.sub_units.is_empty() {
                                     None
                                 } else {
@@ -509,7 +528,7 @@ pub async fn run_openhtf(
                             // required-field constraints.
                             let cfg = build_unit_config_from_kwargs(&unit_kwargs, auto_identify);
                             if let Err(err) =
-                                execution_engine::unit::validate_unit_info(&info, &Some(cfg))
+                                execution_engine::unit::validate_unit_info(&info, &Some(cfg), None)
                             {
                                 let msg = format!("reuse_unit failed validation: {err}");
                                 crate::log::error(&msg);
@@ -531,6 +550,7 @@ pub async fn run_openhtf(
                                 unit_resolved.part_number = info.part_number.clone();
                                 unit_resolved.revision_number = info.revision_number.clone();
                                 unit_resolved.batch_number = info.batch_number.clone();
+                                unit_resolved.operated_by = info.operated_by.clone();
                                 unit_resolved.sub_units =
                                     info.sub_units.clone().unwrap_or_default();
                                 router.identify_resolved(None, &reused);
@@ -545,12 +565,20 @@ pub async fn run_openhtf(
                                 procedure_id: pid.clone(),
                                 has_ui,
                             };
-                            match execution_engine::identify(&cfg, None, &host).await {
+                            match execution_engine::identify(
+                                &cfg,
+                                operated_by_config_from_kwargs(&unit_kwargs).as_ref(),
+                                None,
+                                &host,
+                            )
+                            .await
+                            {
                                 Ok(info) => {
                                     unit_resolved.serial_number = info.serial_number.clone();
                                     unit_resolved.part_number = info.part_number.clone();
                                     unit_resolved.revision_number = info.revision_number.clone();
                                     unit_resolved.batch_number = info.batch_number.clone();
+                                    unit_resolved.operated_by = info.operated_by.clone();
                                     unit_resolved.sub_units =
                                         info.sub_units.clone().unwrap_or_default();
                                     // Wire the dedicated `identify_resolved`
@@ -1474,8 +1502,15 @@ fn build_request(
         b = b.deployment_id(deployment_id);
     }
 
-    if let Some(email) = operated_by {
-        b = b.operated_by(email);
+    // Operated-by priority mirrors the unit fields: user metadata
+    // mutation > resolved unit (operator prompt / defaults) > the
+    // session email forwarded on the WS run command.
+    let candidate = meta_str("operated_by")
+        .or_else(|| unit.operated_by.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| operated_by.map(str::to_string));
+    if let Some(value) = super::clamp_operated_by(candidate.as_deref()) {
+        b = b.operated_by(value);
     }
 
     b.build().map_err(|e| e.to_string().into())
@@ -1993,6 +2028,7 @@ mod tests {
             part_number: Some("PCB-CLI".to_string()),
             revision_number: Some("A".to_string()),
             batch_number: Some("BATCH-CLI".to_string()),
+            operated_by: None,
             sub_units: sub,
         };
         let test_end = serde_json::json!({
@@ -2040,6 +2076,7 @@ mod tests {
             part_number: Some("PCB-CLI".to_string()),
             revision_number: Some("A".to_string()),
             batch_number: Some("BATCH-CLI".to_string()),
+            operated_by: None,
             sub_units: sub,
         };
         let test_end = serde_json::json!({
@@ -2078,6 +2115,7 @@ mod tests {
             part_number: None,
             revision_number: None,
             batch_number: Some("BATCH-CLI".to_string()),
+            operated_by: None,
             sub_units: std::collections::HashMap::new(),
         };
         let test_end = serde_json::json!({
@@ -2114,6 +2152,7 @@ mod tests {
             part_number: Some("PCB".to_string()),
             revision_number: Some("A".to_string()),
             batch_number: None,
+            operated_by: Some("jane@acme.com".to_string()),
             sub_units: Some(sub),
             status: "complete".to_string(),
             metadata: None,

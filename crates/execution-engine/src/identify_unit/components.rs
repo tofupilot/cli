@@ -2,8 +2,8 @@
 //!
 //! Component shape is canonical: `serial_number` is always present,
 //! `part_number` always present, optional `revision_number` /
-//! `batch_number` only when configured, and one `sub_unit:<key>` text
-//! input per configured sub-unit. The wire-side `IdentifyRequest`
+//! `batch_number` / `operated_by` only when configured, and one
+//! `sub_unit:<key>` text input per configured sub-unit. The wire-side `IdentifyRequest`
 //! event carries this shape verbatim — operator-UI consumes the
 //! event type directly (no heuristic), but the canonical names are
 //! still the contract every consumer relies on for field rendering.
@@ -23,7 +23,12 @@ use crate::ui::{ComponentType, ComponentValue, UiComponent};
 /// callers reaching this function with a malformed `UnitConfig` get an
 /// `Err` rather than a silently-incomplete prompt that operator-UI
 /// would reject anyway.
-pub fn build_components(cfg: &UnitConfig) -> Result<Vec<UiComponent>, String> {
+pub fn build_components(
+    cfg: &UnitConfig,
+    // Procedure-root `operated_by:` — a RUN property prompted on the
+    // same identification screen as the unit fields.
+    operated_by: Option<&UnitFieldConfig>,
+) -> Result<Vec<UiComponent>, String> {
     let serial_cfg = cfg
         .serial_number
         .as_ref()
@@ -59,6 +64,14 @@ pub fn build_components(cfg: &UnitConfig) -> Result<Vec<UiComponent>, String> {
             "batch_number",
             "Batch Number",
             batch_cfg,
+            false,
+        ));
+    }
+    if let Some(operated_cfg) = operated_by {
+        components.push(text_input_component(
+            "operated_by",
+            "Operated By",
+            operated_cfg,
             false,
         ));
     }
@@ -148,7 +161,7 @@ mod tests {
     #[test]
     fn always_emits_serial_number_first() {
         let cfg = cfg_with_required_fields();
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         assert_eq!(components[0].key, "serial_number");
         assert_eq!(components[1].key, "part_number");
     }
@@ -157,7 +170,7 @@ mod tests {
     fn missing_serial_number_config_errors() {
         let mut cfg = cfg_with_required_fields();
         cfg.serial_number = None;
-        let err = build_components(&cfg).unwrap_err();
+        let err = build_components(&cfg, None).unwrap_err();
         assert!(err.contains("serial_number"));
     }
 
@@ -165,14 +178,14 @@ mod tests {
     fn missing_part_number_config_errors() {
         let mut cfg = cfg_with_required_fields();
         cfg.part_number = None;
-        let err = build_components(&cfg).unwrap_err();
+        let err = build_components(&cfg, None).unwrap_err();
         assert!(err.contains("part_number"));
     }
 
     #[test]
     fn forwards_default_placeholder_pattern_lengths() {
         let cfg = cfg_with_required_fields();
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         let serial = components
             .iter()
             .find(|c| c.key == "serial_number")
@@ -195,7 +208,7 @@ mod tests {
     #[test]
     fn description_is_none_when_unset() {
         let cfg = cfg_with_required_fields();
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         // part_number config sets no description -> wire component carries None
         let part = components.iter().find(|c| c.key == "part_number").unwrap();
         assert_eq!(part.description, None);
@@ -212,7 +225,7 @@ mod tests {
                 ..Default::default()
             }),
         }]));
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         let battery = components
             .iter()
             .find(|c| c.key == "sub_unit:battery")
@@ -226,9 +239,27 @@ mod tests {
     #[test]
     fn revision_and_batch_are_optional() {
         let cfg = cfg_with_required_fields();
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         assert!(!components.iter().any(|c| c.key == "revision_number"));
         assert!(!components.iter().any(|c| c.key == "batch_number"));
+        assert!(!components.iter().any(|c| c.key == "operated_by"));
+    }
+
+    #[test]
+    fn operated_by_emitted_when_configured() {
+        let cfg = cfg_with_required_fields();
+        let operated = UnitFieldConfig {
+            placeholder: Some("operator@acme.com".to_string()),
+            ..Default::default()
+        };
+        let components = build_components(&cfg, Some(&operated)).unwrap();
+        let operated = components
+            .iter()
+            .find(|c| c.key == "operated_by")
+            .expect("operated_by component");
+        assert_eq!(operated.label.as_deref(), Some("Operated By"));
+        assert!(!operated.required);
+        assert_eq!(operated.placeholder.as_deref(), Some("operator@acme.com"));
     }
 
     #[test]
@@ -236,7 +267,7 @@ mod tests {
         let mut cfg = cfg_with_required_fields();
         cfg.revision_number = Some(UnitFieldConfig::default());
         cfg.batch_number = Some(UnitFieldConfig::default());
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         assert!(components
             .iter()
             .any(|c| c.key == "revision_number" && !c.required));
@@ -263,7 +294,7 @@ mod tests {
                 }),
             },
         ]));
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         let battery = components
             .iter()
             .find(|c| c.key == "sub_unit:battery")
@@ -292,7 +323,7 @@ mod tests {
         md.insert("amendment".to_string(), UnitFieldConfig::default());
         cfg.metadata = Some(md);
 
-        let components = build_components(&cfg).unwrap();
+        let components = build_components(&cfg, None).unwrap();
         let modification = components
             .iter()
             .find(|c| c.key == "metadata:modification")

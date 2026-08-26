@@ -385,7 +385,7 @@ def _output_callback(test_record, phase_docstrings=None):
     metadata = test_record.metadata or {}
     final_metadata = {}
     for k in ("serial_number", "part_number", "revision_number",
-              "batch_number"):
+              "batch_number", "operated_by"):
         v = metadata.get(k)
         if isinstance(v, str) and v:
             final_metadata[k] = v
@@ -830,7 +830,7 @@ class CliUserInput(htf.plugs.BasePlug):
 # Field keys forwarded to Rust on `test_start` and read back from
 # `set_unit_resolved`. Any other kwargs the user passed to htf.Test
 # pass through to OpenHTF untouched.
-_UNIT_FIELD_KEYS = ("serial_number", "part_number", "revision_number", "batch_number")
+_UNIT_FIELD_KEYS = ("serial_number", "part_number", "revision_number", "batch_number", "operated_by")
 
 
 def _await_unit_resolution():
@@ -1182,6 +1182,7 @@ def main():
             "part_number": kwargs.get("part_number", "") or "",
             "revision_number": kwargs.pop("revision_number", "") or "",
             "batch_number": kwargs.pop("batch_number", "") or "",
+            "operated_by": kwargs.pop("operated_by", "") or "",
         }
 
         names = []
@@ -1490,7 +1491,8 @@ def main():
                 if test_state is not None:
                     record = test_state.test_record
                     for k in ("serial_number", "part_number",
-                              "revision_number", "batch_number"):
+                              "revision_number", "batch_number",
+                              "operated_by"):
                         v = resolved.get(k)
                         if v and not record.metadata.get(k):
                             record.metadata[k] = v

@@ -48,7 +48,7 @@ async fn main() -> tofupilot::Result<()> {
 | `procedure_id` | `String` | :heavy_check_mark: | Procedure ID. Create the procedure in the app first, then find the auto-generated ID on the procedure page. |
 | `deployment_id` | `NullableField<String>` | :heavy_minus_sign: | Deployment ID this run was executed from. Set by the CLI when running a pulled deployment so the run is linked back to the exact build it ran. Validated against the procedure; left null for ad-hoc or local runs. |
 | `procedure_version` | `NullableField<String>` | :heavy_minus_sign: | Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version. |
-| `operated_by` | `Option<String>` | :heavy_minus_sign: | Email address of the operator who executed the test run. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. If the email does not match a member of the calling organization, it is silently dropped and the run is recorded with no operator. The run is linked to this user (when resolved) to track who performed the test. |
+| `operated_by` | `Option<String>` | :heavy_minus_sign: | Operator who executed the test run: an email address or a free-text name. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. An email matching a member of the calling organization links the run to that user account; any other value (a name, or an unrecognized email) is recorded verbatim as a declared operator name. Declared names are informative only — they are not verified identities. |
 | `started_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the test run began execution. This timestamp will be used to track when the test execution started and for historical analysis of test runs. A separate created_at timestamp is stored internally server side to track upload date. |
 | `ended_at` | `chrono::DateTime<chrono::Utc>` | :heavy_check_mark: | ISO 8601 timestamp when the test run finished execution. |
 | `serial_number` | `String` | :heavy_check_mark: | Unique serial number of the unit under test. Matched case-insensitively. If no unit with this serial number exists, one will be created. |
@@ -128,6 +128,7 @@ async fn main() -> tofupilot::Result<()> {
 | `created_by_user_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_station_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `operated_by_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `operated_by_names` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `limit` | `Option<i64>` | :heavy_minus_sign: | Maximum number of runs to return per page. |
 | `cursor` | `Option<i64>` | :heavy_minus_sign: | N/A |
 | `sort_by` | `Option<RunListSortBy>` | :heavy_minus_sign: | Field to sort results by. |

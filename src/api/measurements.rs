@@ -69,6 +69,9 @@ pub struct LsArgs {
     /// operated_by_ids
     #[arg(long, num_args = 1..)]
     pub operated_by_ids: Option<Vec<String>>,
+    /// operated_by_names
+    #[arg(long, num_args = 1..)]
+    pub operated_by_names: Option<Vec<String>>,
     /// created_by_station_ids
     #[arg(long, num_args = 1..)]
     pub created_by_station_ids: Option<Vec<String>>,
@@ -204,6 +207,9 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
     }
     if let Some(ref v) = args.operated_by_ids {
         builder = builder.operated_by_ids(v.clone());
+    }
+    if let Some(ref v) = args.operated_by_names {
+        builder = builder.operated_by_names(v.clone());
     }
     if let Some(ref v) = args.created_by_station_ids {
         builder = builder.created_by_station_ids(v.clone());

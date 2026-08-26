@@ -116,6 +116,7 @@ impl Orchestrator {
                         let input_part = input.and_then(|u| u.part_number.clone());
                         let input_revision = input.and_then(|u| u.revision_number.clone());
                         let input_batch = input.and_then(|u| u.batch_number.clone());
+                        let input_operated_by = input.and_then(|u| u.operated_by.clone());
                         let input_sub_units =
                             input.and_then(|u| u.sub_units.clone()).unwrap_or_default();
 
@@ -180,6 +181,11 @@ impl Orchestrator {
                                         &phase_unit.batch_number,
                                         base.batch_number,
                                         &input_batch,
+                                    ),
+                                    operated_by: merge_field(
+                                        &phase_unit.operated_by,
+                                        base.operated_by,
+                                        &input_operated_by,
                                     ),
                                     sub_units: merged_sub_units,
                                     status: phase_unit.status.clone(),

@@ -76,6 +76,7 @@ pub struct ListBuilder<'a> {
     procedure_versions: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     operated_by_ids: Option<Vec<String>>,
+    operated_by_names: Option<Vec<String>>,
     created_by_station_ids: Option<Vec<String>>,
     created_by_user_ids: Option<Vec<String>>,
     serial_numbers: Option<Vec<String>>,
@@ -109,6 +110,7 @@ impl<'a> ListBuilder<'a> {
             procedure_versions: None,
             environments: None,
             operated_by_ids: None,
+            operated_by_names: None,
             created_by_station_ids: None,
             created_by_user_ids: None,
             serial_numbers: None,
@@ -208,6 +210,12 @@ impl<'a> ListBuilder<'a> {
     /// Set the `operated_by_ids` query parameter.
     pub fn operated_by_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.operated_by_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `operated_by_names` query parameter.
+    pub fn operated_by_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_names = Some(value.into());
         self
     }
 
@@ -371,6 +379,11 @@ impl<'a> ListBuilder<'a> {
         if let Some(ref val) = self.operated_by_ids {
             for item in val {
                 request = request.query(&[("operated_by_ids", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.operated_by_names {
+            for item in val {
+                request = request.query(&[("operated_by_names", item.to_string())]);
             }
         }
         if let Some(ref val) = self.created_by_station_ids {

@@ -28,6 +28,7 @@
 | `created_by_user_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_station_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `operated_by_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `operated_by_names` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `limit` | `Option<i64>` | :heavy_minus_sign: | Maximum number of runs to return per page. |
 | `cursor` | `Option<i64>` | :heavy_minus_sign: | N/A |
 | `sort_by` | `Option<RunListSortBy>` | :heavy_minus_sign: | Field to sort results by. |

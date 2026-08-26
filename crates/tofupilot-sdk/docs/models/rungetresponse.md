@@ -15,7 +15,7 @@ Single test run details.
 | `docstring` | `NullableField<String>` | :heavy_minus_sign: | Additional notes or documentation about this test run. |
 | `created_by_user` | `NullableField<RunGetCreatedByUser>` | :heavy_minus_sign: | User whose API key was used to create this run. Only returned if `all` or `created_by` is included. |
 | `created_by_station` | `NullableField<RunGetCreatedByStation>` | :heavy_minus_sign: | Station whose API key was used to create this run. Only returned if `all` or `created_by` is included. |
-| `operated_by` | `NullableField<RunGetOperatedBy>` | :heavy_minus_sign: | User who operated this run. Only returned if `all` or `operated_by` is included. |
+| `operated_by` | `NullableField<RunGetOperatedBy>` | :heavy_minus_sign: | Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included. |
 | `procedure` | `RunGetProcedure` | :heavy_check_mark: | Test procedure associated with this run. |
 | `unit` | `RunGetUnit` | :heavy_check_mark: | Unit under test information. |
 | `phases` | `Option<Vec<RunGetPhases>>` | :heavy_minus_sign: | Array of execution phases in this run, ordered by start time, then by name and retry attempt for phases that share one. Retry attempts of a phase therefore always appear in attempt order. Only returned if `all` or `phases` is included. |

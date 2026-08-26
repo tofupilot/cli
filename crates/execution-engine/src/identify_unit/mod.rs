@@ -132,11 +132,15 @@ pub trait IdentifyHost: Send + Sync {
 /// `validate_unit_info`. On any error the run should abort cleanly.
 pub async fn identify(
     cfg: &UnitConfig,
+    // Procedure-root `operated_by:` — run attribution prompted on the
+    // same identification screen; None when the YAML omits it.
+    operated_by: Option<&crate::procedure::UnitFieldConfig>,
     slot_id: Option<&str>,
     host: &dyn IdentifyHost,
 ) -> Result<UnitInfo, IdentifyError> {
     if cfg.auto_identify {
-        return resolve::auto_identify_unit_info(cfg).map_err(IdentifyError::Validation);
+        return resolve::auto_identify_unit_info(cfg, operated_by)
+            .map_err(IdentifyError::Validation);
     }
 
     // Fail fast when no UI can answer the prompt. A headless run (no TUI,
@@ -153,7 +157,8 @@ pub async fn identify(
         ));
     }
 
-    let components = components::build_components(cfg).map_err(IdentifyError::InvalidConfig)?;
+    let components =
+        components::build_components(cfg, operated_by).map_err(IdentifyError::InvalidConfig)?;
     let request = PromptRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         slot_id: slot_id.map(str::to_string),
@@ -167,7 +172,7 @@ pub async fn identify(
         Err(IdentifyHostError::Other(r)) => return Err(IdentifyError::Host(r)),
     };
 
-    resolve::resolve_response(cfg, values).map_err(IdentifyError::Validation)
+    resolve::resolve_response(cfg, operated_by, values).map_err(IdentifyError::Validation)
 }
 
 #[cfg(test)]
@@ -242,7 +247,7 @@ mod tests {
             metadata: None,
         };
         let host = FakeHost::ok(HashMap::new());
-        let info = identify(&cfg, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         // Host was never called.
         assert!(host.captured.lock().unwrap().is_none());
@@ -274,7 +279,9 @@ mod tests {
         let host = NoUiHost {
             captured: Mutex::new(None),
         };
-        let err = identify(&cfg, Some("default"), &host).await.unwrap_err();
+        let err = identify(&cfg, None, Some("default"), &host)
+            .await
+            .unwrap_err();
         assert!(matches!(err, IdentifyError::NoUi(_)));
         // The prompt was never broadcast — that's what stops the hang.
         assert!(host.captured.lock().unwrap().is_none());
@@ -302,7 +309,7 @@ mod tests {
         let host = NoUiHost {
             captured: Mutex::new(None),
         };
-        let info = identify(&cfg, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         assert!(host.captured.lock().unwrap().is_none());
     }
@@ -315,7 +322,7 @@ mod tests {
         reply.insert("part_number".to_string(), "PN-1".to_string());
         let host = FakeHost::ok(reply);
 
-        let info = identify(&cfg, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-1"));
         assert_eq!(info.part_number.as_deref(), Some("PN-1"));
 
@@ -331,7 +338,7 @@ mod tests {
     async fn host_cancellation_maps_to_cancelled() {
         let cfg = cfg_for_prompt();
         let host = FakeHost::cancelled();
-        let err = identify(&cfg, None, &host).await.unwrap_err();
+        let err = identify(&cfg, None, None, &host).await.unwrap_err();
         match err {
             IdentifyError::Cancelled(_) => {}
             other => panic!("expected Cancelled, got {other}"),
@@ -342,7 +349,7 @@ mod tests {
     async fn validation_error_surfaces() {
         let cfg = cfg_for_prompt();
         let host = FakeHost::ok(HashMap::new()); // operator submits nothing
-        let err = identify(&cfg, None, &host).await.unwrap_err();
+        let err = identify(&cfg, None, None, &host).await.unwrap_err();
         match err {
             IdentifyError::Validation(_) => {}
             other => panic!("expected Validation, got {other}"),

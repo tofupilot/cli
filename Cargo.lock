@@ -3962,7 +3962,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.18",
- "tofupilot 2.15.1",
+ "tofupilot 2.16.0",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "toml",
@@ -3978,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "tofupilot"
-version = "2.15.1"
+version = "2.16.0"
 dependencies = [
  "chrono",
  "fastrand",

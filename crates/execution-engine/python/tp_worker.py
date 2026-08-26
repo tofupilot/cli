@@ -995,6 +995,10 @@ class Run(_MetadataOwnerMixin):
         self.job_id = job_id
         self.retry_count = retry_count
         self.retry_limit = retry_limit
+        # Operator attributed to the run, email or free-text name (uploaded as
+        # `operated_by`). Seeded from the identify step; writable so a
+        # phase can set/correct it (e.g. read from a badge scanner).
+        self.operated_by: Optional[str] = None
 
 
 class Attachments:
@@ -1657,6 +1661,9 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         unit.part_number = unit_info.get("part_number")
         unit.revision_number = unit_info.get("revision_number")
         unit.batch_number = unit_info.get("batch_number")
+        # Run attribution rides the same command payload but surfaces
+        # on the run object — it is a run property, not a unit field.
+        run.operated_by = unit_info.get("operated_by")
         sub_units = unit_info.get("sub_units", {})
         if sub_units:
             unit.sub_units = SubUnitsDict(sub_units)
@@ -1789,6 +1796,7 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                 or unit.batch_number
                 or unit.part_number
                 or unit.revision_number
+                or run.operated_by
                 or unit.sub_units
             ):
                 unit_info = {
@@ -1796,6 +1804,9 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
                     "batch_number": unit.batch_number,
                     "part_number": unit.part_number,
                     "revision_number": unit.revision_number,
+                    # Run attribution, carried on the same result payload
+                    # (see UnitInfo.operated_by in unit.rs).
+                    "operated_by": run.operated_by,
                     "sub_units": dict(unit.sub_units) if unit.sub_units else None,
                     "status": "tested",
                 }

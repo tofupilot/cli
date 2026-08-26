@@ -180,6 +180,7 @@ def _build_pyproject_unit_kwargs(test_root: str) -> tuple[dict[str, str], bool]:
                 "part_number": str(tp_cfg.get("part_number", "") or ""),
                 "revision_number": str(tp_cfg.get("revision_number", "") or ""),
                 "batch_number": str(tp_cfg.get("batch_number", "") or ""),
+                "operated_by": str(tp_cfg.get("operated_by", "") or ""),
             }
             auto_identify = bool(tp_cfg.get("auto_identify", False))
             return kwargs, auto_identify
@@ -462,7 +463,7 @@ class _Listener:
 
         end_ms = int(time.time() * 1000)
         metadata: dict[str, Any] = {}
-        for k in ("serial_number", "part_number", "revision_number", "batch_number"):
+        for k in ("serial_number", "part_number", "revision_number", "batch_number", "operated_by"):
             v = self.resolved_unit.get(k)
             if isinstance(v, str) and v:
                 metadata[k] = v

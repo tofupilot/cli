@@ -195,7 +195,7 @@ impl<'a> CreateBuilder<'a> {
 
     /// Set the `operated_by` field.
     ///
-    /// Email address of the operator who executed the test run. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. If the email does not match a member of the calling organization, it is silently dropped and the run is recorded with no operator. The run is linked to this user (when resolved) to track who performed the test.
+    /// Operator who executed the test run: an email address or a free-text name. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. An email matching a member of the calling organization links the run to that user account; any other value (a name, or an unrecognized email) is recorded verbatim as a declared operator name. Declared names are informative only — they are not verified identities.
     pub fn operated_by(mut self, value: impl Into<String>) -> Self {
         self.operated_by = Some(value.into());
         self
@@ -462,6 +462,7 @@ pub struct ListBuilder<'a> {
     created_by_user_ids: Option<Vec<String>>,
     created_by_station_ids: Option<Vec<String>>,
     operated_by_ids: Option<Vec<String>>,
+    operated_by_names: Option<Vec<String>>,
     limit: Option<i64>,
     cursor: Option<i64>,
     sort_by: Option<RunListSortBy>,
@@ -499,6 +500,7 @@ impl<'a> ListBuilder<'a> {
             created_by_user_ids: None,
             created_by_station_ids: None,
             operated_by_ids: None,
+            operated_by_names: None,
             limit: None,
             cursor: None,
             sort_by: None,
@@ -645,6 +647,12 @@ impl<'a> ListBuilder<'a> {
     /// Set the `operated_by_ids` query parameter.
     pub fn operated_by_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.operated_by_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `operated_by_names` query parameter.
+    pub fn operated_by_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_names = Some(value.into());
         self
     }
 
@@ -819,6 +827,11 @@ impl<'a> ListBuilder<'a> {
         if let Some(ref val) = self.operated_by_ids {
             for item in val {
                 request = request.query(&[("operated_by_ids", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.operated_by_names {
+            for item in val {
+                request = request.query(&[("operated_by_names", item.to_string())]);
             }
         }
         if let Some(ref val) = self.limit {

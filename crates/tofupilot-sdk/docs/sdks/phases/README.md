@@ -49,6 +49,7 @@ async fn main() -> tofupilot::Result<()> {
 | `procedure_versions` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `environments` | `Option<Vec<Environment>>` | :heavy_minus_sign: | N/A |
 | `operated_by_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `operated_by_names` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_station_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_user_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `serial_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |

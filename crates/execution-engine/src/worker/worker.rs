@@ -344,6 +344,7 @@ impl Worker {
             part_number: ui.part_number.clone(),
             revision_number: ui.revision_number.clone(),
             batch_number: ui.batch_number.clone(),
+            operated_by: ui.operated_by.clone(),
             sub_units: ui.sub_units.clone().unwrap_or_default(),
             metadata: ui.metadata.clone(),
         });
@@ -441,11 +442,19 @@ impl Worker {
                     // as a phase log so the operator UI's Advanced tab
                     // shows startup progress instead of dead air — the
                     // exact signal Sander's stalled run was missing.
-                    self.emit_stage_log(&job, &event_sink, "Python worker acknowledged phase, importing module...");
+                    self.emit_stage_log(
+                        &job,
+                        &event_sink,
+                        "Python worker acknowledged phase, importing module...",
+                    );
                 }
                 protocol::WorkerEvent::ModuleLoaded(_) => {
                     stage = JobStage::Executing;
-                    self.emit_stage_log(&job, &event_sink, "Module imported, running phase function");
+                    self.emit_stage_log(
+                        &job,
+                        &event_sink,
+                        "Module imported, running phase function",
+                    );
                 }
                 protocol::WorkerEvent::JobComplete(result) => {
                     // Check phase result to determine if we should wait for UI
@@ -618,6 +627,19 @@ impl Worker {
                             unit_info: merged.clone(),
                         });
                         job_result.unit = Some(merged);
+                    } else if let Some(py_unit) = job_result.unit.as_ref() {
+                        // Pure Python write (`unit.<field> = ...` with no
+                        // UI response this phase): publish through the
+                        // same event, but only when something actually
+                        // changed — the worker echoes the seeded unit
+                        // back on every phase, and re-emitting identical
+                        // identity each phase would spam consumers.
+                        if unit_identity_changed(py_unit, job.initial_unit_info.as_ref()) {
+                            event_sink.emit(&ExecutionEvent::UnitIdentified {
+                                slot_id: job.slot_id.clone(),
+                                unit_info: py_unit.clone(),
+                            });
+                        }
                     }
 
                     return Ok(job_result);
@@ -1311,6 +1333,9 @@ fn extract_unit_info_from_json(
         batch_number,
         part_number,
         revision_number,
+        // Run attribution never rides `__unit__` — it arrives via the
+        // separate `__run__` bound payload (see extract_bound_measurements).
+        operated_by: None,
         sub_units,
         status: "tested".to_string(),
         // Python-set unit metadata flows via the JobComplete bundle
@@ -1328,7 +1353,7 @@ fn extract_bound_measurements(
     let bound_json = ui_values.get("__bound_measurements__")?;
     let mut bound: HashMap<String, serde_json::Value> = serde_json::from_str(bound_json).ok()?;
 
-    let unit_info = if let Some(unit_value) = bound.remove("__unit__") {
+    let mut unit_info = if let Some(unit_value) = bound.remove("__unit__") {
         let unit_data_opt = match &unit_value {
             serde_json::Value::Object(obj) => Some(obj.clone()),
             serde_json::Value::String(s) => serde_json::from_str(s).ok(),
@@ -1339,6 +1364,39 @@ fn extract_bound_measurements(
     } else {
         None
     };
+
+    // `run.operated_by` bind: run attribution arrives under `__run__`.
+    // It shares the UnitInfo carriage (see unit.rs) so the same merge
+    // and UnitIdentified re-publish carry it to the upload.
+    if let Some(run_value) = bound.remove("__run__") {
+        let run_data: Option<serde_json::Map<String, serde_json::Value>> = match &run_value {
+            serde_json::Value::Object(obj) => Some(obj.clone()),
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            _ => None,
+        };
+        let operated_by = run_data
+            .as_ref()
+            .and_then(|d| d.get("operated_by"))
+            .and_then(|v| v.as_str())
+            // A cleared bound text input ships "" — blank is "operator
+            // left it empty", not an attribution to record.
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
+        if operated_by.is_some() {
+            unit_info
+                .get_or_insert_with(|| crate::unit::UnitInfo {
+                    serial_number: None,
+                    part_number: None,
+                    revision_number: None,
+                    batch_number: None,
+                    operated_by: None,
+                    sub_units: None,
+                    status: "tested".to_string(),
+                    metadata: None,
+                })
+                .operated_by = operated_by;
+        }
+    }
 
     Some((unit_info, bound))
 }
@@ -1376,6 +1434,28 @@ fn convert_bound_to_measurements(
         .collect()
 }
 
+/// True when a Python phase's returned unit identity differs from what
+/// the phase received — the signal that user code mutated `unit.<field>`
+/// and wire consumers (operator-UI, upload payload) must learn the new
+/// values. `status` and `metadata` are excluded: status flips
+/// "complete"→"tested" on every phase, and Python metadata rides the
+/// JobComplete bundle instead.
+fn unit_identity_changed(
+    result: &crate::unit::UnitInfo,
+    input: Option<&crate::unit::UnitInfo>,
+) -> bool {
+    let scalar = |f: fn(&crate::unit::UnitInfo) -> &Option<String>| -> bool {
+        f(result) != input.map(f).unwrap_or(&None)
+    };
+    scalar(|u| &u.serial_number)
+        || scalar(|u| &u.part_number)
+        || scalar(|u| &u.revision_number)
+        || scalar(|u| &u.batch_number)
+        || scalar(|u| &u.operated_by)
+        || result.sub_units.clone().unwrap_or_default()
+            != input.and_then(|u| u.sub_units.clone()).unwrap_or_default()
+}
+
 fn merge_unit_info(
     existing: Option<crate::unit::UnitInfo>,
     ui_unit: crate::unit::UnitInfo,
@@ -1400,6 +1480,9 @@ fn merge_unit_info(
             }
             if ui_unit.batch_number.is_some() {
                 base.batch_number = ui_unit.batch_number;
+            }
+            if ui_unit.operated_by.is_some() {
+                base.operated_by = ui_unit.operated_by;
             }
             if let Some(ui_md) = ui_unit.metadata {
                 base.metadata

@@ -333,10 +333,7 @@ pub enum StationEvent {
     /// A new upload attempt is starting. Emitted before each retry so
     /// UIs can flip the row to "uploading" and show the attempt
     /// number.
-    RunUploadStarted {
-        queue_id: String,
-        attempt: u32,
-    },
+    RunUploadStarted { queue_id: String, attempt: u32 },
     /// Upload finished successfully. Mirrors `RunUploaded` for the
     /// queue map; consumers may key off either.
     RunUploadSucceeded {
@@ -365,10 +362,7 @@ pub enum StationEvent {
     /// Entry removed from the queue. Either the operator dropped it
     /// (`reason = "manual"`) or the CLI gave up (`reason = "ttl"` /
     /// `reason = "invalid"`).
-    RunUploadDropped {
-        queue_id: String,
-        reason: String,
-    },
+    RunUploadDropped { queue_id: String, reason: String },
     /// A single attachment finished uploading to storage. Emitted
     /// per-attachment from the upload queue once the server has minted an
     /// `upload_id` and the bytes are in object storage. Lets a remote
@@ -1246,6 +1240,12 @@ pub struct StudioSequence {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<StudioSequenceUnit>,
+    /// Procedure-root `operated_by:` prompt config — run attribution
+    /// (`runs.create` `operated_by`), a run property distinct from the
+    /// unit fields even though it is prompted on the same
+    /// identification screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by: Option<StudioSequenceUnitField>,
     // Lists are NEVER skipped when empty: the generated TS declares
     // them non-optional, and omitting them on the wire made the UI
     // crash on `undefined.map`. Bytes saved are not worth a lying type.
@@ -1325,7 +1325,7 @@ pub struct StudioSequencePlugConfigEntry {
 }
 
 /// Unit identification projection (`unit:` at the procedure root):
-/// auto-identify, the four operator-entered identity fields, and the
+/// auto-identify, the operator-entered identity fields, and the
 /// sub-unit list. Metadata stays in YAML.
 #[derive(Debug, Serialize, Deserialize, Type, Clone)]
 pub struct StudioSequenceUnit {
@@ -1826,7 +1826,9 @@ pub struct UiComponent {
     pub font: Option<FontFamily>,
 }
 
-fn default_trim() -> bool { true }
+fn default_trim() -> bool {
+    true
+}
 
 impl UiComponent {
     /// Construct a component with `is_input` derived from the type.
@@ -2307,7 +2309,10 @@ mod tests {
 
     #[test]
     fn is_stale_accepts_pending_seed() {
-        assert!(!is_stale_for_execution(Some(PENDING_EXECUTION_ID), Some("anything")));
+        assert!(!is_stale_for_execution(
+            Some(PENDING_EXECUTION_ID),
+            Some("anything")
+        ));
     }
 
     #[test]

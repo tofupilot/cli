@@ -51,6 +51,7 @@ async fn main() -> tofupilot::Result<()> {
 | `revision_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `batch_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `operated_by_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `operated_by_names` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_station_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `created_by_user_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `started_after` | `Option<chrono::DateTime<chrono::Utc>>` | :heavy_minus_sign: | N/A |

@@ -44,7 +44,7 @@ pub struct CreateArgs {
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[arg(long)]
     pub procedure_version: Option<String>,
-    /// Email address of the operator who executed the test run. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. If the email does not match a member of the calling organization, it is silently dropped and the run is recorded with no operator. The run is linked to this user (when resolved) to track who performed the test.
+    /// Operator who executed the test run: an email address or a free-text name. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. An email matching a member of the calling organization links the run to that user account; any other value (a name, or an unrecognized email) is recorded verbatim as a declared operator name. Declared names are informative only — they are not verified identities.
     #[arg(long)]
     pub operated_by: Option<String>,
     /// ISO 8601 timestamp when the test run began execution. This timestamp will be used to track when the test execution started and for historical analysis of test runs. A separate created_at timestamp is stored internally server side to track upload date. (ISO 8601)
@@ -161,6 +161,9 @@ pub struct LsArgs {
     /// operated_by_ids
     #[arg(long, num_args = 1..)]
     pub operated_by_ids: Option<Vec<String>>,
+    /// operated_by_names
+    #[arg(long, num_args = 1..)]
+    pub operated_by_names: Option<Vec<String>>,
     /// Maximum number of runs to return per page.
     #[arg(long)]
     pub limit: Option<i64>,
@@ -539,6 +542,9 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
     }
     if let Some(ref v) = args.operated_by_ids {
         builder = builder.operated_by_ids(v.clone());
+    }
+    if let Some(ref v) = args.operated_by_names {
+        builder = builder.operated_by_names(v.clone());
     }
     if let Some(v) = args.limit {
         builder = builder.limit(v);

@@ -3058,7 +3058,7 @@ pub struct RunCreateRequest {
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub procedure_version: NullableField<String>,
-    /// Email address of the operator who executed the test run. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. If the email does not match a member of the calling organization, it is silently dropped and the run is recorded with no operator. The run is linked to this user (when resolved) to track who performed the test.
+    /// Operator who executed the test run: an email address or a free-text name. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. An email matching a member of the calling organization links the run to that user account; any other value (a name, or an unrecognized email) is recorded verbatim as a declared operator name. Declared names are informative only — they are not verified identities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operated_by: Option<String>,
     /// ISO 8601 timestamp when the test run began execution. This timestamp will be used to track when the test execution started and for historical analysis of test runs. A separate created_at timestamp is stored internally server side to track upload date.
@@ -3172,7 +3172,7 @@ impl RunCreateRequestBuilder {
 
     /// Set the `operated_by` field.
     ///
-    /// Email address of the operator who executed the test run. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. If the email does not match a member of the calling organization, it is silently dropped and the run is recorded with no operator. The run is linked to this user (when resolved) to track who performed the test.
+    /// Operator who executed the test run: an email address or a free-text name. Honored only for API-key callers (user keys and station keys); browser session callers are auto-stamped with the session user and this field is ignored. An email matching a member of the calling organization links the run to that user account; any other value (a name, or an unrecognized email) is recorded verbatim as a declared operator name. Declared names are informative only — they are not verified identities.
     pub fn operated_by(mut self, value: impl Into<String>) -> Self {
         self.operated_by = Some(value.into());
         self
@@ -3485,6 +3485,8 @@ pub struct RunListRequest {
     pub created_by_station_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operated_by_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by_names: Option<Vec<String>>,
     /// Maximum number of runs to return per page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
@@ -3537,6 +3539,7 @@ pub struct RunListRequestBuilder {
     created_by_user_ids: Option<Vec<String>>,
     created_by_station_ids: Option<Vec<String>>,
     operated_by_ids: Option<Vec<String>>,
+    operated_by_names: Option<Vec<String>>,
     limit: Option<i64>,
     cursor: Option<i64>,
     sort_by: Option<RunListSortBy>,
@@ -3684,6 +3687,12 @@ impl RunListRequestBuilder {
         self
     }
 
+    /// Set the `operated_by_names` field.
+    pub fn operated_by_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_names = Some(value.into());
+        self
+    }
+
     /// Set the `limit` field.
     ///
     /// Maximum number of runs to return per page.
@@ -3756,6 +3765,7 @@ impl RunListRequestBuilder {
             created_by_user_ids: self.created_by_user_ids,
             created_by_station_ids: self.created_by_station_ids,
             operated_by_ids: self.operated_by_ids,
+            operated_by_names: self.operated_by_names,
             limit: self.limit,
             cursor: self.cursor,
             sort_by: self.sort_by,
@@ -3839,15 +3849,16 @@ pub struct RunListCreatedByStation {
     pub name: String,
 }
 
-/// User who operated this run. Only returned if `all` or `operated_by` is included.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunListOperatedBy {
-    /// Operator ID.
-    pub id: String,
-    /// Operator display name.
+    /// Operator user ID. Null when the operator is a declared name without a TofuPilot account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Operator display name: the account name for linked operators, the declared free-text value otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Operator email address.
+    /// Operator email address. Null for declared names (unverified operators have no account email).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
 }
@@ -3870,7 +3881,7 @@ pub struct RunListOperatedByBuilder {
 impl RunListOperatedByBuilder {
     /// Set the `id` field.
     ///
-    /// Operator ID.
+    /// Operator user ID. Null when the operator is a declared name without a TofuPilot account.
     pub fn id(mut self, value: impl Into<String>) -> Self {
         self.id = Some(value.into());
         self
@@ -3878,7 +3889,7 @@ impl RunListOperatedByBuilder {
 
     /// Set the `name` field.
     ///
-    /// Operator display name.
+    /// Operator display name: the account name for linked operators, the declared free-text value otherwise.
     pub fn name(mut self, value: impl Into<String>) -> Self {
         self.name = Some(value.into());
         self
@@ -3886,7 +3897,7 @@ impl RunListOperatedByBuilder {
 
     /// Set the `email` field.
     ///
-    /// Operator email address.
+    /// Operator email address. Null for declared names (unverified operators have no account email).
     pub fn email(mut self, value: impl Into<String>) -> Self {
         self.email = Some(value.into());
         self
@@ -3895,8 +3906,7 @@ impl RunListOperatedByBuilder {
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<RunListOperatedBy, String> {
         Ok(RunListOperatedBy {
-            id: self.id
-                .ok_or_else(|| "missing required field: id".to_string())?,
+            id: self.id,
             name: self.name,
             email: self.email,
         })
@@ -4126,7 +4136,7 @@ pub struct RunListData {
     /// Station whose API key was used to create this run. Only returned if `all` or `created_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub created_by_station: NullableField<RunListCreatedByStation>,
-    /// User who operated this run. Only returned if `all` or `operated_by` is included.
+    /// Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub operated_by: NullableField<RunListOperatedBy>,
     /// Test procedure associated with this run.
@@ -4256,7 +4266,7 @@ impl RunListDataBuilder {
 
     /// Set the `operated_by` field.
     ///
-    /// User who operated this run. Only returned if `all` or `operated_by` is included.
+    /// Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included.
     pub fn operated_by(mut self, value: impl Into<RunListOperatedBy>) -> Self {
         self.operated_by = NullableField::Value(value.into());
         self
@@ -4544,15 +4554,16 @@ impl RunGetCreatedByStationBuilder {
     }
 }
 
-/// User who operated this run. Only returned if `all` or `operated_by` is included.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunGetOperatedBy {
-    /// Operator ID.
-    pub id: String,
-    /// Operator display name.
+    /// Operator user ID. Null when the operator is a declared name without a TofuPilot account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Operator display name: the account name for linked operators, the declared free-text value otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Operator email address.
+    /// Operator email address. Null for declared names (unverified operators have no account email).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
 }
@@ -4575,7 +4586,7 @@ pub struct RunGetOperatedByBuilder {
 impl RunGetOperatedByBuilder {
     /// Set the `id` field.
     ///
-    /// Operator ID.
+    /// Operator user ID. Null when the operator is a declared name without a TofuPilot account.
     pub fn id(mut self, value: impl Into<String>) -> Self {
         self.id = Some(value.into());
         self
@@ -4583,7 +4594,7 @@ impl RunGetOperatedByBuilder {
 
     /// Set the `name` field.
     ///
-    /// Operator display name.
+    /// Operator display name: the account name for linked operators, the declared free-text value otherwise.
     pub fn name(mut self, value: impl Into<String>) -> Self {
         self.name = Some(value.into());
         self
@@ -4591,7 +4602,7 @@ impl RunGetOperatedByBuilder {
 
     /// Set the `email` field.
     ///
-    /// Operator email address.
+    /// Operator email address. Null for declared names (unverified operators have no account email).
     pub fn email(mut self, value: impl Into<String>) -> Self {
         self.email = Some(value.into());
         self
@@ -4600,8 +4611,7 @@ impl RunGetOperatedByBuilder {
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<RunGetOperatedBy, String> {
         Ok(RunGetOperatedBy {
-            id: self.id
-                .ok_or_else(|| "missing required field: id".to_string())?,
+            id: self.id,
             name: self.name,
             email: self.email,
         })
@@ -6187,7 +6197,7 @@ pub struct RunGetResponse {
     /// Station whose API key was used to create this run. Only returned if `all` or `created_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub created_by_station: NullableField<RunGetCreatedByStation>,
-    /// User who operated this run. Only returned if `all` or `operated_by` is included.
+    /// Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub operated_by: NullableField<RunGetOperatedBy>,
     /// Test procedure associated with this run.
@@ -12240,6 +12250,8 @@ pub struct PhaseListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operated_by_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_station_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_user_ids: Option<Vec<String>>,
@@ -12291,6 +12303,7 @@ pub struct PhaseListRequestBuilder {
     procedure_versions: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     operated_by_ids: Option<Vec<String>>,
+    operated_by_names: Option<Vec<String>>,
     created_by_station_ids: Option<Vec<String>>,
     created_by_user_ids: Option<Vec<String>>,
     serial_numbers: Option<Vec<String>>,
@@ -12391,6 +12404,12 @@ impl PhaseListRequestBuilder {
         self
     }
 
+    /// Set the `operated_by_names` field.
+    pub fn operated_by_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_names = Some(value.into());
+        self
+    }
+
     /// Set the `created_by_station_ids` field.
     pub fn created_by_station_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.created_by_station_ids = Some(value.into());
@@ -12483,6 +12502,7 @@ impl PhaseListRequestBuilder {
             procedure_versions: self.procedure_versions,
             environments: self.environments,
             operated_by_ids: self.operated_by_ids,
+            operated_by_names: self.operated_by_names,
             created_by_station_ids: self.created_by_station_ids,
             created_by_user_ids: self.created_by_user_ids,
             serial_numbers: self.serial_numbers,
@@ -13842,6 +13862,8 @@ pub struct MeasurementListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operated_by_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operated_by_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_station_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by_user_ids: Option<Vec<String>>,
@@ -13904,6 +13926,7 @@ pub struct MeasurementListRequestBuilder {
     revision_numbers: Option<Vec<String>>,
     batch_numbers: Option<Vec<String>>,
     operated_by_ids: Option<Vec<String>>,
+    operated_by_names: Option<Vec<String>>,
     created_by_station_ids: Option<Vec<String>>,
     created_by_user_ids: Option<Vec<String>>,
     started_after: Option<chrono::DateTime<chrono::Utc>>,
@@ -14017,6 +14040,12 @@ impl MeasurementListRequestBuilder {
     /// Set the `operated_by_ids` field.
     pub fn operated_by_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.operated_by_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `operated_by_names` field.
+    pub fn operated_by_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.operated_by_names = Some(value.into());
         self
     }
 
@@ -14140,6 +14169,7 @@ impl MeasurementListRequestBuilder {
             revision_numbers: self.revision_numbers,
             batch_numbers: self.batch_numbers,
             operated_by_ids: self.operated_by_ids,
+            operated_by_names: self.operated_by_names,
             created_by_station_ids: self.created_by_station_ids,
             created_by_user_ids: self.created_by_user_ids,
             started_after: self.started_after,
