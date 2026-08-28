@@ -40,6 +40,7 @@ async fn main() -> tofupilot::Result<()> {
 | --- | --- | --- | --- |
 | `name` | `String` | :heavy_check_mark: | Name of the station |
 | `procedure_id` | `Option<String>` | :heavy_minus_sign: | Optional procedure ID to link the station to |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata to attach to the station (max 50 keys per station). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. Use it for descriptive fields such as location or asset tag — not for procedure configuration, which belongs to station config. |
 
 ### Response
 
@@ -84,6 +85,8 @@ async fn main() -> tofupilot::Result<()> {
 | `cursor` | `Option<i64>` | :heavy_minus_sign: | N/A |
 | `search_query` | `Option<String>` | :heavy_minus_sign: | N/A |
 | `procedure_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Filter stations by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`. |
+| `include_metadata` | `Option<bool>` | :heavy_minus_sign: | When true, includes the custom metadata object on each station in the response. Defaults to false to keep payloads small. |
 
 ### Response
 
@@ -210,6 +213,7 @@ async fn main() -> tofupilot::Result<()> {
 | `name` | `Option<String>` | :heavy_minus_sign: | New name for the station |
 | `image_id` | `Option<String>` | :heavy_minus_sign: | Upload ID for the station image, or empty string to remove image |
 | `team_id` | `NullableField<String>` | :heavy_minus_sign: | Team ID to assign this station to, or null to unassign |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata to upsert on the station. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key. |
 
 ### Response
 

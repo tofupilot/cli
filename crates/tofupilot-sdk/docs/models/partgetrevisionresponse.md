@@ -13,3 +13,4 @@ Revision retrieved successfully
 | `created_by_station` | `Option<PartGetRevisionCreatedByStation>` | :heavy_minus_sign: | Station that created the revision. |
 | `part` | `PartGetRevisionPart` | :heavy_check_mark: | Part associated with this revision. |
 | `units` | `Vec<PartGetRevisionUnits>` | :heavy_check_mark: | List of units created with this revision. |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata key/value pairs on the revision. |

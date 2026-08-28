@@ -93,6 +93,7 @@ pub struct CreateBuilder<'a> {
     client: &'a TofuPilot,
     name: Option<String>,
     procedure_id: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -103,6 +104,7 @@ impl<'a> CreateBuilder<'a> {
             client,
             name: None,
             procedure_id: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -124,11 +126,22 @@ impl<'a> CreateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the station (max 50 keys per station). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. Use it for descriptive fields such as location or asset tag — not for procedure configuration, which belongs to station config.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: StationCreateRequest) -> Self {
         self.name = Some(body.name);
         if body.procedure_id.is_some() {
             self.procedure_id = body.procedure_id;
+        }
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
         }
         self
     }
@@ -170,6 +183,7 @@ impl<'a> CreateBuilder<'a> {
                     "missing required field: name".to_string(),
                 ))?,
             procedure_id: self.procedure_id,
+            metadata: self.metadata,
         };
         request = request.json(&body);
 
@@ -210,6 +224,8 @@ pub struct ListBuilder<'a> {
     cursor: Option<i64>,
     search_query: Option<String>,
     procedure_ids: Option<Vec<String>>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    include_metadata: Option<bool>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -222,6 +238,8 @@ impl<'a> ListBuilder<'a> {
             cursor: None,
             search_query: None,
             procedure_ids: None,
+            metadata: None,
+            include_metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -250,6 +268,22 @@ impl<'a> ListBuilder<'a> {
     /// Set the `procedure_ids` query parameter.
     pub fn procedure_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.procedure_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `metadata` query parameter.
+    ///
+    /// Filter stations by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
+    /// Set the `include_metadata` query parameter.
+    ///
+    /// When true, includes the custom metadata object on each station in the response. Defaults to false to keep payloads small.
+    pub fn include_metadata(mut self, value: impl Into<bool>) -> Self {
+        self.include_metadata = Some(value.into());
         self
     }
 
@@ -296,6 +330,15 @@ impl<'a> ListBuilder<'a> {
             for item in val {
                 request = request.query(&[("procedure_ids", item.to_string())]);
             }
+        }
+        if let Some(ref val) = self.metadata {
+            // Object/record query param: send as a single JSON-encoded string.
+            if let Ok(encoded) = serde_json::to_string(val) {
+                request = request.query(&[("metadata", encoded)]);
+            }
+        }
+        if let Some(ref val) = self.include_metadata {
+            request = request.query(&[("include_metadata", val.to_string())]);
         }
 
 
@@ -512,6 +555,7 @@ pub struct UpdateBuilder<'a> {
     name: Option<String>,
     image_id: Option<String>,
     team_id: Option<NullableField<String>>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -524,6 +568,7 @@ impl<'a> UpdateBuilder<'a> {
             name: None,
             image_id: None,
             team_id: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -567,6 +612,14 @@ impl<'a> UpdateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the station. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: StationUpdateRequestBody) -> Self {
         if body.name.is_some() {
@@ -576,6 +629,9 @@ impl<'a> UpdateBuilder<'a> {
             self.image_id = body.image_id;
         }
         self.team_id = Some(body.team_id);
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
+        }
         self
     }
 
@@ -623,6 +679,7 @@ impl<'a> UpdateBuilder<'a> {
             name: self.name,
             image_id: self.image_id,
             team_id: self.team_id.unwrap_or(NullableField::Absent),
+            metadata: self.metadata,
         };
         request = request.json(&body);
 

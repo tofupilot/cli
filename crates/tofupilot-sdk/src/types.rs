@@ -8226,6 +8226,9 @@ pub struct PartCreateRequest {
     /// Revision identifier for the part version. If not provided, default revision identifier will be used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_number: Option<String>,
+    /// Custom metadata to attach to the part (max 50 keys per part). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartCreateRequest {
@@ -8241,6 +8244,7 @@ pub struct PartCreateRequestBuilder {
     number: Option<String>,
     name: Option<String>,
     revision_number: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartCreateRequestBuilder {
@@ -8268,6 +8272,14 @@ impl PartCreateRequestBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the part (max 50 keys per part). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<PartCreateRequest, String> {
         Ok(PartCreateRequest {
@@ -8275,6 +8287,7 @@ impl PartCreateRequestBuilder {
                 .ok_or_else(|| "missing required field: number".to_string())?,
             name: self.name,
             revision_number: self.revision_number,
+            metadata: self.metadata,
         })
     }
 }
@@ -8284,6 +8297,130 @@ impl PartCreateRequestBuilder {
 pub struct PartCreateResponse {
     /// Unique identifier of the created part.
     pub id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PartListMetadataQueryParam1 {
+    #[serde(rename = "in")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl PartListMetadataQueryParam1 {
+    /// Create a builder for this type.
+    pub fn builder() -> PartListMetadataQueryParam1Builder {
+        PartListMetadataQueryParam1Builder::default()
+    }
+}
+
+/// Builder for [`PartListMetadataQueryParam1`].
+#[derive(Debug, Default)]
+pub struct PartListMetadataQueryParam1Builder {
+    in_: Option<Vec<String>>,
+    contains: Option<String>,
+}
+
+impl PartListMetadataQueryParam1Builder {
+    /// Set the `in` field.
+    pub fn in_(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.in_ = Some(value.into());
+        self
+    }
+
+    /// Set the `contains` field.
+    pub fn contains(mut self, value: impl Into<String>) -> Self {
+        self.contains = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PartListMetadataQueryParam1, String> {
+        Ok(PartListMetadataQueryParam1 {
+            in_: self.in_,
+            contains: self.contains,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PartListMetadataQueryParam2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gte: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lte: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<f64>,
+}
+
+impl PartListMetadataQueryParam2 {
+    /// Create a builder for this type.
+    pub fn builder() -> PartListMetadataQueryParam2Builder {
+        PartListMetadataQueryParam2Builder::default()
+    }
+}
+
+/// Builder for [`PartListMetadataQueryParam2`].
+#[derive(Debug, Default)]
+pub struct PartListMetadataQueryParam2Builder {
+    gte: Option<f64>,
+    lte: Option<f64>,
+    gt: Option<f64>,
+    lt: Option<f64>,
+    eq: Option<f64>,
+}
+
+impl PartListMetadataQueryParam2Builder {
+    /// Set the `gte` field.
+    pub fn gte(mut self, value: impl Into<f64>) -> Self {
+        self.gte = Some(value.into());
+        self
+    }
+
+    /// Set the `lte` field.
+    pub fn lte(mut self, value: impl Into<f64>) -> Self {
+        self.lte = Some(value.into());
+        self
+    }
+
+    /// Set the `gt` field.
+    pub fn gt(mut self, value: impl Into<f64>) -> Self {
+        self.gt = Some(value.into());
+        self
+    }
+
+    /// Set the `lt` field.
+    pub fn lt(mut self, value: impl Into<f64>) -> Self {
+        self.lt = Some(value.into());
+        self
+    }
+
+    /// Set the `eq` field.
+    pub fn eq(mut self, value: impl Into<f64>) -> Self {
+        self.eq = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PartListMetadataQueryParam2, String> {
+        Ok(PartListMetadataQueryParam2 {
+            gte: self.gte,
+            lte: self.lte,
+            gt: self.gt,
+            lt: self.lt,
+            eq: self.eq,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartListMetadataQueryParam3 {
+    pub eq: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8303,6 +8440,12 @@ pub struct PartListRequest {
     /// Sort order direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<ListSortOrder>,
+    /// Filter parts by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// When true, includes the custom metadata object on each part in the response. Defaults to false to keep payloads small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_metadata: Option<bool>,
 }
 
 impl PartListRequest {
@@ -8321,6 +8464,8 @@ pub struct PartListRequestBuilder {
     procedure_ids: Option<Vec<String>>,
     sort_by: Option<PartListSortBy>,
     sort_order: Option<ListSortOrder>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    include_metadata: Option<bool>,
 }
 
 impl PartListRequestBuilder {
@@ -8366,6 +8511,22 @@ impl PartListRequestBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Filter parts by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
+    /// Set the `include_metadata` field.
+    ///
+    /// When true, includes the custom metadata object on each part in the response. Defaults to false to keep payloads small.
+    pub fn include_metadata(mut self, value: impl Into<bool>) -> Self {
+        self.include_metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<PartListRequest, String> {
         Ok(PartListRequest {
@@ -8375,6 +8536,8 @@ impl PartListRequestBuilder {
             procedure_ids: self.procedure_ids,
             sort_by: self.sort_by,
             sort_order: self.sort_order,
+            metadata: self.metadata,
+            include_metadata: self.include_metadata,
         })
     }
 }
@@ -8400,6 +8563,9 @@ pub struct PartListData {
     /// List of revisions for this part.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<PartListRevisions>,
+    /// Custom metadata key/value pairs on the part. Only present when the request sets `include_metadata=true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartListData {
@@ -8417,6 +8583,7 @@ pub struct PartListDataBuilder {
     name: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     revisions: Option<Vec<PartListRevisions>>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartListDataBuilder {
@@ -8460,6 +8627,14 @@ impl PartListDataBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata key/value pairs on the part. Only present when the request sets `include_metadata=true`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<PartListData, String> {
         Ok(PartListData {
@@ -8472,6 +8647,7 @@ impl PartListDataBuilder {
             created_at: self.created_at
                 .ok_or_else(|| "missing required field: created_at".to_string())?,
             revisions: self.revisions.unwrap_or_default(),
+            metadata: self.metadata,
         })
     }
 }
@@ -8633,6 +8809,9 @@ pub struct PartGetResponse {
     /// List of revisions for this part.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<PartGetRevisions>,
+    /// Custom metadata key/value pairs on the part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8643,6 +8822,9 @@ pub struct PartUpdateRequestBody {
     /// New human-readable name for the part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Custom metadata to upsert on the part. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartUpdateRequestBody {
@@ -8657,6 +8839,7 @@ impl PartUpdateRequestBody {
 pub struct PartUpdateRequestBodyBuilder {
     new_number: Option<String>,
     name: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartUpdateRequestBodyBuilder {
@@ -8676,11 +8859,20 @@ impl PartUpdateRequestBodyBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the part. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<PartUpdateRequestBody, String> {
         Ok(PartUpdateRequestBody {
             new_number: self.new_number,
             name: self.name,
+            metadata: self.metadata,
         })
     }
 }
@@ -8830,6 +9022,9 @@ pub struct PartGetRevisionResponse {
     /// List of units created with this revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<PartGetRevisionUnits>,
+    /// Custom metadata key/value pairs on the revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -8840,6 +9035,9 @@ pub struct PartUpdateRevisionRequestBody {
     /// Upload ID for the revision image, or empty string to remove image
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
+    /// Custom metadata to upsert on the revision. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartUpdateRevisionRequestBody {
@@ -8854,6 +9052,7 @@ impl PartUpdateRevisionRequestBody {
 pub struct PartUpdateRevisionRequestBodyBuilder {
     number: Option<String>,
     image_id: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl PartUpdateRevisionRequestBodyBuilder {
@@ -8873,11 +9072,20 @@ impl PartUpdateRevisionRequestBodyBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the revision. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<PartUpdateRevisionRequestBody, String> {
         Ok(PartUpdateRevisionRequestBody {
             number: self.number,
             image_id: self.image_id,
+            metadata: self.metadata,
         })
     }
 }
@@ -8917,6 +9125,50 @@ pub struct PartDeleteRevisionResponse {
 pub struct PartCreateRevisionRequestBody {
     /// Revision number (e.g., version number or code).
     pub number: String,
+    /// Custom metadata to attach to the revision (max 50 keys per revision). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+impl PartCreateRevisionRequestBody {
+    /// Create a builder for this type.
+    pub fn builder() -> PartCreateRevisionRequestBodyBuilder {
+        PartCreateRevisionRequestBodyBuilder::default()
+    }
+}
+
+/// Builder for [`PartCreateRevisionRequestBody`].
+#[derive(Debug, Default)]
+pub struct PartCreateRevisionRequestBodyBuilder {
+    number: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+}
+
+impl PartCreateRevisionRequestBodyBuilder {
+    /// Set the `number` field.
+    ///
+    /// Revision number (e.g., version number or code).
+    pub fn number(mut self, value: impl Into<String>) -> Self {
+        self.number = Some(value.into());
+        self
+    }
+
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the revision (max 50 keys per revision). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<PartCreateRevisionRequestBody, String> {
+        Ok(PartCreateRevisionRequestBody {
+            number: self.number
+                .ok_or_else(|| "missing required field: number".to_string())?,
+            metadata: self.metadata,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9484,6 +9736,9 @@ pub struct StationCreateRequest {
     /// Optional procedure ID to link the station to
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure_id: Option<String>,
+    /// Custom metadata to attach to the station (max 50 keys per station). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. Use it for descriptive fields such as location or asset tag — not for procedure configuration, which belongs to station config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationCreateRequest {
@@ -9498,6 +9753,7 @@ impl StationCreateRequest {
 pub struct StationCreateRequestBuilder {
     name: Option<String>,
     procedure_id: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationCreateRequestBuilder {
@@ -9517,12 +9773,21 @@ impl StationCreateRequestBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the station (max 50 keys per station). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. Use it for descriptive fields such as location or asset tag — not for procedure configuration, which belongs to station config.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<StationCreateRequest, String> {
         Ok(StationCreateRequest {
             name: self.name
                 .ok_or_else(|| "missing required field: name".to_string())?,
             procedure_id: self.procedure_id,
+            metadata: self.metadata,
         })
     }
 }
@@ -9532,6 +9797,130 @@ impl StationCreateRequestBuilder {
 pub struct StationCreateResponse {
     /// Unique identifier of the created station
     pub id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StationListMetadataQueryParam1 {
+    #[serde(rename = "in")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl StationListMetadataQueryParam1 {
+    /// Create a builder for this type.
+    pub fn builder() -> StationListMetadataQueryParam1Builder {
+        StationListMetadataQueryParam1Builder::default()
+    }
+}
+
+/// Builder for [`StationListMetadataQueryParam1`].
+#[derive(Debug, Default)]
+pub struct StationListMetadataQueryParam1Builder {
+    in_: Option<Vec<String>>,
+    contains: Option<String>,
+}
+
+impl StationListMetadataQueryParam1Builder {
+    /// Set the `in` field.
+    pub fn in_(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.in_ = Some(value.into());
+        self
+    }
+
+    /// Set the `contains` field.
+    pub fn contains(mut self, value: impl Into<String>) -> Self {
+        self.contains = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<StationListMetadataQueryParam1, String> {
+        Ok(StationListMetadataQueryParam1 {
+            in_: self.in_,
+            contains: self.contains,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StationListMetadataQueryParam2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gte: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lte: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eq: Option<f64>,
+}
+
+impl StationListMetadataQueryParam2 {
+    /// Create a builder for this type.
+    pub fn builder() -> StationListMetadataQueryParam2Builder {
+        StationListMetadataQueryParam2Builder::default()
+    }
+}
+
+/// Builder for [`StationListMetadataQueryParam2`].
+#[derive(Debug, Default)]
+pub struct StationListMetadataQueryParam2Builder {
+    gte: Option<f64>,
+    lte: Option<f64>,
+    gt: Option<f64>,
+    lt: Option<f64>,
+    eq: Option<f64>,
+}
+
+impl StationListMetadataQueryParam2Builder {
+    /// Set the `gte` field.
+    pub fn gte(mut self, value: impl Into<f64>) -> Self {
+        self.gte = Some(value.into());
+        self
+    }
+
+    /// Set the `lte` field.
+    pub fn lte(mut self, value: impl Into<f64>) -> Self {
+        self.lte = Some(value.into());
+        self
+    }
+
+    /// Set the `gt` field.
+    pub fn gt(mut self, value: impl Into<f64>) -> Self {
+        self.gt = Some(value.into());
+        self
+    }
+
+    /// Set the `lt` field.
+    pub fn lt(mut self, value: impl Into<f64>) -> Self {
+        self.lt = Some(value.into());
+        self
+    }
+
+    /// Set the `eq` field.
+    pub fn eq(mut self, value: impl Into<f64>) -> Self {
+        self.eq = Some(value.into());
+        self
+    }
+
+    /// Build the struct. Returns an error message if required fields are missing.
+    pub fn build(self) -> std::result::Result<StationListMetadataQueryParam2, String> {
+        Ok(StationListMetadataQueryParam2 {
+            gte: self.gte,
+            lte: self.lte,
+            gt: self.gt,
+            lt: self.lt,
+            eq: self.eq,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StationListMetadataQueryParam3 {
+    pub eq: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -9545,6 +9934,12 @@ pub struct StationListRequest {
     pub search_query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub procedure_ids: Option<Vec<String>>,
+    /// Filter stations by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    /// When true, includes the custom metadata object on each station in the response. Defaults to false to keep payloads small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_metadata: Option<bool>,
 }
 
 impl StationListRequest {
@@ -9561,6 +9956,8 @@ pub struct StationListRequestBuilder {
     cursor: Option<i64>,
     search_query: Option<String>,
     procedure_ids: Option<Vec<String>>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    include_metadata: Option<bool>,
 }
 
 impl StationListRequestBuilder {
@@ -9590,6 +9987,22 @@ impl StationListRequestBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Filter stations by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
+    /// Set the `include_metadata` field.
+    ///
+    /// When true, includes the custom metadata object on each station in the response. Defaults to false to keep payloads small.
+    pub fn include_metadata(mut self, value: impl Into<bool>) -> Self {
+        self.include_metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<StationListRequest, String> {
         Ok(StationListRequest {
@@ -9597,6 +10010,8 @@ impl StationListRequestBuilder {
             cursor: self.cursor,
             search_query: self.search_query,
             procedure_ids: self.procedure_ids,
+            metadata: self.metadata,
+            include_metadata: self.include_metadata,
         })
     }
 }
@@ -9632,6 +10047,9 @@ pub struct StationListData {
     /// Team this station belongs to
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<StationListTeam>,
+    /// Custom metadata key/value pairs on the station. Only present when the request sets `include_metadata=true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationListData {
@@ -9649,6 +10067,7 @@ pub struct StationListDataBuilder {
     procedures: Option<Vec<StationListProcedures>>,
     procedures_count: Option<f64>,
     team: Option<StationListTeam>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationListDataBuilder {
@@ -9692,6 +10111,14 @@ impl StationListDataBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata key/value pairs on the station. Only present when the request sets `include_metadata=true`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<StationListData, String> {
         Ok(StationListData {
@@ -9703,6 +10130,7 @@ impl StationListDataBuilder {
             procedures_count: self.procedures_count
                 .ok_or_else(|| "missing required field: procedures_count".to_string())?,
             team: self.team,
+            metadata: self.metadata,
         })
     }
 }
@@ -10072,6 +10500,9 @@ pub struct StationGetCurrentResponse {
     /// Team this station is assigned to
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<StationGetCurrentTeam>,
+    /// Custom metadata key/value pairs on the station.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10384,6 +10815,9 @@ pub struct StationGetResponse {
     /// Team this station is assigned to
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<StationGetTeam>,
+    /// Custom metadata key/value pairs on the station.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -10397,6 +10831,9 @@ pub struct StationUpdateRequestBody {
     /// Team ID to assign this station to, or null to unassign
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub team_id: NullableField<String>,
+    /// Custom metadata to upsert on the station. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationUpdateRequestBody {
@@ -10412,6 +10849,7 @@ pub struct StationUpdateRequestBodyBuilder {
     name: Option<String>,
     image_id: Option<String>,
     team_id: NullableField<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl StationUpdateRequestBodyBuilder {
@@ -10445,12 +10883,21 @@ impl StationUpdateRequestBodyBuilder {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the station. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Build the struct. Returns an error message if required fields are missing.
     pub fn build(self) -> std::result::Result<StationUpdateRequestBody, String> {
         Ok(StationUpdateRequestBody {
             name: self.name,
             image_id: self.image_id,
             team_id: self.team_id,
+            metadata: self.metadata,
         })
     }
 }

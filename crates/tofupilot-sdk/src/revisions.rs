@@ -195,6 +195,7 @@ pub struct UpdateBuilder<'a> {
     revision_number: Option<String>,
     number: Option<String>,
     image_id: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -207,6 +208,7 @@ impl<'a> UpdateBuilder<'a> {
             revision_number: None,
             number: None,
             image_id: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -244,6 +246,14 @@ impl<'a> UpdateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the revision. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: PartUpdateRevisionRequestBody) -> Self {
         if body.number.is_some() {
@@ -251,6 +261,9 @@ impl<'a> UpdateBuilder<'a> {
         }
         if body.image_id.is_some() {
             self.image_id = body.image_id;
+        }
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
         }
         self
     }
@@ -304,6 +317,7 @@ impl<'a> UpdateBuilder<'a> {
         let body = PartUpdateRevisionRequestBody {
             number: self.number,
             image_id: self.image_id,
+            metadata: self.metadata,
         };
         request = request.json(&body);
 
@@ -458,6 +472,7 @@ pub struct CreateBuilder<'a> {
     client: &'a TofuPilot,
     part_number: Option<String>,
     number: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -468,6 +483,7 @@ impl<'a> CreateBuilder<'a> {
             client,
             part_number: None,
             number: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -489,9 +505,20 @@ impl<'a> CreateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the revision (max 50 keys per revision). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: PartCreateRevisionRequestBody) -> Self {
         self.number = Some(body.number);
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
+        }
         self
     }
 
@@ -540,6 +567,7 @@ impl<'a> CreateBuilder<'a> {
                 .ok_or_else(|| Error::Validation(
                     "missing required field: number".to_string(),
                 ))?,
+            metadata: self.metadata,
         };
         request = request.json(&body);
 

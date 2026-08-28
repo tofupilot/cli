@@ -8,3 +8,4 @@
 | `number` | `String` | :heavy_check_mark: | Unique identifier number for the part. |
 | `name` | `Option<String>` | :heavy_minus_sign: | Human-readable name for the part. If not provided, a default name will be used. |
 | `revision_number` | `Option<String>` | :heavy_minus_sign: | Revision identifier for the part version. If not provided, default revision identifier will be used. |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata to attach to the part (max 50 keys per part). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. |

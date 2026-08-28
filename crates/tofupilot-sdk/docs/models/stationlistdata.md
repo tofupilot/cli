@@ -10,3 +10,4 @@
 | `procedures` | `Vec<StationListProcedures>` | :heavy_check_mark: | Procedures linked to this station |
 | `procedures_count` | `f64` | :heavy_check_mark: | Total number of procedures linked to this station |
 | `team` | `Option<StationListTeam>` | :heavy_minus_sign: | Team this station belongs to |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata key/value pairs on the station. Only present when the request sets `include_metadata=true`. |

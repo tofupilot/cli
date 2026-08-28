@@ -13,3 +13,4 @@ Part retrieved successfully
 | `created_by_user` | `NullableField<PartGetCreatedByUser>` | :heavy_minus_sign: | User who created this part. |
 | `created_by_station` | `NullableField<PartGetCreatedByStation>` | :heavy_minus_sign: | Station that created this part. |
 | `revisions` | `Vec<PartGetRevisions>` | :heavy_check_mark: | List of revisions for this part. |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata key/value pairs on the part. |

@@ -87,6 +87,7 @@ pub struct CreateBuilder<'a> {
     number: Option<String>,
     name: Option<String>,
     revision_number: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -98,6 +99,7 @@ impl<'a> CreateBuilder<'a> {
             number: None,
             name: None,
             revision_number: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -127,6 +129,14 @@ impl<'a> CreateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to attach to the part (max 50 keys per part). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: PartCreateRequest) -> Self {
         self.number = Some(body.number);
@@ -135,6 +145,9 @@ impl<'a> CreateBuilder<'a> {
         }
         if body.revision_number.is_some() {
             self.revision_number = body.revision_number;
+        }
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
         }
         self
     }
@@ -177,6 +190,7 @@ impl<'a> CreateBuilder<'a> {
                 ))?,
             name: self.name,
             revision_number: self.revision_number,
+            metadata: self.metadata,
         };
         request = request.json(&body);
 
@@ -219,6 +233,8 @@ pub struct ListBuilder<'a> {
     procedure_ids: Option<Vec<String>>,
     sort_by: Option<PartListSortBy>,
     sort_order: Option<ListSortOrder>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    include_metadata: Option<bool>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -233,6 +249,8 @@ impl<'a> ListBuilder<'a> {
             procedure_ids: None,
             sort_by: None,
             sort_order: None,
+            metadata: None,
+            include_metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -277,6 +295,22 @@ impl<'a> ListBuilder<'a> {
     /// Sort order direction.
     pub fn sort_order(mut self, value: impl Into<ListSortOrder>) -> Self {
         self.sort_order = Some(value.into());
+        self
+    }
+
+    /// Set the `metadata` query parameter.
+    ///
+    /// Filter parts by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
+    /// Set the `include_metadata` query parameter.
+    ///
+    /// When true, includes the custom metadata object on each part in the response. Defaults to false to keep payloads small.
+    pub fn include_metadata(mut self, value: impl Into<bool>) -> Self {
+        self.include_metadata = Some(value.into());
         self
     }
 
@@ -329,6 +363,15 @@ impl<'a> ListBuilder<'a> {
         }
         if let Some(ref val) = self.sort_order {
             request = request.query(&[("sort_order", val.to_string())]);
+        }
+        if let Some(ref val) = self.metadata {
+            // Object/record query param: send as a single JSON-encoded string.
+            if let Ok(encoded) = serde_json::to_string(val) {
+                request = request.query(&[("metadata", encoded)]);
+            }
+        }
+        if let Some(ref val) = self.include_metadata {
+            request = request.query(&[("include_metadata", val.to_string())]);
         }
 
 
@@ -466,6 +509,7 @@ pub struct UpdateBuilder<'a> {
     number: Option<String>,
     new_number: Option<String>,
     name: Option<String>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
     server_url: Option<String>,
     timeout: Option<std::time::Duration>,
 }
@@ -477,6 +521,7 @@ impl<'a> UpdateBuilder<'a> {
             number: None,
             new_number: None,
             name: None,
+            metadata: None,
             server_url: None,
             timeout: None,
         }
@@ -506,6 +551,14 @@ impl<'a> UpdateBuilder<'a> {
         self
     }
 
+    /// Set the `metadata` field.
+    ///
+    /// Custom metadata to upsert on the part. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key.
+    pub fn metadata(mut self, value: impl Into<std::collections::HashMap<String, serde_json::Value>>) -> Self {
+        self.metadata = Some(value.into());
+        self
+    }
+
     /// Set the full request body (alternative to setting individual fields).
     pub fn body(mut self, body: PartUpdateRequestBody) -> Self {
         if body.new_number.is_some() {
@@ -513,6 +566,9 @@ impl<'a> UpdateBuilder<'a> {
         }
         if body.name.is_some() {
             self.name = body.name;
+        }
+        if body.metadata.is_some() {
+            self.metadata = body.metadata;
         }
         self
     }
@@ -560,6 +616,7 @@ impl<'a> UpdateBuilder<'a> {
         let body = PartUpdateRequestBody {
             new_number: self.new_number,
             name: self.name,
+            metadata: self.metadata,
         };
         request = request.json(&body);
 

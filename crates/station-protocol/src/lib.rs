@@ -1236,7 +1236,12 @@ pub struct StudioPlugParam {
 pub struct StudioSequence {
     pub name: String,
     pub version: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    // Never skipped when empty, for the same reason as the lists below:
+    // the generated TS declares it non-optional, and omitting it made
+    // the Inspector's Description field crash on `undefined.trim`.
+    // No `serde(default)` either: specta reads it as "optional" and
+    // would emit `description?: string` — the lying type again. Nothing
+    // deserializes this projection in Rust, only the CLI builds it.
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<StudioSequenceUnit>,

@@ -85,6 +85,7 @@ async fn main() -> tofupilot::Result<()> {
 | `revision_number` | `String` | :heavy_check_mark: | Current revision number to update. |
 | `number` | `Option<String>` | :heavy_minus_sign: | New revision number to set. |
 | `image_id` | `Option<String>` | :heavy_minus_sign: | Upload ID for the revision image, or empty string to remove image |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata to upsert on the revision. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key. |
 
 ### Response
 
@@ -174,6 +175,7 @@ async fn main() -> tofupilot::Result<()> {
 | --- | --- | --- | --- |
 | `part_number` | `String` | :heavy_check_mark: | Part number to create a revision for. |
 | `number` | `String` | :heavy_check_mark: | Revision number (e.g., version number or code). |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata to attach to the revision (max 50 keys per revision). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. |
 
 ### Response
 

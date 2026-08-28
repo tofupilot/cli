@@ -12,3 +12,4 @@ Current station retrieved successfully
 | `procedures` | `Vec<StationGetCurrentProcedures>` | :heavy_check_mark: | Procedures linked to this station with recent run counts |
 | `organization_slug` | `String` | :heavy_check_mark: | Slug of the organization this station belongs to |
 | `team` | `Option<StationGetCurrentTeam>` | :heavy_minus_sign: | Team this station is assigned to |
+| `metadata` | `Option<std::collections::HashMap<String, serde_json::Value>>` | :heavy_minus_sign: | Custom metadata key/value pairs on the station. |
