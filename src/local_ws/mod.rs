@@ -642,6 +642,124 @@ pub struct Server {
     kiosk: tokio::sync::Mutex<Option<crate::browser_open::KioskHandle>>,
 }
 
+/// Operator-facing explanation for a failed loopback bind.
+///
+/// Pure, and `windows` is a parameter rather than a `cfg!` read inside,
+/// so the Windows wording is exercised by tests from any host.
+fn bind_error_hint(e: &std::io::Error, port: u16, stable_port: bool, windows: bool) -> String {
+    let raw = e.raw_os_error();
+    // Arms reachable on BOTH paths must not print a port number: the
+    // ephemeral path binds 0, so `127.0.0.1:0` names something that does not
+    // exist. The arms below that are guarded on `stable_port` keep using
+    // `{port}` directly, since they can only be reached with a real one.
+    let addr = if stable_port {
+        format!("127.0.0.1:{port}")
+    } else {
+        "an ephemeral port on 127.0.0.1".to_string()
+    };
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse if stable_port => format!(
+            "Port {port} on 127.0.0.1 is already in use. \
+             Another tofupilot daemon is likely running on this host. \
+             Stop it with `tofupilot service stop` (or \
+             `systemctl --user stop tofupilot` on Linux), \
+             or run `tofupilot service status` to see what's holding the port."
+        ),
+        // `PortChoice` has two variants and the guarded arm above absorbs
+        // every stable-port collision, so this is the ephemeral path: `port`
+        // is always 0 and TOFUPILOT_LOCAL_UI_PORT is ignored. The inherited
+        // wording named a port that does not exist and prescribed unsetting a
+        // variable nothing reads. Rare but reachable: the kernel returns
+        // EADDRINUSE on a port-0 bind when the local ephemeral range is
+        // exhausted.
+        std::io::ErrorKind::AddrInUse => format!(
+            "Cannot allocate an ephemeral port on 127.0.0.1 \
+             (raw_os_error={raw:?}). The kernel reports the port as already in \
+             use, which on this path means the local ephemeral range is \
+             exhausted rather than a port of ours being taken. There is no \
+             port to change here, TOFUPILOT_LOCAL_UI_PORT is ignored. Close \
+             some sockets or wait for TIME_WAIT entries to drain, then retry."
+        ),
+        // The ephemeral path binds port 0 and deliberately ignores
+        // TOFUPILOT_LOCAL_UI_PORT (see the PortChoice::Ephemeral comment at
+        // the bind site), so nothing here may tell the caller to pick a port:
+        // the kernel picked it, and the override would not be read. Matched
+        // before the rest because both the privileged-port rule (0 < 1024)
+        // and the Windows reservation story would otherwise hand out advice
+        // that cannot be followed.
+        std::io::ErrorKind::PermissionDenied if !stable_port => format!(
+            "Permission denied binding an ephemeral port on 127.0.0.1 \
+             (raw_os_error={raw:?}). The port was kernel-assigned, so this is \
+             not about the port number, and TOFUPILOT_LOCAL_UI_PORT is ignored \
+             on this path. Something is refusing loopback binds outright: a \
+             sandbox, a seccomp / LSM policy or a container on Unix, a host \
+             firewall or endpoint-protection product on Windows."
+        ),
+        // Windows is matched next, for any port. It has no privileged-port
+        // range at all, so the Unix "below 1024 needs elevation" advice is
+        // wrong there whatever the port — and putting the port test first
+        // made it win on Windows port 80, where the cause is http.sys / IIS
+        // or a reservation. Stating that rule for every refused bind is what
+        // sent a customer hunting for elevation on 7321, and the raw OS error
+        // that would have identified the real cause was not printed either.
+        std::io::ErrorKind::PermissionDenied if windows => format!(
+            "Permission denied binding 127.0.0.1:{port} (raw_os_error={raw:?}). \
+             Windows has no privileged-port range, so this is not about \
+             running as administrator. A refused bind there is usually a \
+             reserved port range — Hyper-V, WinNAT, WSL2 and Docker reserve \
+             blocks of TCP ports and any bind inside one fails this way, \
+             elevated or not — or, on a well-known port, an http.sys or IIS \
+             registration. List the reservations with \
+             `netsh interface ipv4 show excludedportrange protocol=tcp`, then \
+             pick a port outside every listed range via TOFUPILOT_LOCAL_UI_PORT. \
+             Reservations taken at runtime are often gone after a reboot."
+        ),
+        std::io::ErrorKind::PermissionDenied if port < 1024 => format!(
+            "Permission denied binding 127.0.0.1:{port} (raw_os_error={raw:?}). \
+             Ports below 1024 require elevated privileges; pick a higher port \
+             via TOFUPILOT_LOCAL_UI_PORT."
+        ),
+        std::io::ErrorKind::PermissionDenied => format!(
+            "Permission denied binding 127.0.0.1:{port} (raw_os_error={raw:?}). \
+             Port {port} is above the privileged range, so this is not about \
+             elevation: a sandbox, a seccomp / LSM policy or a container \
+             restriction is refusing the bind. Pick a different port via \
+             TOFUPILOT_LOCAL_UI_PORT if that is an option."
+        ),
+        std::io::ErrorKind::AddrNotAvailable => format!(
+            "Cannot bind {addr}: loopback address \
+             unavailable. Check that the loopback interface (lo / lo0) \
+             is up: `ifconfig lo0` (macOS) or `ip addr show lo` (Linux). \
+             Hardened images may disable loopback for non-root users; \
+             containers without `--network host` and net-namespaced \
+             environments can also surface this."
+        ),
+        // Last arm that still offered a port to change on the ephemeral path.
+        // The invariant is path-wide, not per failure mode.
+        std::io::ErrorKind::WouldBlock if !stable_port => format!(
+            "Cannot bind an ephemeral port on 127.0.0.1: kernel returned \
+             EWOULDBLOCK (raw_os_error={raw:?}). Likely SO_REUSEADDR \
+             contention with a socket in TIME_WAIT — wait ~60s and retry. \
+             There is no port to change here, TOFUPILOT_LOCAL_UI_PORT is \
+             ignored on this path."
+        ),
+        std::io::ErrorKind::WouldBlock => format!(
+            "Cannot bind 127.0.0.1:{port}: kernel returned \
+             EWOULDBLOCK. Likely SO_REUSEADDR contention with a \
+             socket in TIME_WAIT — wait ~60s and retry, or pick a \
+             different port via TOFUPILOT_LOCAL_UI_PORT."
+        ),
+        // `Uncategorized` (Linux EPERM via seccomp / LSM) and `Other` end up
+        // here. Surface the raw OS error code so a sysadmin reading the log
+        // has something to grep for.
+        kind => format!(
+            "local-ui: bind {addr} failed: {e} \
+             (kind={kind:?}, raw_os_error={raw:?}). \
+             Run `tofupilot service status` for diagnostics."
+        ),
+    }
+}
+
 impl Server {
     /// Bind the listener and spawn the axum task. Returns once the
     /// listener is live; the SPA is reachable at `boot_url()`.
@@ -709,62 +827,13 @@ impl Server {
         };
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", preferred_port))
             .await
-            .map_err(|e| {
-                match e.kind() {
-                    std::io::ErrorKind::AddrInUse if port_choice == PortChoice::Stable => {
-                        crate::log::error(&format!(
-                            "Port {preferred_port} on 127.0.0.1 is already in use. \
-                             Another tofupilot daemon is likely running on this host. \
-                             Stop it with `tofupilot service stop` (or \
-                             `systemctl --user stop tofupilot` on Linux), \
-                             or run `tofupilot service status` to see what's holding the port."
-                        ));
-                    }
-                    std::io::ErrorKind::AddrInUse => {
-                        crate::log::error(&format!(
-                            "Port {preferred_port} on 127.0.0.1 is already in use. \
-                             Unset TOFUPILOT_LOCAL_UI_PORT (or pick a free port) and retry."
-                        ));
-                    }
-                    std::io::ErrorKind::PermissionDenied => {
-                        crate::log::error(&format!(
-                            "Permission denied binding 127.0.0.1:{preferred_port}. \
-                             Ports < 1024 require elevated privileges; pick a higher \
-                             port via TOFUPILOT_LOCAL_UI_PORT."
-                        ));
-                    }
-                    std::io::ErrorKind::AddrNotAvailable => {
-                        crate::log::error(&format!(
-                            "Cannot bind 127.0.0.1:{preferred_port}: loopback address \
-                             unavailable. Check that the loopback interface (lo / lo0) \
-                             is up: `ifconfig lo0` (macOS) or `ip addr show lo` (Linux). \
-                             Hardened images may disable loopback for non-root users; \
-                             containers without `--network host` and net-namespaced \
-                             environments can also surface this."
-                        ));
-                    }
-                    std::io::ErrorKind::WouldBlock => {
-                        crate::log::error(&format!(
-                            "Cannot bind 127.0.0.1:{preferred_port}: kernel returned \
-                             EWOULDBLOCK. Likely SO_REUSEADDR contention with a \
-                             socket in TIME_WAIT — wait ~60s and retry, or pick a \
-                             different port via TOFUPILOT_LOCAL_UI_PORT."
-                        ));
-                    }
-                    _ => {
-                        // `Uncategorized` (Linux EPERM via seccomp / LSM) and
-                        // `Other` end up here. Surface raw OS error code so a
-                        // sysadmin reading the log has something to grep for.
-                        crate::log::error(&format!(
-                            "local-ui: bind 127.0.0.1:{preferred_port} failed: {e} \
-                             (kind={:?}, raw_os_error={:?}). \
-                             Run `tofupilot service status` for diagnostics.",
-                            e.kind(),
-                            e.raw_os_error()
-                        ));
-                    }
-                }
-                e
+            .inspect_err(|e| {
+                crate::log::error(&bind_error_hint(
+                    e,
+                    preferred_port,
+                    port_choice == PortChoice::Stable,
+                    cfg!(target_os = "windows"),
+                ));
             })?;
         let port = listener.local_addr()?.port();
         let allowed_origins = Arc::new(vec![
@@ -2382,5 +2451,130 @@ mod tests {
         );
         // Non-image stored file (e.g. a CSV attachment) is not served.
         assert!(!is_image_path(&clamp("a1b2c3d4_data.csv")));
+    }
+
+    fn denied() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied")
+    }
+
+    /// The privileged-port rule is the *only* case that may mention
+    /// elevation. Claiming it on 7321 sent a customer looking for admin
+    /// rights while a Windows port reservation was the real cause.
+    #[test]
+    fn privileged_port_rule_is_scoped_to_ports_below_1024() {
+        let low = bind_error_hint(&denied(), 80, true, false);
+        assert!(low.contains("below 1024"));
+        assert!(low.contains("elevated privileges"));
+
+        // The combination that used to misbehave: low port on Windows, where
+        // the rule does not exist at all.
+        let low_windows = bind_error_hint(&denied(), 80, true, true);
+        assert!(!low_windows.contains("elevated privileges"));
+
+        for windows in [true, false] {
+            let high = bind_error_hint(&denied(), 7321, true, windows);
+            assert!(
+                !high.contains("1024"),
+                "high port must not cite the privileged-port rule: {high}"
+            );
+        }
+    }
+
+    /// The ephemeral path (`tofupilot studio`) binds port 0 and ignores the
+    /// env override on purpose, so no message on that path may tell anyone to
+    /// pick a port. Port 0 also trips the `< 1024` rule if it is matched
+    /// first, which is how it used to get the elevation advice.
+    #[test]
+    fn ephemeral_bind_never_suggests_picking_a_port() {
+        // Both kinds, because the rule is about the path and not about one
+        // failure mode: `AddrInUse` used to walk straight past it.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::AddrNotAvailable,
+            // Stands in for anything that lands in the catch-all arm, which
+            // is where a kind nobody has thought about yet will go.
+            std::io::ErrorKind::Other,
+        ] {
+            for windows in [true, false] {
+                let e = std::io::Error::new(kind, "boom");
+                let hint = bind_error_hint(&e, 0, false, windows);
+                assert!(hint.contains("ephemeral"), "{hint}");
+                assert!(!hint.contains("elevated privileges"), "{hint}");
+                assert!(!hint.contains("Unset TOFUPILOT_LOCAL_UI_PORT"), "{hint}");
+                for advice in [
+                    "pick a higher port",
+                    "pick a different port",
+                    "pick a port outside",
+                    "pick a free port",
+                ] {
+                    assert!(
+                        !hint.contains(advice),
+                        "unfollowable advice on the ephemeral path: {hint}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Windows has no privileged-port range, so a refused bind on port 80
+    /// there is http.sys / IIS or a reservation, never elevation. Ordering
+    /// the port test before the platform test made the Unix advice win here.
+    #[test]
+    fn windows_never_gets_the_elevation_advice_even_below_1024() {
+        let hint = bind_error_hint(&denied(), 80, true, true);
+        assert!(
+            !hint.contains("elevated privileges"),
+            "Windows must not be told to elevate: {hint}"
+        );
+        assert!(hint.contains("excludedportrange"));
+        assert!(hint.contains("http.sys"));
+    }
+
+    #[test]
+    fn windows_high_port_points_at_reserved_ranges() {
+        let hint = bind_error_hint(&denied(), 7321, true, true);
+        assert!(hint.contains("excludedportrange"));
+        assert!(hint.contains("not about"));
+    }
+
+    /// Same refusal on a Unix host is a sandbox / LSM story, and must not
+    /// send anyone to netsh.
+    #[test]
+    fn unix_high_port_points_at_sandbox_not_netsh() {
+        let hint = bind_error_hint(&denied(), 7321, true, false);
+        assert!(hint.contains("seccomp"));
+        assert!(!hint.contains("netsh"));
+    }
+
+    /// The raw OS error is what identifies the real failure (WSAEACCES
+    /// 10013 vs EPERM). It was missing from every PermissionDenied message.
+    #[test]
+    fn permission_denied_always_carries_the_raw_os_error() {
+        for (port, windows) in [(80u16, false), (7321, true), (7321, false)] {
+            let hint = bind_error_hint(&denied(), port, true, windows);
+            assert!(hint.contains("raw_os_error="), "missing raw error: {hint}");
+        }
+    }
+
+    /// A real port collision keeps its own actionable message, and the
+    /// stable-port variant is the one naming `tofupilot service stop`.
+    #[test]
+    fn addr_in_use_distinguishes_stable_from_ephemeral() {
+        let in_use = || std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use");
+        let stable = bind_error_hint(&in_use(), 7321, true, true);
+        assert!(stable.contains("tofupilot service stop"));
+        assert!(stable.contains("7321"));
+
+        // Ephemeral always binds 0, so `stable_port == false` on any other
+        // port describes a state `Server::start` cannot reach. Assert the
+        // ignored-variable phrasing rather than the bare variable name: the
+        // old wording ("Unset TOFUPILOT_LOCAL_UI_PORT") also contained the
+        // name, so a bare `contains` would let it come back unnoticed.
+        let ephemeral = bind_error_hint(&in_use(), 0, false, true);
+        assert!(ephemeral.contains("TOFUPILOT_LOCAL_UI_PORT is ignored"));
+        assert!(!ephemeral.contains("Unset TOFUPILOT_LOCAL_UI_PORT"));
+        assert!(!ephemeral.contains("service stop"));
     }
 }

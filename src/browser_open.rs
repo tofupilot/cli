@@ -52,13 +52,18 @@ pub fn open_or_focus(url: &str) -> std::io::Result<()> {
 }
 
 /// Open the URL in a Chromium / Firefox **kiosk-mode** window — full
-/// screen, no chrome, no tabs. Chromium browsers get `--kiosk URL` plus
+/// screen, no chrome, no tab strip. It is a presentation mode, not a
+/// lockdown: see `KioskCandidate::kiosk_args` for what is and is not
+/// actually blocked. Chromium browsers get `--kiosk URL` plus
 /// a per-call temp `--user-data-dir` so the flag isn't ignored when a
-/// regular browser session is already running. Firefox uses `-kiosk`.
+/// regular browser session is already running. On Windows, Edge
+/// additionally gets `--edge-kiosk-type=fullscreen`, without which it
+/// stays in a normal profile session that an operator can tab out of.
+/// Firefox uses `-kiosk`.
 ///
 /// Detection chain (first hit wins):
 ///   * Linux: chromium-browser, chromium, google-chrome,
-///     google-chrome-stable, microsoft-edge, brave, firefox.
+///     google-chrome-stable, microsoft-edge, brave-browser, firefox.
 ///   * macOS: Google Chrome, Microsoft Edge, Brave, Firefox (resolved
 ///     via `/Applications` paths). Safari has no CLI kiosk flag and is
 ///     skipped — operators on Safari rely on the in-page Maximize
@@ -120,6 +125,20 @@ pub fn open_kiosk(url: &str) -> std::io::Result<KioskHandle> {
 #[derive(Debug, Clone, Copy)]
 pub enum KioskBrowser {
     Chromium,
+    /// Chromium-family too, but Edge needs two switches of its own on top
+    /// of the Chromium ones to reach a real kiosk session. See
+    /// `KioskCandidate::kiosk_args`.
+    ///
+    /// Only constructed on Windows, the one platform where Microsoft
+    /// implements Edge kiosk mode: `kiosk_candidates` keeps the Linux and
+    /// macOS `microsoft-edge` entries on `Chromium` on purpose (the reasons,
+    /// one documented and one measured, are at those entries), so elsewhere
+    /// this variant is dead by design and `-D warnings` would reject the
+    /// build. The exception is scoped rather than a blanket
+    /// `allow(dead_code)`, so dropping the Edge routing on Windows still
+    /// fails the build the way it should.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Edge,
     Firefox,
     /// No kiosk-capable browser found — default browser was opened
     /// instead. Operator should expect a normal window with chrome.
@@ -199,7 +218,7 @@ struct KioskCandidate {
 impl KioskCandidate {
     fn kiosk_args(&self, url: &str, profile: Option<&std::path::Path>) -> Option<Vec<String>> {
         match self.brand {
-            KioskBrowser::Chromium => {
+            KioskBrowser::Chromium | KioskBrowser::Edge => {
                 // Minimal flag set. `--start-maximized` /
                 // `--start-fullscreen` / `--ozone-platform=wayland`
                 // were tried earlier to coax Pi OS Bookworm/labwc into
@@ -236,6 +255,37 @@ impl KioskCandidate {
                     // there's no stale `SingletonLock` to clear.
                     v.push(format!("--user-data-dir={}", dir.display()));
                 }
+                if matches!(self.brand, KioskBrowser::Edge) {
+                    // Not an Edge defect: Chromium's `--kiosk` is a
+                    // presentation mode, full screen with no chrome, and it
+                    // locks nothing down. Ctrl+T still opens a tab in Chrome,
+                    // Brave and Chromium too, on every platform (observed on
+                    // Chrome for macOS). Edge on Windows is simply the only
+                    // combination where a real lockdown is reachable from the
+                    // command line, so it is the only one fixed here.
+                    //
+                    // Concretely, `--kiosk` alone leaves Edge in a NORMAL
+                    // profile session. Measured on
+                    // Windows (Edge 151): the window title reads
+                    // "... - Profile 1 - Microsoft Edge", not
+                    // "... - [InPrivate] - ...". Edge's own shortcuts stay
+                    // live in that state, so an operator can still open a
+                    // tab, and a new tab in Edge is the MSN page
+                    // (ntp.msn.cn in China), which is how a customer
+                    // found this. `fullscreen` selects Edge's digital-signage
+                    // kiosk instead: single site, InPrivate, Ctrl+T
+                    // blocked. In the same measurement it also removed
+                    // every Microsoft-domain DNS lookup the browser made
+                    // at startup, which matters on the allowlisted proxies
+                    // several of our customers run.
+                    v.push("--edge-kiosk-type=fullscreen".to_string());
+                    // `fullscreen` already defaults to no idle reset; the
+                    // other kiosk type defaults to 5 minutes and closes the
+                    // window when it fires. Pinned so a Microsoft-side
+                    // default change can't start killing station windows
+                    // between runs.
+                    v.push("--kiosk-idle-timeout-minutes=0".to_string());
+                }
                 v.push(url.to_string());
                 Some(v)
             }
@@ -252,6 +302,9 @@ fn kiosk_candidates() -> Vec<KioskCandidate> {
         ("chromium", KioskBrowser::Chromium),
         ("google-chrome", KioskBrowser::Chromium),
         ("google-chrome-stable", KioskBrowser::Chromium),
+        // Deliberately NOT `KioskBrowser::Edge`: Microsoft documents
+        // kiosk mode as unsupported on Linux, so `--edge-kiosk-type` is
+        // untested there and the plain Chromium flags already work.
         ("microsoft-edge", KioskBrowser::Chromium),
         ("brave-browser", KioskBrowser::Chromium),
         ("firefox", KioskBrowser::Firefox),
@@ -276,6 +329,15 @@ fn kiosk_candidates() -> Vec<KioskCandidate> {
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             KioskBrowser::Chromium,
         ),
+        // Deliberately NOT `KioskBrowser::Edge`, and this one is measured:
+        // Edge 152.0.4191.53 on macOS 26 ignores `--edge-kiosk-type=fullscreen`
+        // outright. AppleScript `mode of window 1` reports `normal` with and
+        // without the switch, where a real InPrivate window of the same build
+        // reports `incognito` (verified by launching it with `--inprivate`).
+        // Microsoft documents Edge kiosk mode for Windows only. Chromium drops
+        // the unknown switch silently, so passing it here would cost nothing
+        // and buy nothing, while the docs would promise macOS stations a
+        // lockdown they do not get.
         (
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             KioskBrowser::Chromium,
@@ -311,11 +373,11 @@ fn kiosk_candidates() -> Vec<KioskCandidate> {
     let candidates: Vec<(String, KioskBrowser)> = vec![
         (
             format!("{pf}\\Microsoft\\Edge\\Application\\msedge.exe"),
-            KioskBrowser::Chromium,
+            KioskBrowser::Edge,
         ),
         (
             format!("{pfx86}\\Microsoft\\Edge\\Application\\msedge.exe"),
-            KioskBrowser::Chromium,
+            KioskBrowser::Edge,
         ),
         (
             format!("{pf}\\Google\\Chrome\\Application\\chrome.exe"),
@@ -417,5 +479,68 @@ mod macos {
                 "unexpected osascript stdout: {stdout:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_for(brand: KioskBrowser) -> Vec<String> {
+        KioskCandidate {
+            bin: "browser".to_string(),
+            brand,
+        }
+        .kiosk_args("http://127.0.0.1:7321/", None)
+        .expect("kiosk-capable brand yields args")
+    }
+
+    /// Edge ignores nothing here, it just needs more: with only Chromium's
+    /// `--kiosk` it stays in a normal profile session the operator can open
+    /// a tab out of, and that tab is the MSN new tab page.
+    #[test]
+    fn edge_gets_its_own_kiosk_switches() {
+        let args = args_for(KioskBrowser::Edge);
+        assert!(args.iter().any(|a| a == "--edge-kiosk-type=fullscreen"));
+        assert!(args.iter().any(|a| a == "--kiosk-idle-timeout-minutes=0"));
+        assert!(args.iter().any(|a| a == "--kiosk"));
+    }
+
+    /// The two switches above are Edge-only. Chrome / Chromium / Brave must
+    /// not see them.
+    #[test]
+    fn chromium_gets_only_the_portable_flags() {
+        let args = args_for(KioskBrowser::Chromium);
+        assert!(!args.iter().any(|a| a.starts_with("--edge-kiosk-type")));
+        assert!(!args.iter().any(|a| a.starts_with("--kiosk-idle-timeout")));
+        assert!(args.iter().any(|a| a == "--kiosk"));
+    }
+
+    /// The URL is positional: anything appended after it would be read as a
+    /// second URL and open a second tab.
+    #[test]
+    fn url_stays_last_for_every_brand() {
+        for brand in [
+            KioskBrowser::Chromium,
+            KioskBrowser::Edge,
+            KioskBrowser::Firefox,
+        ] {
+            let args = args_for(brand);
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("http://127.0.0.1:7321/")
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_has_no_args() {
+        let candidate = KioskCandidate {
+            bin: "browser".to_string(),
+            brand: KioskBrowser::Fallback,
+        };
+        assert!(candidate
+            .kiosk_args("http://127.0.0.1:7321/", None)
+            .is_none());
     }
 }
