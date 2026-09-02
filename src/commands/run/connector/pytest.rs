@@ -765,7 +765,13 @@ pub async fn run_pytest(
         }
     };
 
-    if let Err(e) = super::super::queue::enqueue(&db, &queue_id, &mut queued, Some(&upload_bus)) {
+    if let Err(e) = super::super::queue::enqueue(
+        &db,
+        &queue_id,
+        &mut queued,
+        creds.and_then(|c| c.credential_id.as_deref()),
+        Some(&upload_bus),
+    ) {
         crate::log::error(&format!("Failed to queue run: {e}"));
         return 1;
     }

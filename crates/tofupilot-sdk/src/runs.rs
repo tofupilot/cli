@@ -105,6 +105,7 @@ pub struct CreateBuilder<'a> {
     outcome: Option<LogGetOutcome>,
     procedure_id: Option<String>,
     deployment_id: Option<NullableField<String>>,
+    client_run_ref: Option<String>,
     procedure_version: Option<NullableField<String>>,
     operated_by: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -130,6 +131,7 @@ impl<'a> CreateBuilder<'a> {
             outcome: None,
             procedure_id: None,
             deployment_id: None,
+            client_run_ref: None,
             procedure_version: None,
             operated_by: None,
             started_at: None,
@@ -176,6 +178,14 @@ impl<'a> CreateBuilder<'a> {
     /// Explicitly set `deployment_id` to null.
     pub fn deployment_id_null(mut self) -> Self {
         self.deployment_id = Some(NullableField::Null);
+        self
+    }
+
+    /// Set the `client_run_ref` field.
+    ///
+    /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
+    pub fn client_run_ref(mut self, value: impl Into<String>) -> Self {
+        self.client_run_ref = Some(value.into());
         self
     }
 
@@ -302,6 +312,9 @@ impl<'a> CreateBuilder<'a> {
         self.outcome = Some(body.outcome);
         self.procedure_id = Some(body.procedure_id);
         self.deployment_id = Some(body.deployment_id);
+        if body.client_run_ref.is_some() {
+            self.client_run_ref = body.client_run_ref;
+        }
         self.procedure_version = Some(body.procedure_version);
         if body.operated_by.is_some() {
             self.operated_by = body.operated_by;
@@ -380,6 +393,7 @@ impl<'a> CreateBuilder<'a> {
                     "missing required field: procedure_id".to_string(),
                 ))?,
             deployment_id: self.deployment_id.unwrap_or(NullableField::Absent),
+            client_run_ref: self.client_run_ref,
             procedure_version: self.procedure_version.unwrap_or(NullableField::Absent),
             operated_by: self.operated_by,
             started_at: self.started_at

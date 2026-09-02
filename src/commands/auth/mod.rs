@@ -46,6 +46,11 @@ struct Organization {
 struct ApiKeyResponse {
     api_key: String,
     installation_id: Option<String>,
+    /// Present since the idempotency work (TP-1012). `serde(default)` so the
+    /// CLI keeps working against an older or self-hosted dashboard that does
+    /// not send it — uploads then carry no reference, exactly as before.
+    #[serde(default)]
+    credential_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +58,8 @@ struct RedeemTokenResponse {
     api_key: String,
     organization_slug: String,
     installation_id: Option<String>,
+    #[serde(default)]
+    credential_id: Option<String>,
     #[serde(default)]
     replaced_installations: u32,
 }
@@ -251,6 +258,7 @@ pub async fn login_cmd(
         base_url: base.to_string(),
         organization_slug: org.slug.clone(),
         installation_id: key.installation_id,
+        credential_id: key.credential_id,
         ca_cert: ca_cert.clone(),
     };
     let creds_for_save = creds.clone();
@@ -444,6 +452,130 @@ async fn fetch_whoami(client: &Client, creds: &Credentials) -> Result<db::Whoami
     Ok(whoami_cache_from_json(&info))
 }
 
+/// `credential_id` from a `/api/cli/whoami` body: the api_key row's primary
+/// key, absent from dashboards that predate it. Kept apart from
+/// [`whoami_cache_from_json`] because it is not identity — it belongs in the
+/// credential file, next to the key it describes, not in the whoami cache.
+pub(crate) fn credential_id_from_whoami(info: &serde_json::Value) -> Option<String> {
+    info["credential_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// How long a failed `credential_id` probe is remembered. The probe sits on
+/// the startup path of every run, so a bench that is offline, or a self-hosted
+/// dashboard that predates the field, must cost one AUTH_PROBE timeout an
+/// hour, not one per run.
+const CREDENTIAL_ID_PROBE_RETRY_SECS: i64 = 3600;
+
+/// One marker per credential slot: a station and a user login on the same
+/// machine talk to the same dashboard but are two different files.
+fn credential_slot(creds: &Credentials) -> &'static str {
+    if creds.installation_id.is_some() {
+        "station"
+    } else {
+        "user"
+    }
+}
+
+/// Whether a probe that failed at `failed_at` (unix seconds) is still inside
+/// its retry window at `now`. Pure so it can be tested; a clock that went
+/// backwards counts as elapsed rather than pinning the marker forever.
+fn probe_window_holds(failed_at: i64, now: i64) -> bool {
+    let elapsed = now - failed_at;
+    (0..CREDENTIAL_ID_PROBE_RETRY_SECS).contains(&elapsed)
+}
+
+fn probe_recently_failed(slot: &str) -> bool {
+    let Ok(db) = db::open() else { return false };
+    let Ok(Some(failed_at)) = db.credential_probe_failed_at(slot) else {
+        return false;
+    };
+    probe_window_holds(failed_at, chrono::Utc::now().timestamp())
+}
+
+fn remember_probe_failure(slot: &str) {
+    if let Ok(db) = db::open() {
+        let _ = db.set_credential_probe_failed_at(slot, chrono::Utc::now().timestamp());
+    }
+}
+
+/// GET `/api/cli/whoami` and read `credential_id`. `None` covers every miss:
+/// offline, non-2xx, unparseable body, or a dashboard that predates the field.
+async fn fetch_credential_id(creds: &Credentials) -> Option<String> {
+    let client = crate::http::client_builder()
+        .timeout(timeouts::AUTH_PROBE)
+        .build()
+        .ok()?;
+    let resp = client
+        .get(format!("{}/api/cli/whoami", creds.base_url))
+        .bearer(&creds.api_key)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let info = resp.json::<serde_json::Value>().await.ok()?;
+    credential_id_from_whoami(&info)
+}
+
+/// Fill in `creds.credential_id` from the server when the credential file
+/// predates that field, and persist it. Returns whether the file was updated.
+///
+/// This is what makes the run-upload idempotency reference reach the
+/// installed base: a station enrolled before the field existed never re-runs
+/// `login --token`, and a developer rarely re-runs `login`, so without this
+/// both would keep uploading without a reference indefinitely. One round-trip
+/// (AUTH_PROBE timeout), only while the field is missing — once written it
+/// never runs again for that file. A miss is remembered for
+/// [`CREDENTIAL_ID_PROBE_RETRY_SECS`] so the startup path is not taxed on
+/// every run while the answer cannot change.
+///
+/// `save` routes by identity (station slot when `installation_id` is set), so
+/// this cannot cross-write the other slot on a dual-login machine.
+pub(crate) async fn backfill_credential_id(creds: &mut Credentials) -> bool {
+    if creds.credential_id.is_some() {
+        return false;
+    }
+    let slot = credential_slot(creds);
+    if probe_recently_failed(slot) {
+        return false;
+    }
+    let Some(id) = fetch_credential_id(creds).await else {
+        remember_probe_failure(slot);
+        return false;
+    };
+    persist_credential_id(creds, id).await
+}
+
+/// Set `credential_id` on `creds` and write the credential file. Shared by
+/// [`backfill_credential_id`] and the station daemon's probe tick, which
+/// already holds a whoami body and must not pay a second round-trip.
+/// `spawn_blocking` for the same reason as the login flow: on Windows `save`
+/// shells out to icacls.
+pub(crate) async fn persist_credential_id(creds: &mut Credentials, id: String) -> bool {
+    creds.credential_id = Some(id);
+    let for_save = creds.clone();
+    match tokio::task::spawn_blocking(move || credentials::save(&for_save)).await {
+        Ok(Ok(())) => {
+            crate::log::info("Enabled idempotent run uploads for this credential.");
+            true
+        }
+        Ok(Err(e)) => {
+            crate::log::warn(&format!(
+                "Could not save the credential id ({e}); uploads keep going without an idempotency reference."
+            ));
+            false
+        }
+        Err(e) => {
+            crate::log::warn(&format!("save task panicked: {e}"));
+            false
+        }
+    }
+}
+
 /// Parse a `/api/cli/whoami` response body into a cache row, stamped now.
 /// Shared with the station daemon's auth probe, which hits the same
 /// endpoint and feeds the identity to the station slot instead of
@@ -527,6 +659,7 @@ async fn redeem_token(
         base_url: base.to_string(),
         organization_slug: resp.organization_slug,
         installation_id: resp.installation_id,
+        credential_id: resp.credential_id,
         ca_cert: ca_cert.map(str::to_string),
     };
     // See login fn above — icacls call inside `save` shells out on
@@ -698,4 +831,51 @@ async fn unpark_and_drain(creds: &Credentials) {
         }
     }
     queue::drain(creds, None, true).await;
+}
+
+#[cfg(test)]
+mod credential_id_tests {
+    use super::{credential_id_from_whoami, probe_window_holds, CREDENTIAL_ID_PROBE_RETRY_SECS};
+
+    #[test]
+    fn a_failed_probe_is_remembered_for_the_window_and_no_longer() {
+        let failed_at = 1_700_000_000;
+        assert!(probe_window_holds(failed_at, failed_at));
+        assert!(probe_window_holds(
+            failed_at,
+            failed_at + CREDENTIAL_ID_PROBE_RETRY_SECS - 1
+        ));
+        assert!(!probe_window_holds(
+            failed_at,
+            failed_at + CREDENTIAL_ID_PROBE_RETRY_SECS
+        ));
+        // Clock went backwards: retry rather than hold the marker forever.
+        assert!(!probe_window_holds(failed_at, failed_at - 1));
+    }
+
+    #[test]
+    fn reads_the_id_from_a_whoami_body() {
+        let body = serde_json::json!({
+            "auth_type": "station",
+            "credential_id": "FZmQ8pKx3vN7",
+            "station_id": "st_1"
+        });
+        assert_eq!(
+            credential_id_from_whoami(&body).as_deref(),
+            Some("FZmQ8pKx3vN7")
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_means_none() {
+        // A dashboard that predates the field, and a defensive empty string:
+        // both must leave the credential file untouched rather than write a
+        // reference namespace of "".
+        let older = serde_json::json!({ "auth_type": "station", "station_id": "st_1" });
+        assert_eq!(credential_id_from_whoami(&older), None);
+        let empty = serde_json::json!({ "credential_id": "" });
+        assert_eq!(credential_id_from_whoami(&empty), None);
+        let wrong_type = serde_json::json!({ "credential_id": 42 });
+        assert_eq!(credential_id_from_whoami(&wrong_type), None);
+    }
 }

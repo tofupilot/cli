@@ -17,6 +17,17 @@ const UPDATE_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("update.
 const UPDATE_PENDING: TableDefinition<&str, &[u8]> = TableDefinition::new("update.pending");
 const RUN_QUEUE: TableDefinition<&str, &[u8]> = TableDefinition::new("run.queue");
 const STATION_CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("station.config");
+/// Per-credential counter behind the run-upload idempotency reference.
+/// Keyed by credential id so a re-login (which mints a fresh credential)
+/// starts a fresh namespace instead of reusing consumed values.
+const RUN_REF_COUNTER: TableDefinition<&str, &[u8]> = TableDefinition::new("run.ref_counter");
+/// When the last `credential_id` backfill probe failed, per credential slot
+/// ("station" / "user"), unix seconds. Its own table rather than a key in
+/// `station.config`: that table is what `tofupilot config` prints verbatim,
+/// and an epoch timestamp with an internal name is not a setting an operator
+/// should see, let alone try to change.
+const CREDENTIAL_PROBE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("credential.probe_failed_at");
 
 // Weak so the redb file lock is held only while at least one StateDb
 // is alive. Every caller opens per-operation (`let db = open()?`), so
@@ -221,6 +232,50 @@ pub fn open() -> CliResult<StateDb> {
         }
         std::thread::sleep(LOCK_POLL);
     }
+}
+
+/// Allocate the next idempotency counter for `credential_id`.
+///
+/// Read-modify-write inside ONE redb write transaction. `enqueue` mints a
+/// reference on every run it queues and can be reached from several tasks at
+/// once (the station event loop produces a run while a drain is running); two
+/// callers reading the same value would mint one reference for two different
+/// runs, and the API would then treat the second as a retry of the first and
+/// swallow it. redb serialises write transactions, so no interleaving is
+/// possible here.
+///
+/// Seeded from the wall clock on first use rather than from 0: if the state
+/// file is deleted while `credentials.json` survives, the counter resumes far
+/// above every value it already used instead of replaying them. Correctness
+/// never depends on the clock being *right*, only on it not going backwards by
+/// days — station clocks drift, TP-1012 observed a 2-minute skew in the field.
+///
+/// Free function rather than a method so it can be tested against a bare
+/// `Database` in a temp dir: `StateDb`'s inner `Drop` touches the real pid file.
+fn next_run_ref_in(db: &Database, credential_id: &str) -> CliResult<u64> {
+    let txn = db.begin_write().map_err(|e| format!("Write txn: {e}"))?;
+    let next = {
+        let mut tbl = txn
+            .open_table(RUN_REF_COUNTER)
+            .map_err(|e| format!("Open table: {e}"))?;
+        let current = tbl
+            .get(credential_id)
+            .map_err(|e| format!("Read counter: {e}"))?
+            .and_then(|guard| {
+                <[u8; 8]>::try_from(guard.value())
+                    .ok()
+                    .map(u64::from_be_bytes)
+            });
+        let next = match current {
+            Some(n) => n.saturating_add(1),
+            None => chrono::Utc::now().timestamp_millis().max(0) as u64,
+        };
+        tbl.insert(credential_id, next.to_be_bytes().as_slice())
+            .map_err(|e| format!("Write counter: {e}"))?;
+        next
+    };
+    txn.commit().map_err(|e| format!("Commit: {e}"))?;
+    Ok(next)
 }
 
 /// Owns the Database so the last dropped handle releases the redb
@@ -721,6 +776,28 @@ impl StateDb {
         }
     }
 
+    // -- Run upload idempotency --
+
+    /// Allocate the next idempotency counter for `credential_id`.
+    /// See [`next_run_ref_in`] for why the read-modify-write is one
+    /// transaction and why the counter is clock-seeded.
+    pub fn next_run_ref(&self, credential_id: &str) -> CliResult<u64> {
+        next_run_ref_in(&self.inner.db, credential_id)
+    }
+
+    /// Unix seconds of the last failed `credential_id` probe for `slot`, if
+    /// any. See [`CREDENTIAL_PROBE`].
+    pub fn credential_probe_failed_at(&self, slot: &str) -> CliResult<Option<i64>> {
+        Ok(self
+            .get(CREDENTIAL_PROBE, slot)?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+            .map(i64::from_be_bytes))
+    }
+
+    pub fn set_credential_probe_failed_at(&self, slot: &str, at: i64) -> CliResult<()> {
+        self.set(CREDENTIAL_PROBE, slot, &at.to_be_bytes())
+    }
+
     // -- Station config --
 
     pub fn get_config(&self, key: &str) -> CliResult<Option<String>> {
@@ -758,6 +835,109 @@ impl StateDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Run upload idempotency counter --
+    //
+    // The counter is what makes an idempotency reference unique by
+    // construction instead of by chance, so its two load-bearing properties
+    // are tested rather than asserted in a comment: concurrent callers never
+    // get the same value, and a wiped state file does not replay consumed
+    // ones.
+
+    fn temp_db() -> (Database, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("tp-refcounter-{}.redb", uuid::Uuid::new_v4()));
+        (Database::create(&path).expect("create temp redb"), path)
+    }
+
+    #[test]
+    fn next_run_ref_increments_by_one_per_call() {
+        let (db, path) = temp_db();
+        let a = next_run_ref_in(&db, "cred_a").unwrap();
+        let b = next_run_ref_in(&db, "cred_a").unwrap();
+        let c = next_run_ref_in(&db, "cred_a").unwrap();
+        assert_eq!(b, a + 1);
+        assert_eq!(c, a + 2);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn next_run_ref_namespaces_by_credential() {
+        let (db, path) = temp_db();
+        let a1 = next_run_ref_in(&db, "cred_a").unwrap();
+        let b1 = next_run_ref_in(&db, "cred_b").unwrap();
+        let a2 = next_run_ref_in(&db, "cred_a").unwrap();
+        assert_eq!(a2, a1 + 1, "cred_b must not advance cred_a's counter");
+        // Both seed from the clock, so they can start equal — what matters is
+        // that they advance independently, since the credential id is part of
+        // the reference and keeps the two spaces apart.
+        assert_eq!(b1, next_run_ref_in(&db, "cred_b").unwrap() - 1);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn next_run_ref_survives_a_reopen() {
+        let (db, path) = temp_db();
+        let before = next_run_ref_in(&db, "cred_a").unwrap();
+        drop(db);
+        let db = Database::create(&path).expect("reopen temp redb");
+        let after = next_run_ref_in(&db, "cred_a").unwrap();
+        assert_eq!(
+            after,
+            before + 1,
+            "counter must not restart across restarts"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn next_run_ref_is_seeded_above_zero() {
+        // Seeded from the clock so a deleted state file resumes above the
+        // values it already consumed rather than replaying 1, 2, 3.
+        let (db, path) = temp_db();
+        let first = next_run_ref_in(&db, "cred_a").unwrap();
+        assert!(
+            first > 1_700_000_000_000,
+            "expected a millisecond-epoch seed, got {first}"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn concurrent_callers_never_get_the_same_value() {
+        // The property the whole design rests on: two runs queued at the same
+        // moment must not share a reference, or the API merges them and one
+        // run is silently lost.
+        let (db, path) = temp_db();
+        let threads = 8;
+        let per_thread = 25;
+        let mut values: Vec<u64> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..per_thread)
+                            .map(|_| next_run_ref_in(&db, "cred_shared").unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("thread panicked"))
+                .collect()
+        });
+        values.sort_unstable();
+        let total = values.len();
+        values.dedup();
+        assert_eq!(values.len(), total, "duplicate counter values were minted");
+        assert_eq!(total, threads * per_thread);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn row(auth_type: &str) -> WhoamiCache {
         WhoamiCache {

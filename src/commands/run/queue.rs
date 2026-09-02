@@ -340,8 +340,17 @@ pub async fn upload_queued_run(
         });
     }
 
+    // `max_retries(0)`: the SDK's own retry loop replays a failed POST up to
+    // three times, and a run create is not idempotent, so a lost response
+    // there minted a duplicate run before this queue ever saw a failure. The
+    // queue IS the retry layer for uploads — it has persistent state, a
+    // backoff schedule and 4xx parking — so the SDK layer is pure
+    // duplication on top of it. Measured on production data (TP-1012), it
+    // accounts for 11 of the 81 duplicate pairs observed at Finalmouse.
     let sdk = tofupilot_sdk::TofuPilot::with_config(
-        tofupilot_sdk::config::ClientConfig::new(&creds.api_key).base_url(&creds.base_url),
+        tofupilot_sdk::config::ClientConfig::new(&creds.api_key)
+            .base_url(&creds.base_url)
+            .max_retries(0),
     );
 
     // `latest_state` is the source of truth across the run-create and
@@ -640,10 +649,44 @@ pub fn enqueue(
     db: &db::StateDb,
     queue_id: &str,
     queued: &mut QueuedRun,
+    credential_id: Option<&str>,
     bus: Option<&EventBus>,
 ) -> crate::error::CliResult<()> {
     if queued.queued_at.is_none() {
         queued.queued_at = Some(Utc::now().to_rfc3339());
+    }
+    // Mint the idempotency reference HERE, before the entry is persisted and
+    // therefore before any POST can go out. That order is the whole point: a
+    // retry can only reuse a reference that survived whatever lost the first
+    // response. `<credential_id>_<counter>` is unique by construction — the
+    // credential id is a server-issued row primary key, and the counter only
+    // has to be unique on this machine, which redb guarantees.
+    //
+    // It goes on `request` rather than beside it so the persisted payload IS
+    // what gets sent: every retry replays the same bytes, reference included,
+    // with no chance of the two drifting apart.
+    //
+    // Best-effort. A dashboard that returns no credential id (older, or
+    // self-hosted behind on versions) yields no reference and uploads exactly
+    // as before. A redb failure is not swallowed for long either — the
+    // `enqueue_run` below writes to the same database and reports it.
+    if queued.request.client_run_ref.is_none() {
+        if let Some(cred) = credential_id {
+            match db.next_run_ref(cred) {
+                Ok(counter) => {
+                    queued.request.client_run_ref = Some(format!("{cred}_{counter}"));
+                }
+                // Uploading without a reference is the old duplicating
+                // behaviour, so say so rather than degrade in silence. Not
+                // fatal: losing the run would be worse than risking a
+                // duplicate, and `enqueue_run` below reports a database that
+                // is broken outright.
+                Err(e) => crate::log::warn(&format!(
+                    "No idempotency reference for this run ({e}); a lost \
+                     response could duplicate it."
+                )),
+            }
+        }
     }
     db.enqueue_run(queue_id, &*queued)?;
     if let Some(bus) = bus {

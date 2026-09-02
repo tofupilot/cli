@@ -36,6 +36,9 @@ pub struct CreateArgs {
     /// Optional procedure ID to link the station to
     #[arg(long)]
     pub procedure_id: Option<String>,
+    /// Custom metadata to attach to the station (max 50 keys per station). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. Use it for descriptive fields such as location or asset tag — not for procedure configuration, which belongs to station config. (JSON string)
+    #[arg(long)]
+    pub metadata: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +60,12 @@ pub struct LsArgs {
     /// procedure_ids
     #[arg(long, num_args = 1..)]
     pub procedure_ids: Option<Vec<String>>,
+    /// Filter stations by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    #[arg(long)]
+    pub metadata: Option<String>,
+    /// When true, includes the custom metadata object on each station in the response. Defaults to false to keep payloads small.
+    #[arg(long)]
+    pub include_metadata: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +107,9 @@ pub struct UpdateArgs {
     /// Team ID to assign this station to, or null to unassign
     #[arg(long)]
     pub team_id: Option<String>,
+    /// Custom metadata to upsert on the station. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key. (JSON string)
+    #[arg(long)]
+    pub metadata: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +140,17 @@ async fn execute_create(client: &TofuPilot, args: CreateArgs, json_mode: bool) -
     builder = builder.name(&args.name);
     if let Some(ref v) = args.procedure_id {
         builder = builder.procedure_id(v);
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
     }
     match builder.send().await {
         Ok(res) => {
@@ -170,6 +193,20 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
     }
     if let Some(ref v) = args.procedure_ids {
         builder = builder.procedure_ids(v.clone());
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
+    }
+    if let Some(v) = args.include_metadata {
+        builder = builder.include_metadata(v);
     }
     match builder.send().await {
         Ok(res) => {
@@ -293,6 +330,17 @@ async fn execute_update(client: &TofuPilot, args: UpdateArgs, json_mode: bool) -
     }
     if let Some(ref v) = args.team_id {
         builder = builder.team_id(v);
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
     }
     match builder.send().await {
         Ok(res) => {

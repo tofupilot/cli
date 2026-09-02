@@ -2146,7 +2146,13 @@ pub(crate) fn spawn_upload(
         }
     };
 
-    if let Err(e) = queue::enqueue(&db, &queue_id, &mut queued, bus.as_ref()) {
+    if let Err(e) = queue::enqueue(
+        &db,
+        &queue_id,
+        &mut queued,
+        creds.credential_id.as_deref(),
+        bus.as_ref(),
+    ) {
         crate::log::error(&format!("Failed to queue run: {e}"));
         return;
     }

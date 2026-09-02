@@ -37,6 +37,9 @@ pub struct CreateArgs {
     /// Revision identifier for the part version. If not provided, default revision identifier will be used.
     #[arg(long)]
     pub revision_number: Option<String>,
+    /// Custom metadata to attach to the part (max 50 keys per part). Plain object of key/value pairs; values can be string, number, or boolean. Type is detected from the value. (JSON string)
+    #[arg(long)]
+    pub metadata: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,6 +67,12 @@ pub struct LsArgs {
     /// Sort order direction.
     #[arg(long)]
     pub sort_order: Option<String>,
+    /// Filter parts by custom metadata. Supports up to 5 keys per request. Per-key operators: string `{in: [...]}`/`{contains: "..."}`, number `{gte, lte, gt, lt, eq}`, bool `{eq: true|false}`.
+    #[arg(long)]
+    pub metadata: Option<String>,
+    /// When true, includes the custom metadata object on each part in the response. Defaults to false to keep payloads small.
+    #[arg(long)]
+    pub include_metadata: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +103,9 @@ pub struct UpdateArgs {
     /// New human-readable name for the part.
     #[arg(long)]
     pub name: Option<String>,
+    /// Custom metadata to upsert on the part. Plain object of key/value pairs. PATCH semantics: keys not present here are preserved. Pass `null` as a value to delete a key. (JSON string)
+    #[arg(long)]
+    pub metadata: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +138,17 @@ async fn execute_create(client: &TofuPilot, args: CreateArgs, json_mode: bool) -
     }
     if let Some(ref v) = args.revision_number {
         builder = builder.revision_number(v);
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
     }
     match builder.send().await {
         Ok(res) => {
@@ -190,6 +213,20 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
                 return 1;
             }
         }
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
+    }
+    if let Some(v) = args.include_metadata {
+        builder = builder.include_metadata(v);
     }
     match builder.send().await {
         Ok(res) => {
@@ -290,6 +327,17 @@ async fn execute_update(client: &TofuPilot, args: UpdateArgs, json_mode: bool) -
     }
     if let Some(ref v) = args.name {
         builder = builder.name(v);
+    }
+    if let Some(ref v) = args.metadata {
+        match serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(v) {
+            Ok(parsed) => {
+                builder = builder.metadata(parsed);
+            }
+            Err(e) => {
+                eprintln!("Invalid JSON for --metadata: {e}");
+                return 1;
+            }
+        }
     }
     match builder.send().await {
         Ok(res) => {

@@ -41,6 +41,9 @@ pub struct CreateArgs {
     /// Deployment ID this run was executed from. Set by the CLI when running a pulled deployment so the run is linked back to the exact build it ran. Validated against the procedure; left null for ad-hoc or local runs.
     #[arg(long)]
     pub deployment_id: Option<String>,
+    /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
+    #[arg(long)]
+    pub client_run_ref: Option<String>,
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[arg(long)]
     pub procedure_version: Option<String>,
@@ -281,6 +284,9 @@ async fn execute_create(client: &TofuPilot, args: CreateArgs, json_mode: bool) -
     builder = builder.procedure_id(&args.procedure_id);
     if let Some(ref v) = args.deployment_id {
         builder = builder.deployment_id(v);
+    }
+    if let Some(ref v) = args.client_run_ref {
+        builder = builder.client_run_ref(v);
     }
     if let Some(ref v) = args.procedure_version {
         builder = builder.procedure_version(v);

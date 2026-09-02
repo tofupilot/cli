@@ -196,6 +196,17 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
         }
     };
 
+    // A station enrolled before `credential_id` existed has a `station.json`
+    // without it and never re-runs `login --token`. Fill it from the server
+    // before anything else network-bound (after the identity guard above, so
+    // a non-station file is refused without a round-trip) so every `enqueue`
+    // in this process carries an idempotency reference; once written, this
+    // is a no-op forever. Offline at boot: the probe tick below persists it
+    // for the next start.
+    let mut creds_owned = creds.clone();
+    crate::commands::auth::backfill_credential_id(&mut creds_owned).await;
+    let creds = &creds_owned;
+
     // Single-instance gate is the loopback bind on 127.0.0.1:7321
     // performed by `local_ws::Server::start` below. A second daemon
     // hits EADDRINUSE and exits cleanly. No PID file, no suspend
@@ -482,6 +493,11 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     let mut auth_probe_interval =
         tokio::time::interval(crate::config::timeouts::STATION_AUTH_PROBE_INTERVAL);
     auth_probe_interval.tick().await;
+    // Set once the tick has written a missing `credential_id` to disk. The
+    // in-process `creds` is borrowed all over this loop and stays without it
+    // until the next start, so gate on this rather than on `creds` — or the
+    // file would be rewritten, and the operator told, every 300 s.
+    let mut credential_id_persisted = false;
 
     // Periodic background update check so always-on stations pick up new
     // releases without a restart. The actual swap still happens between
@@ -931,6 +947,20 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 // gated on empty-or-stale inside).
                 if let Some(fresh) = &probe.identity {
                     absorb_station_identity(fresh, local_ws_server.as_deref()).await;
+                }
+                // Boot-time backfill missed (offline at start, or the
+                // dashboard was upgraded since). Persist for the next start;
+                // this process keeps uploading as it began.
+                if creds.credential_id.is_none() && !credential_id_persisted {
+                    if let Some(id) = probe.credential_id.clone() {
+                        let mut updated = creds.clone();
+                        if crate::commands::auth::persist_credential_id(&mut updated, id).await {
+                            credential_id_persisted = true;
+                            if !json_mode {
+                                log::info("Idempotent uploads take effect at the next station start.");
+                            }
+                        }
+                    }
                 }
                 if probe.outcome == AuthProbeOutcome::Unauthorized {
                     if !json_mode { log::warn("Logged out: revoked"); }
@@ -1583,6 +1613,10 @@ enum AuthProbeOutcome {
 
 struct AuthProbeResult {
     outcome: AuthProbeOutcome,
+    /// `credential_id` from the same body, for the long-uptime backfill: a
+    /// station that was offline at boot and never restarts would otherwise
+    /// never get its idempotency reference onto disk.
+    credential_id: Option<String>,
     /// Parsed whoami body on a successful probe. The probe hits
     /// `/api/cli/whoami` anyway, so the identity rides along instead of
     /// being discarded: the boot heal and the periodic tick feed the
@@ -1595,6 +1629,7 @@ struct AuthProbeResult {
 async fn auth_probe(creds: &Credentials) -> AuthProbeResult {
     let outcome_only = |outcome| AuthProbeResult {
         outcome,
+        credential_id: None,
         identity: None,
     };
     let base = creds.base();
@@ -1620,13 +1655,15 @@ async fn auth_probe(creds: &Credentials) -> AuthProbeResult {
                 // An unparseable body downgrades to identity-less Ok: the
                 // probe's primary job is the key check, the identity is a
                 // bonus.
+                let body = res.json::<serde_json::Value>().await.ok();
                 AuthProbeResult {
                     outcome: AuthProbeOutcome::Ok,
-                    identity: res
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()
-                        .map(|info| crate::commands::auth::whoami_cache_from_json(&info)),
+                    credential_id: body
+                        .as_ref()
+                        .and_then(crate::commands::auth::credential_id_from_whoami),
+                    identity: body
+                        .as_ref()
+                        .map(crate::commands::auth::whoami_cache_from_json),
                 }
             } else {
                 // 404, 5xx, anything else: treat as transient, don't tear down.
@@ -2048,6 +2085,7 @@ mod web_ui_tests {
             base_url: "https://x.app/".into(),
             organization_slug: "org".into(),
             installation_id: Some("inst_1".into()),
+            credential_id: None,
             ca_cert: None,
         };
         assert_eq!(

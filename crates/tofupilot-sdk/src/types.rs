@@ -3055,6 +3055,9 @@ pub struct RunCreateRequest {
     /// Deployment ID this run was executed from. Set by the CLI when running a pulled deployment so the run is linked back to the exact build it ran. Validated against the procedure; left null for ad-hoc or local runs.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub deployment_id: NullableField<String>,
+    /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_run_ref: Option<String>,
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub procedure_version: NullableField<String>,
@@ -3109,6 +3112,7 @@ pub struct RunCreateRequestBuilder {
     outcome: Option<LogGetOutcome>,
     procedure_id: Option<String>,
     deployment_id: NullableField<String>,
+    client_run_ref: Option<String>,
     procedure_version: NullableField<String>,
     operated_by: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -3153,6 +3157,14 @@ impl RunCreateRequestBuilder {
     /// Explicitly set `deployment_id` to null.
     pub fn deployment_id_null(mut self) -> Self {
         self.deployment_id = NullableField::Null;
+        self
+    }
+
+    /// Set the `client_run_ref` field.
+    ///
+    /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
+    pub fn client_run_ref(mut self, value: impl Into<String>) -> Self {
+        self.client_run_ref = Some(value.into());
         self
     }
 
@@ -3282,6 +3294,7 @@ impl RunCreateRequestBuilder {
             procedure_id: self.procedure_id
                 .ok_or_else(|| "missing required field: procedure_id".to_string())?,
             deployment_id: self.deployment_id,
+            client_run_ref: self.client_run_ref,
             procedure_version: self.procedure_version,
             operated_by: self.operated_by,
             started_at: self.started_at

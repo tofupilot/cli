@@ -1,6 +1,6 @@
 [package]
 name = "tofupilot"
-version = "2.17.0"
+version = "2.18.0"
 edition = "2021"
 rust-version = "1.75"
 description = "TofuPilot APIv2: TofuPilot REST API for managing runs, units, procedures, and more."

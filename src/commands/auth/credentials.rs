@@ -24,6 +24,28 @@ pub struct Credentials {
     pub organization_slug: String,
     #[serde(default)]
     pub installation_id: Option<String>,
+    /// Server-issued id of the credential itself: the `api_key` row's primary
+    /// key, handed back at login. It namespaces the run-upload idempotency
+    /// reference (`<credential_id>_<counter>`), which is what makes that
+    /// reference unique by construction instead of by chance — the counter
+    /// only has to be unique within this machine, and the id is unique
+    /// because a database primary key says so.
+    ///
+    /// Deliberately NOT `installation_id`: that field means "this machine is
+    /// a station" and drives station-login finalization (`auth/mod.rs`) and
+    /// the publisher choice in `run/mod.rs`. Overloading it would turn a
+    /// developer laptop into a station.
+    ///
+    /// `serde(default)`: credential files written by older CLIs stay
+    /// readable. They do not stay without a reference for long, though:
+    /// `/api/cli/whoami` returns the same id, and
+    /// [`super::backfill_credential_id`] writes it into the file the first
+    /// time it is missing — at station boot, on the station's probe tick,
+    /// and before a `run --upload`. A production station never re-runs its
+    /// token login, so waiting for one would leave the whole installed
+    /// base uploading without idempotency.
+    #[serde(default)]
+    pub credential_id: Option<String>,
     /// Path to an extra CA certificate to trust, for a self-hosted instance
     /// behind a private or corporate CA. Saved at login so an unattended
     /// station picks it up without the operator exporting an environment
@@ -295,6 +317,7 @@ mod tests {
             base_url: base_url.into(),
             organization_slug: "org".into(),
             installation_id: None,
+            credential_id: None,
             ca_cert: None,
         }
     }

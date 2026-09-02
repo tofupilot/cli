@@ -1309,9 +1309,13 @@ pub async fn run_openhtf(
 
     // Always persist the run to the local DB in TofuPilot format, regardless
     // of credentials. Uploading happens only when creds are available.
-    if let Err(e) =
-        crate::commands::run::queue::enqueue(&db, &queue_id, &mut queued, Some(&upload_bus))
-    {
+    if let Err(e) = crate::commands::run::queue::enqueue(
+        &db,
+        &queue_id,
+        &mut queued,
+        creds.and_then(|c| c.credential_id.as_deref()),
+        Some(&upload_bus),
+    ) {
         crate::log::error(&format!("Failed to queue run: {e}"));
         return 1;
     }

@@ -561,6 +561,19 @@ async fn main() {
                     }
                 }
             };
+            // A credential file from before `credential_id` existed: fetch
+            // the id once, whatever the run source. Placed after the whole
+            // match so a deployment run, the station workflow, is not the arm
+            // left out. Bounded: a miss is remembered for an hour, so an
+            // offline bench or an older dashboard pays one probe per hour,
+            // not one per run.
+            let creds = match creds {
+                Some(mut c) => {
+                    commands::auth::backfill_credential_id(&mut c).await;
+                    Some(c)
+                }
+                None => None,
+            };
             std::process::exit(
                 commands::run::run_cmd(
                     source,
