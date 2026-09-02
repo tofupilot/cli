@@ -209,7 +209,10 @@ impl Orchestrator {
                 log::warn!(
                     "Setup procedure failed: Cancelling all slots and ensuring teardown runs"
                 );
-                let cancelled_jobs = state.cancel_all_jobs("Setup procedure failed");
+                let cancelled_jobs = state.cancel_all_jobs(
+                    "Setup procedure failed",
+                    Some(crate::state::ShutdownCause::PhaseFailure),
+                );
 
                 self.emit_cancelled_jobs(
                     &cancelled_jobs,
@@ -391,10 +394,25 @@ impl Orchestrator {
             reason
         );
 
-        let cancelled_jobs = state.cancel_all_jobs(&format!(
-            "Stopped due to phase {} ({})",
-            event.original_job.phase_name, reason
-        ));
+        // Only a phase that genuinely failed makes this a `PhaseFailure`. An
+        // `Outcome::Stop` lands here too, for two reasons that are both NOT
+        // failures: an explicit `phase.stop()` (caught by the aggregation on
+        // `phase_result`), and a phase that simply finished while an operator
+        // stop was already raised — whoever raised it recorded the cause, and
+        // stamping `PhaseFailure` over it would turn that abort into a PASS.
+        let cause = match outcome {
+            Outcome::Fail | Outcome::Error | Outcome::Timeout => {
+                Some(crate::state::ShutdownCause::PhaseFailure)
+            }
+            _ => None,
+        };
+        let cancelled_jobs = state.cancel_all_jobs(
+            &format!(
+                "Stopped due to phase {} ({})",
+                event.original_job.phase_name, reason
+            ),
+            cause,
+        );
 
         self.emit_cancelled_jobs(
             &cancelled_jobs,

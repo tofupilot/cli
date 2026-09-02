@@ -32,7 +32,7 @@ impl Orchestrator {
 
     fn collect_and_complete_jobs(
         state: &mut OrchestratorState,
-        running_error_msg: String,
+        reason: String,
         partition_teardown: bool,
     ) -> (
         Vec<(usize, uuid::Uuid, String, String, String)>,
@@ -53,7 +53,8 @@ impl Orchestrator {
                         info.slot_id.clone().unwrap_or_else(|| "<shared>".to_string()),
                     ));
                 }
-                state.complete_job(job_id, JobResult::new_error(running_error_msg.clone()));
+                // An operator interruption, not a failure: see `new_interrupted`.
+                state.complete_job(job_id, JobResult::new_interrupted(reason.clone()));
             }
         }
 
@@ -330,6 +331,13 @@ impl Orchestrator {
         )
         .await;
 
+        // The flag was lowered above so teardown phases could run; raise it
+        // again so the state does not claim the run is still live. Bare
+        // flag on purpose: `shutdown()` is also the normal end-of-run
+        // teardown, so it must not invent an `Operator` cause. Whoever
+        // actually asked for the stop recorded the cause before this.
+        self.state.write().await.shutdown_requested = true;
+
         // Shutdown teardown workers
         let mut workers = self.workers.write().await;
         for worker in workers.iter_mut() {
@@ -469,6 +477,10 @@ impl Orchestrator {
 
         let (running_jobs_info, regular_jobs_info, teardown_jobs, pending_retry_handles) = {
             let mut state = self.state.write().await;
+            // Bare flag, no cause: the CLI calls `shutdown()` after EVERY
+            // run to reap workers and plugs, a clean pass included. An
+            // operator stop recorded its `Operator` cause before reaching
+            // here (`request_shutdown`, first cause wins).
             state.shutdown_requested = true;
             let handles = std::mem::take(&mut state.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run
@@ -555,7 +567,7 @@ impl Orchestrator {
 
         let (running_jobs_info, queued_jobs_info, _, pending_retry_handles) = {
             let mut state = self.state.write().await;
-            state.shutdown_requested = true;
+            state.request_shutdown(crate::state::ShutdownCause::Operator);
             let handles = std::mem::take(&mut state.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run
             for pending in &handles {
@@ -662,7 +674,7 @@ impl Orchestrator {
         // Set shutdown flags and take pending retry handles atomically
         let pending_retry_handles = {
             let mut state_guard = state.write().await;
-            state_guard.shutdown_requested = true;
+            state_guard.request_shutdown(crate::state::ShutdownCause::Operator);
             state_guard.force_kill_requested = true;
             let handles = std::mem::take(&mut state_guard.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run
@@ -765,5 +777,43 @@ impl Orchestrator {
         log::info!("Execution force killed - all processes terminated");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod interrupted_job_tests {
+    use super::*;
+    use crate::procedure::schema::StageScope;
+    use crate::state::{JobInfo, OrchestratorState};
+
+    use crate::test_support::job;
+
+    /// The operator paths record the phase they interrupt as `Stop` with
+    /// no `error`. Recording it as `new_error` once made every force kill
+    /// with a phase in flight aggregate to ERROR (TP-957, protocol run 4).
+    /// The reason survives as a log line on the phase.
+    #[test]
+    fn running_job_is_recorded_as_interrupted_not_as_an_error() {
+        let mut state = OrchestratorState::new(1);
+        let running = job(StageScope::Main);
+        let queued = job(StageScope::Main);
+        state.job_info.insert(running.id, JobInfo::from_job(&running));
+        state.worker_state.assign_job(0, running.id).unwrap();
+        state.enqueue_job(queued);
+
+        let (running_info, queued_info, _) = Orchestrator::collect_and_complete_jobs(
+            &mut state,
+            "Force killed by user".to_string(),
+            false,
+        );
+        assert_eq!(running_info.len(), 1);
+        assert_eq!(queued_info.len(), 1);
+
+        let result = state.job_results.get(&running.id).expect("running job completed");
+        assert_eq!(result.phase_outcome, Outcome::Stop);
+        assert!(result.error.is_none(), "an interruption is not an error");
+        assert!(!result.is_failure());
+        assert_eq!(result.logs.len(), 1);
+        assert_eq!(result.logs[0].message, "Force killed by user");
     }
 }

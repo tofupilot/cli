@@ -37,6 +37,35 @@ pub struct PendingDelayedRetry {
     pub dependency_id: Uuid,
 }
 
+/// Who interrupted a run that did not reach its last phase. The canonical
+/// explanation for the flag/cause pair; the other doc blocks point here.
+///
+/// `shutdown_requested` alone once carried five meanings (operator Stop,
+/// operator Kill, the CLI's graceful cancel, a plug init failure, and the
+/// engine stopping itself after a failed phase). The aggregation could not
+/// tell them apart, so a failing unit under the default
+/// `on_first_failure: stop` uploaded as `ABORTED`; the first fix then
+/// guessed the cause inside `cancel_all_jobs` and an operator-cancelled run
+/// uploaded as `PASS` (TP-957).
+///
+/// - `PhaseFailure`: the sequence stopping itself after a phase failed, or a
+///   failed setup. Not an abort: the run outcome must be `Fail`.
+/// - `Operator`: a human or supervisor stopping the run from outside, kill
+///   button graceful or forced. That is what `ABORTED` means.
+/// - `InitFailure`: a plug that could not initialize. `init_error` is set
+///   alongside and wins the aggregation; this only keeps the cause honest.
+///
+/// Set through `request_shutdown` wherever someone actually asks for a
+/// stop. `Orchestrator::shutdown()`, the end-of-run teardown the CLI runs
+/// after every run, raises the bare flag without a cause on purpose. A
+/// raised flag with no cause reads as an interruption, never as a PASS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownCause {
+    Operator,
+    PhaseFailure,
+    InitFailure,
+}
+
 /// Centralized state for the orchestrator to reduce lock complexity
 ///
 /// Lock ordering convention:
@@ -57,6 +86,7 @@ pub struct OrchestratorState {
     pub job_to_slot: HashMap<Uuid, String>, // Map job IDs to slot IDs
     pub slot_jobs: HashMap<String, HashSet<Uuid>>, // Map slot IDs to their job IDs
     pub shutdown_requested: bool,    // Flag to signal shutdown
+    pub shutdown_cause: Option<ShutdownCause>, // Who raised it, see `ShutdownCause`
     pub force_kill_requested: bool,  // Flag to signal immediate force kill
     pub should_stop_on_first_failure: bool, // Stop execution on first phase failure
     pub pending_slot_jobs: Vec<(String, Vec<Job>)>, // For slot-first: remaining slots to process
@@ -78,6 +108,7 @@ impl OrchestratorState {
             job_to_slot: HashMap::new(),
             slot_jobs: HashMap::new(),
             shutdown_requested: false,
+            shutdown_cause: None,
             force_kill_requested: false,
             should_stop_on_first_failure: false,
             pending_slot_jobs: Vec::new(),
@@ -85,6 +116,14 @@ impl OrchestratorState {
             pending_delayed_retry_handles: Vec::new(),
             init_error: None,
         }
+    }
+
+    /// Raise the shutdown flag with its cause. First cause wins: an
+    /// operator kill that landed first stays the reason, whatever the
+    /// engine does afterwards to wind down. See `ShutdownCause`.
+    pub fn request_shutdown(&mut self, cause: ShutdownCause) {
+        self.shutdown_requested = true;
+        self.shutdown_cause.get_or_insert(cause);
     }
 
     /// Check if execution is complete
@@ -223,7 +262,14 @@ impl OrchestratorState {
 
     /// Cancel all remaining jobs (for stop_on_first_failure)
     /// Note: Teardown phases are NEVER cancelled - they must run for cleanup
-    pub fn cancel_all_jobs(&mut self, reason: &str) -> Vec<Job> {
+    ///
+    /// `cause` is what the CALLER knows about why the run is stopping. It is
+    /// deliberately not inferred here: a cancellation triggered by a phase
+    /// that failed is a `PhaseFailure`, but the same code path also runs
+    /// when a phase merely *finished* under an operator stop — and that must
+    /// not be relabelled as a failure. Pass `None` when the cause was
+    /// already recorded by whoever raised `shutdown_requested`.
+    pub fn cancel_all_jobs(&mut self, reason: &str, cause: Option<ShutdownCause>) -> Vec<Job> {
         let mut cancelled_jobs = Vec::new();
 
         // Drain the queue but preserve teardown phases
@@ -279,7 +325,13 @@ impl OrchestratorState {
         // Only set shutdown flag if no teardown phases remain
         // (teardown phases must still run for cleanup)
         if self.job_queue.is_empty() {
-            self.shutdown_requested = true;
+            match cause {
+                Some(cause) => self.request_shutdown(cause),
+                // Caller has no cause of its own (a phase merely finished
+                // under an existing stop): raise the flag, leave the cause
+                // to whoever recorded it. `None` aggregates as Stop.
+                None => self.shutdown_requested = true,
+            }
         }
 
         cancelled_jobs
@@ -384,5 +436,53 @@ impl OrchestratorState {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod shutdown_cause_tests {
+    use super::*;
+    use crate::procedure::schema::StageScope;
+
+    use crate::test_support::job;
+
+    /// First cause wins. An operator kill that landed first must not be
+    /// relabelled by the engine winding down afterwards; the first fix's
+    /// blocker was exactly a later writer overwriting the cause.
+    #[test]
+    fn request_shutdown_keeps_the_first_cause() {
+        let mut state = OrchestratorState::new(1);
+        state.request_shutdown(ShutdownCause::Operator);
+        state.request_shutdown(ShutdownCause::PhaseFailure);
+        assert!(state.shutdown_requested);
+        assert_eq!(state.shutdown_cause, Some(ShutdownCause::Operator));
+    }
+
+    /// `cancel_all_jobs` raises the flag and records the caller's cause
+    /// only once no teardown phase is left to run. With a teardown phase
+    /// queued, neither moves: the aggregation must then rely on the
+    /// results themselves (`then: {pass: stop}` case).
+    #[test]
+    fn cancel_all_jobs_records_the_cause_only_when_the_queue_drains() {
+        let mut with_teardown = OrchestratorState::new(1);
+        with_teardown.enqueue_job(job(StageScope::Main));
+        with_teardown.enqueue_job(job(StageScope::TeardownAll));
+        let cancelled = with_teardown.cancel_all_jobs("x", Some(ShutdownCause::PhaseFailure));
+        assert_eq!(cancelled.len(), 1, "only the main phase is cancelled");
+        assert!(!with_teardown.shutdown_requested);
+        assert_eq!(with_teardown.shutdown_cause, None);
+
+        let mut no_teardown = OrchestratorState::new(1);
+        no_teardown.enqueue_job(job(StageScope::Main));
+        no_teardown.cancel_all_jobs("x", Some(ShutdownCause::PhaseFailure));
+        assert!(no_teardown.shutdown_requested);
+        assert_eq!(no_teardown.shutdown_cause, Some(ShutdownCause::PhaseFailure));
+
+        // A caller with no cause raises the flag and leaves the cause alone.
+        let mut no_cause = OrchestratorState::new(1);
+        no_cause.enqueue_job(job(StageScope::Main));
+        no_cause.cancel_all_jobs("x", None);
+        assert!(no_cause.shutdown_requested);
+        assert_eq!(no_cause.shutdown_cause, None);
     }
 }

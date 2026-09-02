@@ -2129,7 +2129,15 @@ pub async fn run_yaml_procedure(
                 // break — loop picks up the natural-completion arm next.
                 _ = graceful_rx.wait_any(), if !graceful_fired => {
                     graceful_fired = true;
-                    state_arc.write().await.shutdown_requested = true;
+                    // Through `request_shutdown`, never the bare flag: the
+                    // aggregation needs the cause to tell this operator stop
+                    // (→ ABORTED) from the engine stopping itself after a
+                    // failed phase (→ FAIL). Writing only the flag once made
+                    // a cancelled run upload as PASS.
+                    state_arc
+                        .write()
+                        .await
+                        .request_shutdown(execution_engine::state::ShutdownCause::Operator);
                 }
 
                 // Kill: force_kill_immediate runs in parallel with

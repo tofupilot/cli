@@ -239,6 +239,42 @@ impl JobResult {
         }
     }
 
+    /// A phase the operator stopped while it was running. Not an error:
+    /// nothing was observed on the DUT, so `error` stays empty and the
+    /// outcome is `Stop`, matching the `JobProgress` the kill path emits
+    /// for the same phase. Recording it as `new_error` once made every
+    /// force kill with a phase in flight aggregate to ERROR (TP-957). The
+    /// reason is kept as a log line on the result. Today this result never
+    /// reaches the upload (the CLI drops the `JobProgress{Completed}` the
+    /// shutdown path emits), so the line is for whoever reads it next.
+    pub fn new_interrupted(reason: String) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            phase_result: PhaseResult::Continue,
+            phase_outcome: Outcome::Stop,
+            next_action: None,
+            timeout_secs: None,
+            error: None,
+            exit_code: None,
+            measurements: vec![],
+            logs: vec![LogEntry {
+                timestamp: now.to_rfc3339(),
+                level: "WARNING".to_string(),
+                message: reason,
+                file: None,
+                line: None,
+            }],
+            started_at: now,
+            completed_at: now,
+            resource_metrics: None,
+            unit: None,
+            input_unit_info: None,
+            retry_count: 0,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
+        }
+    }
+
     pub fn new_timeout(secs: u64) -> Self {
         let now = chrono::Utc::now();
         // The phase ran for the full timeout budget before being killed;

@@ -303,7 +303,10 @@ impl Orchestrator {
                     {
                         let mut state = self.state.write().await;
                         state.init_error = Some(e.clone());
-                        state.shutdown_requested = true;
+                        // `init_error` forces ERROR before the cause is read;
+                        // recorded anyway so the state never lies about why
+                        // it stopped.
+                        state.request_shutdown(crate::state::ShutdownCause::InitFailure);
                     }
                     self.event_sink.emit(&ExecutionEvent::JobProgress {
                         job_id: job.id.to_string(),
