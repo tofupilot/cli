@@ -15,6 +15,14 @@ zero phases.
 CI drives it over four legs — `demo-operator-ui` (YAML framework) and
 `scenarios/ohtf_test` (OpenHTF connector), each on Linux and Windows.
 
+Two more scripts are CI-gated, on the YAML/Linux leg only (both override
+`$HOME`, which `db::home_dir()` resolves through on unix):
+
+- `upload_idempotency.py`  — a retried upload replays the same `client_run_ref`
+- `credential_backfill.py` — a credential file predating `credential_id` is
+  filled in from `whoami`, and the run that filled it in already uploads with
+  a reference
+
 The remaining scripts below are a deeper local regression harness; they hard-
 code `/tmp/` paths and require manual venv setup, so they are **not** in CI.
 
