@@ -45,33 +45,59 @@ impl Orchestrator {
         best_per_phase.into_values().map(|(_, r)| r).collect()
     }
 
-    /// Filter job results to only include jobs for a specific slot, returning final attempts only
+    /// The final attempt of every phase a slot's outcome depends on: its
+    /// own jobs plus the shared ones (SetupAll, TeardownAll). Folding the
+    /// shared stages in is what lets a failed SetupAll read FAIL on every
+    /// slot: without them the slot's own results are only the SKIPs of
+    /// the cancelled main phases.
     fn get_final_attempts_for_slot<'a>(
         job_results: &'a HashMap<Uuid, JobResult>,
         job_info: &HashMap<Uuid, JobInfo>,
-        job_to_slot: &HashMap<Uuid, String>,
         slot_id: &str,
     ) -> Vec<&'a JobResult> {
-        let mut best_per_phase: HashMap<String, (usize, &'a JobResult)> = HashMap::new();
+        let mut best_per_phase: HashMap<PhaseInstanceKey, (usize, &'a JobResult)> = HashMap::new();
 
         for (job_id, result) in job_results {
-            if job_to_slot.get(job_id) != Some(&slot_id.to_string()) {
+            let Some(info) = job_info.get(job_id) else { continue };
+            let in_slot = match &info.slot_id {
+                Some(s) => s == slot_id,
+                None => true,
+            };
+            if !in_slot {
                 continue;
             }
-
-            if let Some(info) = job_info.get(job_id) {
-                let dominated = best_per_phase
-                    .get(&info.phase_key)
-                    .map(|(count, _)| result.retry_count <= *count)
-                    .unwrap_or(false);
-
-                if !dominated {
-                    best_per_phase.insert(info.phase_key.clone(), (result.retry_count, result));
-                }
+            let key = PhaseInstanceKey {
+                phase_key: info.phase_key.clone(),
+                slot_id: info.slot_id.clone(),
+            };
+            let dominated = best_per_phase
+                .get(&key)
+                .map(|(count, _)| result.retry_count <= *count)
+                .unwrap_or(false);
+            if !dominated {
+                best_per_phase.insert(key, (result.retry_count, result));
             }
         }
 
         best_per_phase.into_values().map(|(_, r)| r).collect()
+    }
+
+    /// Whether a slot was cut short and by whom, as `(stopped, cause)` for
+    /// `determine_aggregate_outcome`. Its own `SlotStop` first; failing
+    /// that, an execution stop that found the slot with work outstanding,
+    /// its own or a shared stage every slot depends on. A slot that had
+    /// finished before the execution stopped is neither: it keeps the
+    /// outcome it earned.
+    fn slot_stop_state(state: &crate::state::OrchestratorState, slot_id: &str) -> (bool, Option<ShutdownCause>) {
+        if let Some(stop) = state.slot_stops.get(slot_id) {
+            return (true, stop.cause);
+        }
+        if state.shutdown_requested
+            && (state.shared_work_outstanding() || state.slot_has_outstanding_work(slot_id))
+        {
+            return (true, state.shutdown_cause);
+        }
+        (false, None)
     }
 
     pub async fn get_stats(&self) -> ExecutionStats {
@@ -102,19 +128,28 @@ impl Orchestrator {
         // set is the orchestrator's own `slot_jobs` keys (previously the
         // report-manager keys). `slot_run_ids` were report-archive-internal
         // UUIDs the CLI never used — dropped.
+        // Per slot: the slot's own final attempts plus the shared stages,
+        // under the slot's own stop state (`SlotStop`), so a slot that
+        // stopped on its failure reads FAIL while its neighbours read PASS.
+        // Every submitted slot gets an entry, including one slot-first
+        // never started: it reads Stop under an execution stop.
         let slot_outcomes = if state.is_complete() {
+            let slot_ids: Vec<String> = if state.slots.is_empty() {
+                state.slot_jobs.keys().cloned().collect()
+            } else {
+                state.slots.clone()
+            };
             let mut outcomes = HashMap::new();
-            for slot_id in state.slot_jobs.keys() {
+            for slot_id in slot_ids {
                 let slot_final_attempts = Self::get_final_attempts_for_slot(
                     &state.job_results,
                     &state.job_info,
-                    &state.job_to_slot,
-                    slot_id,
+                    &slot_id,
                 );
-
+                let (stopped, cause) = Self::slot_stop_state(&state, &slot_id);
                 let slot_outcome =
-                    determine_aggregate_outcome(&slot_final_attempts, state.shutdown_requested, state.shutdown_cause, &state.init_error);
-                outcomes.insert(slot_id.clone(), slot_outcome);
+                    determine_aggregate_outcome(&slot_final_attempts, stopped, cause, &state.init_error);
+                outcomes.insert(slot_id, slot_outcome);
             }
             outcomes
         } else {
@@ -437,16 +472,18 @@ mod aggregate_outcome_tests {
         assert_eq!(aggregate(&[&gate, &skipped], true), Outcome::Stop);
     }
 
-    /// Multi-slot: slot B ran every phase and passed before slot A failed.
-    /// B reads Stop, as on main: "nothing of B was cut short" cannot be
-    /// read off the results (prevented work never enters `job_results`).
-    /// `slot_outcomes` has no consumer today; a per-slot completeness
-    /// signal from the queue is the way to refine this.
+    /// Under a raised flag with no failure of its own, a result set reads
+    /// Stop: "nothing here was cut short" cannot be read off the results
+    /// (prevented work never enters `job_results`). Per slot, that is
+    /// why `slot_stop_state` decides the flag from the slot's own
+    /// `SlotStop` and outstanding work, and passes `false` for a slot
+    /// that finished before a sibling failed.
     #[test]
-    fn slot_finished_before_sibling_failed_reads_stop() {
+    fn flag_without_own_failure_reads_stop() {
         let a = pass();
         let b = pass();
         assert_eq!(aggregate_stopped_on_failure(&[&a, &b]), Outcome::Stop);
+        assert_eq!(aggregate(&[&a, &b], false), Outcome::Pass);
     }
 
     /// An operator Stop that lands before any phase reports (startup,

@@ -482,6 +482,10 @@ impl Orchestrator {
             // operator stop recorded its `Operator` cause before reaching
             // here (`request_shutdown`, first cause wins).
             state.shutdown_requested = true;
+            // Before anything is drained: once running jobs read as
+            // interrupted and queued ones as skipped, a slot that was cut
+            // is indistinguishable from one that finished (`SlotStop`).
+            state.mark_outstanding_slots_stopped("Execution stopped by user");
             let handles = std::mem::take(&mut state.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run
             for pending in &handles {
@@ -568,6 +572,7 @@ impl Orchestrator {
         let (running_jobs_info, queued_jobs_info, _, pending_retry_handles) = {
             let mut state = self.state.write().await;
             state.request_shutdown(crate::state::ShutdownCause::Operator);
+            state.mark_outstanding_slots_stopped("Force killed by user");
             let handles = std::mem::take(&mut state.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run
             for pending in &handles {
@@ -675,6 +680,7 @@ impl Orchestrator {
         let pending_retry_handles = {
             let mut state_guard = state.write().await;
             state_guard.request_shutdown(crate::state::ShutdownCause::Operator);
+            state_guard.mark_outstanding_slots_stopped("Force killed by user");
             state_guard.force_kill_requested = true;
             let handles = std::mem::take(&mut state_guard.pending_delayed_retry_handles);
             // Resolve dependencies for pending retries that won't run

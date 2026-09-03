@@ -1,7 +1,7 @@
 
 
 
-use crate::job::{JobResult, JobStatus, Outcome};
+use crate::job::{JobResult, Outcome};
 use crate::procedure::schema::{PhaseNextAction, StageScope};
 
 use super::super::{JobCompletionEvent, Orchestrator};
@@ -111,7 +111,7 @@ impl Orchestrator {
         ) || is_retry_limit_exceeded);
 
         if is_setup_failure {
-            self.handle_phase_failure(&mut state, &event).await;
+            self.handle_setup_failure(&mut state, &event, &job_result).await;
         }
 
         let should_continue = self
@@ -199,51 +199,72 @@ impl Orchestrator {
         }
     }
 
-    async fn handle_phase_failure(
+    /// A failed setup stage cancels the work that depended on it, whatever
+    /// `on_first_failure` says: SetupAll the execution, SetupEach its slot.
+    /// Same dispatch as `handle_stop`; only the log line differs.
+    async fn handle_setup_failure(
         &self,
         state: &mut crate::state::OrchestratorState,
         event: &JobCompletionEvent,
+        job_result: &JobResult,
     ) {
-        match event.original_job.stage_scope {
-            StageScope::SetupAll => {
-                log::warn!(
-                    "Setup procedure failed: Cancelling all slots and ensuring teardown runs"
-                );
-                let cancelled_jobs = state.cancel_all_jobs(
-                    "Setup procedure failed",
-                    Some(crate::state::ShutdownCause::PhaseFailure),
-                );
-
-                self.emit_cancelled_jobs(
-                    &cancelled_jobs,
-                    "Cancelled due to setup procedure failure",
-                    JobStatus::Skipped,
-                    Outcome::Skip,
-                )
-                .await;
-            }
-            StageScope::SetupEach => {
-                let slot_display = event.original_job.slot_id.as_deref().unwrap_or("null");
-                log::warn!(
-                    "Setup slot failed for {}: Skipping to teardown slot",
-                    slot_display
-                );
-                let cancelled_jobs = if let Some(ref slot_id) = event.original_job.slot_id {
-                    state.cancel_slot_jobs(slot_id)
-                } else {
-                    Vec::new()
-                };
-
-                self.emit_cancelled_jobs(
-                    &cancelled_jobs,
-                    "Cancelled due to setup slot failure",
-                    JobStatus::Skipped,
-                    Outcome::Skip,
-                )
-                .await;
-            }
-            _ => {}
+        let job = &event.original_job;
+        match job.stage_scope {
+            StageScope::SetupAll => log::warn!(
+                "Setup procedure failed: Cancelling all slots and ensuring teardown runs"
+            ),
+            StageScope::SetupEach => log::warn!(
+                "Setup slot failed for {}: Skipping to teardown slot",
+                job.slot_id.as_deref().unwrap_or("null")
+            ),
+            _ => return,
         }
+        self.cancel_scope_of(
+            state,
+            job,
+            job_result,
+            Some(crate::state::ShutdownCause::PhaseFailure),
+            "setup failure",
+        )
+        .await;
+    }
+
+    /// Stop scope = job scope. A slot job cancels its slot, a shared job
+    /// cancels the execution. Emits Skipped for everything removed.
+    ///
+    /// `stop_reason` is the wire text quoted on the cancelled UI phases;
+    /// its shape ("Run aborted by phase '…': …") is what single-slot runs
+    /// have always shown, so it is kept verbatim there.
+    async fn cancel_scope_of(
+        &self,
+        state: &mut crate::state::OrchestratorState,
+        job: &crate::job::Job,
+        job_result: &JobResult,
+        cause: Option<crate::state::ShutdownCause>,
+        why: &str,
+    ) {
+        let detail = job_result
+            .error
+            .as_ref()
+            .map(|e| format!(": {e}"))
+            .unwrap_or_default();
+        let stop_reason = match &job.slot_id {
+            Some(slot) if state.slots.len() > 1 => {
+                format!("Slot '{slot}' aborted by phase '{}'{detail}", job.phase_name)
+            }
+            _ => format!("Run aborted by phase '{}'{detail}", job.phase_name),
+        };
+
+        let cancelled = match &job.slot_id {
+            Some(slot_id) => state.cancel_slot_jobs(slot_id, cause, &stop_reason),
+            None => state.cancel_all_jobs(&stop_reason, cause),
+        };
+
+        self.emit_cancelled_work(
+            &cancelled,
+            &format!("Cancelled due to {} in phase {}", why, job.phase_name),
+        )
+        .await;
     }
 
     async fn apply_next_action(
@@ -279,30 +300,19 @@ impl Orchestrator {
         event: JobCompletionEvent,
         job_result: JobResult,
     ) -> bool {
-        // Skip retry of *main* phases once a shutdown is in progress.
-        // `shutdown_requested` is set by `cancel_all_jobs` only after
-        // the non-teardown queue drains, but a job that was *running*
-        // during cancel still completes after — and would re-enqueue a
-        // fresh attempt of a phase the orchestrator already gave up
-        // on. Mirrors the delayed-retry path's `if !state.shutdown_requested`
-        // guard.
-        //
-        // Teardown phases must still be allowed to retry: they're
-        // exactly the phases we DO want to run during shutdown, and
-        // their author's retry budget should be honored.
+        // No retry of a main phase once its scope is stopping: the slot
+        // (`slot_stops`) or the execution (`shutdown_requested`). A job
+        // that was running during the cancel still completes after it,
+        // and would otherwise re-enqueue a phase the orchestrator gave up
+        // on. Teardown phases keep their retry budget: they are exactly
+        // the phases that DO run during a stop.
         let is_teardown = matches!(
             event.original_job.stage_scope,
             crate::procedure::schema::StageScope::TeardownEach
                 | crate::procedure::schema::StageScope::TeardownAll
         );
-        let shutdown_in_progress = !is_teardown
-            && (state.shutdown_requested
-                || (!state.job_queue.is_empty()
-                    && state.job_queue.iter().all(|j| matches!(
-                        j.stage_scope,
-                        crate::procedure::schema::StageScope::TeardownEach
-                            | crate::procedure::schema::StageScope::TeardownAll
-                    ))));
+        let shutdown_in_progress =
+            !is_teardown && state.is_stopping_for(event.original_job.slot_id.as_deref());
         let should_retry = event.original_job.can_retry() && !shutdown_in_progress;
 
         if !should_retry {
@@ -344,14 +354,19 @@ impl Orchestrator {
             let state_arc = self.state.clone();
             let phase_key = retry_job.phase_key.clone();
             let phase_name = retry_job.phase_name.clone();
+            let function = retry_job.function.clone();
             let slot_id = retry_job.slot_id.clone();
             let retry_job_id = retry_job.id;
             let dependency_id = retry_job.dependency_id;
+            let retry_count = retry_job.retry_count;
 
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 let mut state = state_arc.write().await;
-                if !state.shutdown_requested {
+                // Belt and braces: a cancel aborts this task, but should
+                // it land between the sleep and the lock the scope check
+                // still keeps a cancelled slot's retry out of the queue.
+                if !state.is_stopping_for(retry_job.slot_id.as_deref()) {
                     state.enqueue_retry_job(retry_job);
                 }
             });
@@ -361,9 +376,11 @@ impl Orchestrator {
                     handle,
                     phase_key,
                     phase_name,
+                    function,
                     slot_id,
                     job_id: retry_job_id,
                     dependency_id,
+                    retry_count,
                 },
             );
         } else {
@@ -389,9 +406,13 @@ impl Orchestrator {
         };
 
         log::warn!(
-            "Phase '{}' resulted in {} - stopping all execution",
+            "Phase '{}' resulted in {} - stopping {}",
             event.original_job.phase_name,
-            reason
+            reason,
+            match &event.original_job.slot_id {
+                Some(slot) => format!("slot {slot}"),
+                None => "all execution".to_string(),
+            }
         );
 
         // Only a phase that genuinely failed makes this a `PhaseFailure`. An
@@ -406,24 +427,9 @@ impl Orchestrator {
             }
             _ => None,
         };
-        let cancelled_jobs = state.cancel_all_jobs(
-            &format!(
-                "Stopped due to phase {} ({})",
-                event.original_job.phase_name, reason
-            ),
-            cause,
-        );
 
-        self.emit_cancelled_jobs(
-            &cancelled_jobs,
-            &format!(
-                "Cancelled due to {} in phase {}",
-                reason, event.original_job.phase_name
-            ),
-            JobStatus::Skipped,
-            Outcome::Skip,
-        )
-        .await;
+        self.cancel_scope_of(state, &event.original_job, &job_result, cause, reason)
+            .await;
 
         state.complete_job_with_info(event.job_id, &event.original_job, job_result);
 

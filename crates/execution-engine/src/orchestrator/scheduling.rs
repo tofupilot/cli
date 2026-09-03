@@ -26,8 +26,11 @@ impl Orchestrator {
 
         self.schedule_available_jobs().await?;
 
-        // Track whether we've already emitted shutdown events (to avoid duplicates)
+        // Shutdown events go out once per scope: once for the execution,
+        // once per stopped slot.
         let mut shutdown_events_emitted = false;
+        let mut slot_events_emitted: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         loop {
             let state = self.state.read().await;
@@ -45,11 +48,19 @@ impl Orchestrator {
             // Compute *why* the loop is about to wind down so any UI phase
             // whose channel gets torn down can quote the cause instead of
             // saying the input was "cancelled or timed out".
+            //
+            // Stop scope = job scope: only a SHARED job (SetupAll,
+            // TeardownAll) stops the execution here. A slot job that
+            // stopped cancelled its own slot in `handle_stop` and is
+            // handled by the per-slot branch below.
             let stopping_reason: Option<String> = state
                 .job_results
                 .iter()
-                .find(|(_, r)| r.should_stop_test())
-                .and_then(|(id, r)| {
+                .filter(|(id, r)| {
+                    r.should_stop_test()
+                        && state.job_info.get(*id).is_some_and(|i| i.slot_id.is_none())
+                })
+                .map(|(id, r)| {
                     let phase_label = state
                         .job_info
                         .get(id)
@@ -60,8 +71,9 @@ impl Orchestrator {
                         .clone()
                         .map(|e| format!(": {e}"))
                         .unwrap_or_default();
-                    Some(format!("Run aborted by phase '{phase_label}'{detail}"))
-                });
+                    format!("Run aborted by phase '{phase_label}'{detail}")
+                })
+                .next();
             let has_stop = stopping_reason.is_some();
             let busy_workers = state.worker_state.count_busy();
             let init_reason = state.init_error.clone().map(|e| format!("Plug initialization failed: {e}"));
@@ -81,55 +93,7 @@ impl Orchestrator {
                 // Only emit shutdown events once
                 if !shutdown_events_emitted {
                     shutdown_events_emitted = true;
-
-                    // Emit stopping status for running jobs
-                    for worker_id in 0..state.worker_state.num_workers() {
-                        if let Some(job_id) = state.worker_state.get_worker_job(worker_id) {
-                            if let Some(info) = state.job_info.get(&job_id) {
-                                self.event_sink.emit(&ExecutionEvent::JobProgress {
-                                    job_id: job_id.to_string(),
-                                    slot_id: info.slot_id.clone(),
-                                    phase_key: info.phase_key.clone(),
-                                    phase_name: info.phase_name.clone(),
-                                    stage_scope: StageScope::Main,
-                                    status: JobStatus::Stopping,
-                                    worker_id: Some(worker_id),
-                                    started_at: None,
-                                    timeout_ms: None,
-                                    outcome: None,
-                                    retry_count: 0,
-                                    error: None,
-                                });
-                            }
-                        }
-                    }
-
-                    // Emit skipped status for queued jobs, but NOT for teardown phases
-                    for job in state.job_queue.iter() {
-                        // Skip teardown phases - they will run after shutdown
-                        if matches!(
-                            job.stage_scope,
-                            crate::procedure::schema::StageScope::TeardownEach
-                                | crate::procedure::schema::StageScope::TeardownAll
-                        ) {
-                            continue;
-                        }
-
-                        self.event_sink.emit(&ExecutionEvent::JobProgress {
-                            job_id: job.id.to_string(),
-                            slot_id: job.slot_id.clone(),
-                            phase_key: job.phase_key.clone(),
-                            phase_name: job.phase_name.clone(),
-                            stage_scope: job.stage_scope.clone(),
-                            status: JobStatus::Skipped,
-                            worker_id: None,
-                            started_at: None,
-                            timeout_ms: job.timeout_ms,
-                            outcome: Some(Outcome::Skip),
-                            retry_count: job.retry_count,
-                            error: None,
-                        });
-                    }
+                    self.emit_stopping_for(&state, None);
                 }
 
                 // If there are still running jobs, wait for them to complete before breaking
@@ -141,10 +105,29 @@ impl Orchestrator {
                 // Don't check is_complete() here - we need to wait for running jobs
                 drop(state);
             } else {
+                // Per-slot stops: close that slot's prompts and announce
+                // its Stopping/Skipped jobs once. Every other slot keeps
+                // running, so the loop ends on completion alone.
+                for slot in state.slot_stops.keys() {
+                    if slot_events_emitted.insert(slot.clone()) {
+                        self.emit_stopping_for(&state, Some(slot));
+                    }
+                }
+                // Same race as above: a phase of the stopped slot may
+                // register its channel after the first close, so every
+                // stopped slot is re-closed on every iteration.
+                let stopped: Vec<(String, String)> = state
+                    .slot_stops
+                    .iter()
+                    .map(|(slot, stop)| (slot.clone(), stop.reason.clone()))
+                    .collect();
                 if state.is_complete() {
                     break;
                 }
                 drop(state);
+                for (slot, reason) in stopped {
+                    crate::ui::channels::close_slot_ui_channels_with_reason(&slot, reason).await;
+                }
             }
 
             // Clean up finished delayed retry task handles
@@ -258,6 +241,66 @@ impl Orchestrator {
         }
 
         Ok(stats)
+    }
+
+    /// Stopping for the running jobs and Skipped for the queued main
+    /// phases of one scope: `Some(slot)` for that slot only, `None` for
+    /// the whole execution. Teardown phases are left out: they run after
+    /// the stop.
+    fn emit_stopping_for(&self, state: &crate::state::OrchestratorState, slot: Option<&str>) {
+        let in_scope = |job_slot: &Option<String>| match slot {
+            Some(s) => job_slot.as_deref() == Some(s),
+            None => true,
+        };
+
+        for worker_id in 0..state.worker_state.num_workers() {
+            if let Some(job_id) = state.worker_state.get_worker_job(worker_id) {
+                if let Some(info) = state.job_info.get(&job_id) {
+                    if !in_scope(&info.slot_id) {
+                        continue;
+                    }
+                    self.event_sink.emit(&ExecutionEvent::JobProgress {
+                        job_id: job_id.to_string(),
+                        slot_id: info.slot_id.clone(),
+                        phase_key: info.phase_key.clone(),
+                        phase_name: info.phase_name.clone(),
+                        stage_scope: StageScope::Main,
+                        status: JobStatus::Stopping,
+                        worker_id: Some(worker_id),
+                        started_at: None,
+                        timeout_ms: None,
+                        outcome: None,
+                        retry_count: 0,
+                        error: None,
+                    });
+                }
+            }
+        }
+
+        for job in state.job_queue.iter() {
+            if !in_scope(&job.slot_id)
+                || matches!(
+                    job.stage_scope,
+                    StageScope::TeardownEach | StageScope::TeardownAll
+                )
+            {
+                continue;
+            }
+            self.event_sink.emit(&ExecutionEvent::JobProgress {
+                job_id: job.id.to_string(),
+                slot_id: job.slot_id.clone(),
+                phase_key: job.phase_key.clone(),
+                phase_name: job.phase_name.clone(),
+                stage_scope: job.stage_scope,
+                status: JobStatus::Skipped,
+                worker_id: None,
+                started_at: None,
+                timeout_ms: job.timeout_ms,
+                outcome: Some(Outcome::Skip),
+                retry_count: job.retry_count,
+                error: None,
+            });
+        }
     }
 
     async fn schedule_available_jobs(

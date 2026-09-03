@@ -298,10 +298,12 @@ impl Worker {
             let request_id = format!("{}_{}", job.id, chrono::Utc::now().timestamp_millis());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            {
-                let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
-                channels.insert(request_id.clone(), tx);
-            }
+            crate::ui::channels::register_ui_channel(
+                request_id.clone(),
+                job.slot_id.clone(),
+                tx,
+            )
+            .await;
 
             let event_data = crate::ui::UiRequestData {
                 request_id: request_id.clone(),
@@ -480,10 +482,13 @@ impl Worker {
                     // True when the UI was required but we never got a value.
                     // Forces the phase to ERROR so a silent timeout can't pass.
                     let mut ui_missing_required = false;
+                    let ui_request_id: Option<String> =
+                        ui_response_rx.as_ref().map(|(id, _)| id.clone());
                     if let Some((request_id, mut rx)) = ui_response_rx {
                         match rx.try_recv() {
                             Ok(ui_values) => {
                                 log::debug!("UI already submitted for phase {}", job.phase_name);
+                                crate::ui::channels::unregister_ui_channel(&request_id).await;
                                 if let Some((unit_info, bound)) =
                                     extract_bound_measurements(&ui_values)
                                 {
@@ -498,8 +503,7 @@ impl Worker {
                                         job.phase_name, phase_result
                                     );
                                     drop(rx);
-                                    let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
-                                    channels.remove(&request_id);
+                                    crate::ui::channels::unregister_ui_channel(&request_id).await;
                                 } else {
                                     log::debug!(
                                         "Python phase {} finished, waiting for UI submission",
@@ -511,6 +515,7 @@ impl Worker {
                                                 "Received UI submission for phase {}",
                                                 job.phase_name
                                             );
+                                            crate::ui::channels::unregister_ui_channel(&request_id).await;
                                             if let Some((unit_info, bound)) =
                                                 extract_bound_measurements(&ui_values)
                                             {
@@ -524,9 +529,7 @@ impl Worker {
                                                 job.phase_name
                                             );
                                             ui_missing_required = true;
-                                            let mut channels =
-                                                crate::ui::UI_RESPONSE_CHANNELS.lock().await;
-                                            channels.remove(&request_id);
+                                            crate::ui::channels::unregister_ui_channel(&request_id).await;
                                         }
                                     }
                                 }
@@ -537,8 +540,7 @@ impl Worker {
                                     job.phase_name
                                 );
                                 ui_missing_required = true;
-                                let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
-                                channels.remove(&request_id);
+                                crate::ui::channels::unregister_ui_channel(&request_id).await;
                             }
                         }
                     }
@@ -569,7 +571,10 @@ impl Worker {
                         // Falls back to the generic message when the channel
                         // closed for an unrelated reason (operator timeout,
                         // direct cancel from the agent stdin reader, etc.).
-                        let reason = crate::ui::channels::CANCEL_REASON.read().await.clone();
+                        let reason = match &ui_request_id {
+                            Some(id) => crate::ui::channels::take_cancel_reason(id).await,
+                            None => crate::ui::channels::CANCEL_REASON.read().await.clone(),
+                        };
                         job_result.error = Some(match reason {
                             Some(r) => r,
                             None => "Required UI input was cancelled or timed out — phase cannot complete without operator response".to_string(),
@@ -1061,16 +1066,18 @@ impl Worker {
 
             let ui_response_rx = if requires_user_input {
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                {
-                    let mut channels = crate::ui::UI_RESPONSE_CHANNELS.lock().await;
-                    channels.insert(request_id.clone(), tx);
-                }
+                crate::ui::channels::register_ui_channel(
+                    request_id.clone(),
+                    job.slot_id.clone(),
+                    tx,
+                )
+                .await;
 
                 log::debug!(
                     "Created UI response channel for native phase: {}",
                     request_id
                 );
-                Some(rx)
+                Some((request_id.clone(), rx))
             } else {
                 None
             };
@@ -1101,8 +1108,8 @@ impl Worker {
         let mut unit_info: Option<crate::unit::UnitInfo> = None;
 
         let ui_result = if has_ui && requires_user_input {
-            if let Some(rx) = ui_response_rx {
-                match rx.await {
+            if let Some((request_id, rx)) = ui_response_rx {
+                let outcome = match rx.await {
                     Ok(ui_values) => {
                         if let Some((ui_unit, bound)) = extract_bound_measurements(&ui_values) {
                             // Mid-run native-phase identify: merge with
@@ -1128,7 +1135,11 @@ impl Worker {
                         (crate::job::PhaseResult::Continue, None)
                     }
                     Err(_) => (crate::job::PhaseResult::Stop, None),
-                }
+                };
+                // Answered or closed under us: either way the registry
+                // entry is done with. The CLI removes only the sender.
+                crate::ui::channels::unregister_ui_channel(&request_id).await;
+                outcome
             } else {
                 (
                     crate::job::PhaseResult::Continue,

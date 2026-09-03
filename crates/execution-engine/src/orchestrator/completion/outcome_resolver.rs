@@ -1,5 +1,10 @@
 use crate::job::{Job, JobResult, Outcome, PhaseResult};
 
+/// `shutdown_requested` is the EXECUTION-wide flag: an operator stop, a
+/// plug init failure, or a shared stage stopping the run. A slot stop
+/// never raises it, so a phase of the stopped slot that was already in
+/// flight finishes with its real outcome, not a manufactured Stop; the
+/// slot's aggregate carries the stop through `SlotStop`.
 pub fn resolve_outcome(
     job_result: &JobResult,
     job: &Job,

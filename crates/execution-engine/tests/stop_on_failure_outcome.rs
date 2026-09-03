@@ -14,10 +14,31 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::sync::Mutex;
+
+use execution_engine::event_sink::ExecutionEvent;
 use execution_engine::job::Outcome;
 use execution_engine::orchestrator::Orchestrator;
 use execution_engine::procedure::loader::load_procedure_definition;
-use execution_engine::{EventSink, NullSink};
+use execution_engine::EventSink;
+
+/// The outcome each phase reported on its JobComplete event.
+#[derive(Default)]
+struct Capture(Mutex<Vec<(String, Outcome)>>);
+
+impl EventSink for Capture {
+    fn emit(&self, event: &ExecutionEvent) {
+        if let ExecutionEvent::JobComplete { phase_key, outcome, .. } = event {
+            self.0.lock().unwrap().push((phase_key.clone(), *outcome));
+        }
+    }
+}
+
+impl Capture {
+    fn outcome_of(&self, key: &str) -> Option<Outcome> {
+        self.0.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, o)| *o)
+    }
+}
 
 fn python3() -> Option<PathBuf> {
     let out = std::process::Command::new("which")
@@ -66,7 +87,7 @@ impl Drop for Bed {
 }
 
 async fn run(bed: &Bed, python: &Path, tag: &str) -> Outcome {
-    run_with(bed, python, tag, false, 1).await
+    run_with(bed, python, tag, false, 1).await.0
 }
 
 /// `stop_before_execute` raises an operator Stop after `submit_procedure`
@@ -78,7 +99,7 @@ async fn run_with(
     tag: &str,
     stop_before_execute: bool,
     workers: usize,
-) -> Outcome {
+) -> (Outcome, Arc<Capture>) {
     let procedure_def =
         load_procedure_definition(&bed.dir.join("procedure.yaml")).expect("procedure loads");
     let mut orchestrator = Orchestrator::new_with_python(
@@ -91,7 +112,8 @@ async fn run_with(
         procedure_def,
         None,
     );
-    let sink: Arc<dyn EventSink> = Arc::new(NullSink);
+    let events = Arc::new(Capture::default());
+    let sink: Arc<dyn EventSink> = events.clone();
     orchestrator.set_event_sink(sink);
     orchestrator.initialize().await.expect("initialize");
     orchestrator
@@ -112,7 +134,7 @@ async fn run_with(
     }
     let stats = orchestrator.execute_all().await.expect("execute_all");
     orchestrator.shutdown().await.expect("shutdown");
-    stats.run_outcome.expect("run outcome present")
+    (stats.run_outcome.expect("run outcome present"), events)
 }
 
 #[tokio::test]
@@ -206,13 +228,16 @@ main:
     python: phases.ok
 "#,
     );
-    assert_eq!(run_with(&bed, &python, "early-stop", true, 1).await, Outcome::Stop);
+    assert_eq!(run_with(&bed, &python, "early-stop", true, 1).await.0, Outcome::Stop);
 }
 
-/// Multi-worker: `Slow` is still running when `Bad` fails. `Slow` then
-/// finishes under the raised flag and resolves to Stop. The run failed,
-/// and must read FAIL, not STOP. This is the shape a multi-fixture
-/// station runs in; single-worker tests never produce it.
+/// Multi-worker: `Slow` is still running when `Bad` fails. The run
+/// failed, and must read FAIL, not STOP. This is the shape a
+/// multi-fixture station runs in; single-worker tests never produce it.
+///
+/// Since stop scope follows job scope, the failure stops the slot without
+/// raising the execution flag, so `Slow` keeps its real outcome (PASS)
+/// instead of a manufactured Stop.
 #[tokio::test]
 async fn failing_phase_with_a_sibling_in_flight_reports_fail() {
     let Some(python) = python3() else {
@@ -237,5 +262,12 @@ main:
     python: phases.bad
 "#,
     );
-    assert_eq!(run_with(&bed, &python, "two-workers", false, 2).await, Outcome::Fail);
+    let (outcome, events) = run_with(&bed, &python, "two-workers", false, 2).await;
+    assert_eq!(outcome, Outcome::Fail);
+    assert_eq!(events.outcome_of("bad"), Some(Outcome::Fail));
+    assert_eq!(
+        events.outcome_of("slow"),
+        Some(Outcome::Pass),
+        "a sibling finishing after the failure keeps its real outcome"
+    );
 }

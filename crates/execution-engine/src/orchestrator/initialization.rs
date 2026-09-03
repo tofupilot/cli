@@ -148,6 +148,7 @@ impl Orchestrator {
         }
 
         let mut state = self.state.write().await;
+        state.slots = slots.clone();
 
         // Set should_stop_on_first_failure flag from procedure configuration
         state.should_stop_on_first_failure = self.procedure_definition

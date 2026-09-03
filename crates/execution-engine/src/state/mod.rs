@@ -32,9 +32,24 @@ pub struct PendingDelayedRetry {
     pub handle: tokio::task::JoinHandle<()>,
     pub phase_key: String,
     pub phase_name: String,
+    pub function: String,
     pub slot_id: Option<String>,
     pub job_id: Uuid,
     pub dependency_id: Uuid,
+    /// Attempt number of the retry that was waiting to run.
+    pub retry_count: usize,
+}
+
+impl PendingDelayedRetry {
+    fn job_info(&self) -> JobInfo {
+        JobInfo {
+            phase_key: self.phase_key.clone(),
+            phase_name: self.phase_name.clone(),
+            function: self.function.clone(),
+            slot_id: self.slot_id.clone(),
+            dependency_id: self.dependency_id,
+        }
+    }
 }
 
 /// Who interrupted a run that did not reach its last phase. The canonical
@@ -66,6 +81,39 @@ pub enum ShutdownCause {
     InitFailure,
 }
 
+/// A slot cut short before its last phase. The per-slot twin of the
+/// `shutdown_requested` / `shutdown_cause` pair: presence in
+/// `slot_stops` is the flag, `cause` reads like `shutdown_cause`.
+///
+/// Stop scope follows job scope. A job with `slot_id = Some(s)` that
+/// stops (`on_first_failure: stop`, `then: {…: stop}`, `phase.stop()`,
+/// Error, Timeout) cancels slot `s` only and records it here; a shared
+/// job (SetupAll, TeardownAll) or an operator stops the execution, which
+/// marks every slot. A bool would not do: after a SetupAll failure a
+/// slot's own results are only SKIPs and would aggregate to PASS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotStop {
+    pub cause: Option<ShutdownCause>,
+    /// Quoted on the cancelled UI phases of that slot, so the operator
+    /// reads why their prompt vanished.
+    pub reason: String,
+}
+
+/// What a cancellation removed from the run: queued jobs, and delayed
+/// retries that were waiting to be re-enqueued. Both need a Skipped
+/// event from the caller.
+#[derive(Debug, Default)]
+pub struct CancelledWork {
+    pub jobs: Vec<Job>,
+    pub retries: Vec<PendingDelayedRetry>,
+}
+
+impl CancelledWork {
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty() && self.retries.is_empty()
+    }
+}
+
 /// Centralized state for the orchestrator to reduce lock complexity
 ///
 /// Lock ordering convention:
@@ -93,6 +141,13 @@ pub struct OrchestratorState {
     pub teardown_procedure_jobs: Vec<Job>, // Teardown procedure jobs to run after all slots
     pub pending_delayed_retry_handles: Vec<PendingDelayedRetry>, // Handles to spawned retry delay tasks with job info
     pub init_error: Option<String>, // Error that occurred during initialization (e.g., plug init failure)
+    /// Every slot the procedure was submitted with, in declaration order.
+    /// `slot_jobs` only knows slots that have had a job enqueued, which
+    /// under slot-first leaves the not-yet-started ones invisible.
+    pub slots: Vec<String>,
+    /// Slots cut short, see `SlotStop`. First writer wins, like
+    /// `request_shutdown`.
+    pub slot_stops: HashMap<String, SlotStop>,
 }
 
 impl OrchestratorState {
@@ -115,6 +170,8 @@ impl OrchestratorState {
             teardown_procedure_jobs: Vec::new(),
             pending_delayed_retry_handles: Vec::new(),
             init_error: None,
+            slots: Vec::new(),
+            slot_stops: HashMap::new(),
         }
     }
 
@@ -126,11 +183,16 @@ impl OrchestratorState {
         self.shutdown_cause.get_or_insert(cause);
     }
 
-    /// Check if execution is complete
+    /// Check if execution is complete. Work deferred under slot-first
+    /// (`pending_slot_jobs`, `teardown_procedure_jobs`) counts: the queue
+    /// is empty between two slots, and a slot stop no longer raises the
+    /// flag that used to end the loop there.
     pub fn is_complete(&self) -> bool {
         (self.job_queue.is_empty()
             && self.worker_state.count_busy() == 0
-            && self.pending_delayed_retry_handles.is_empty())
+            && self.pending_delayed_retry_handles.is_empty()
+            && self.pending_slot_jobs.is_empty()
+            && self.teardown_procedure_jobs.is_empty())
             || self.shutdown_requested
     }
 
@@ -204,64 +266,184 @@ impl OrchestratorState {
         self.worker_state.release_by_job(job_id);
     }
 
-    /// Cancel all jobs for a specific slot
-    pub fn cancel_slot_jobs(&mut self, slot_id: &str) -> Vec<Job> {
-        let mut cancelled_jobs = Vec::new();
+    /// Record a slot as cut short. First writer wins: a slot that
+    /// stopped on its own failure keeps `PhaseFailure` when the operator
+    /// later stops the whole run.
+    pub fn mark_slot_stopped(&mut self, slot_id: &str, cause: Option<ShutdownCause>, reason: &str) {
+        self.slot_stops
+            .entry(slot_id.to_string())
+            .or_insert_with(|| SlotStop {
+                cause,
+                reason: reason.to_string(),
+            });
+    }
 
-        // Remove from queue and collect cancelled jobs, but NEVER cancel teardown phases
+    pub fn is_slot_stopped(&self, slot_id: &str) -> bool {
+        self.slot_stops.contains_key(slot_id)
+    }
+
+    /// The slot a job belongs to is stopping, or the whole execution is.
+    /// Shared jobs only ever stop with the execution.
+    pub fn is_stopping_for(&self, slot_id: Option<&str>) -> bool {
+        self.shutdown_requested || slot_id.is_some_and(|s| self.is_slot_stopped(s))
+    }
+
+    /// Mark every slot that still has work as stopped, with the cause the
+    /// execution stop recorded. Called by the operator paths before they
+    /// drain the queue: once running jobs are completed as interrupted
+    /// and queued ones as skipped, nothing in the results can tell a slot
+    /// that finished from one that was cut, and the cut one would read
+    /// PASS.
+    pub fn mark_outstanding_slots_stopped(&mut self, reason: &str) {
+        let cause = self.shutdown_cause;
+        let shared_outstanding = self.shared_work_outstanding();
+        let slots: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|s| shared_outstanding || self.slot_has_outstanding_work(s))
+            .cloned()
+            .collect();
+        for slot in slots {
+            self.mark_slot_stopped(&slot, cause, reason);
+        }
+    }
+
+    /// Whether a shared stage (SetupAll, TeardownAll) is still queued,
+    /// running or deferred. Shared work belongs to every slot's outcome,
+    /// so while it is outstanding no slot has finished.
+    pub fn shared_work_outstanding(&self) -> bool {
+        !self.teardown_procedure_jobs.is_empty()
+            || self.job_queue.iter().any(|j| j.slot_id.is_none())
+            || (0..self.worker_state.num_workers()).any(|w| {
+                self.worker_state
+                    .get_worker_job(w)
+                    .is_some_and(|id| !self.job_to_slot.contains_key(&id))
+            })
+    }
+
+    /// Whether anything of the slot is still queued, running, waiting on a
+    /// delayed retry, or deferred under slot-first. Its own work only; see
+    /// `shared_work_outstanding` for the stages every slot depends on.
+    pub fn slot_has_outstanding_work(&self, slot_id: &str) -> bool {
+        let is_slot = |s: &Option<String>| s.as_deref() == Some(slot_id);
+        self.job_queue.iter().any(|j| is_slot(&j.slot_id))
+            || self.pending_delayed_retry_handles.iter().any(|p| is_slot(&p.slot_id))
+            || self.pending_slot_jobs.iter().any(|(s, _)| s == slot_id)
+            || (0..self.worker_state.num_workers()).any(|w| {
+                self.worker_state
+                    .get_worker_job(w)
+                    .is_some_and(|id| self.job_to_slot.get(&id).map(String::as_str) == Some(slot_id))
+            })
+    }
+
+    fn skip_result(retry_count: usize) -> JobResult {
+        JobResult {
+            phase_result: crate::job::PhaseResult::Skip,
+            phase_outcome: crate::job::Outcome::Skip,
+            next_action: None, // Will be computed in completion handler
+            timeout_secs: None,
+            error: None,
+            exit_code: None,
+            measurements: vec![],
+            logs: vec![],
+            started_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            resource_metrics: None,
+            unit: None,
+            input_unit_info: None,
+            retry_count,
+            run_metadata: Default::default(),
+            unit_metadata: Default::default(),
+        }
+    }
+
+    /// Record a job that will never run as Skip so it appears in the
+    /// report and unblocks its dependents. Counts toward the original job
+    /// total even for a retry attempt: `record_retry_attempt` does not
+    /// count the earlier attempts, and no attempt of this phase instance
+    /// ever will be.
+    fn complete_as_cancelled(&mut self, job_id: Uuid, info: JobInfo, retry_count: usize) {
+        self.job_info.insert(job_id, info);
+        self.complete_original_job(job_id, Self::skip_result(retry_count));
+    }
+
+    /// Abort the delayed retries matching `keep_out`, resolving their
+    /// dependency so dependents (the slot's TeardownEach) are not blocked
+    /// forever. Without this a retried main phase re-enqueues after the
+    /// slot was cancelled and runs after TeardownEach destroyed its plugs.
+    fn abort_pending_retries(
+        &mut self,
+        mut matches: impl FnMut(&PendingDelayedRetry) -> bool,
+    ) -> Vec<PendingDelayedRetry> {
+        let (aborted, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_delayed_retry_handles)
+            .into_iter()
+            .partition(|p| matches(p));
+        self.pending_delayed_retry_handles = kept;
+        for pending in &aborted {
+            pending.handle.abort();
+            // The attempt that asked for the retry is in `job_results`
+            // already (`record_retry_attempt`); the retry itself never ran.
+            self.complete_as_cancelled(pending.job_id, pending.job_info(), pending.retry_count);
+        }
+        aborted
+    }
+
+    fn is_teardown(job: &Job) -> bool {
+        matches!(
+            job.stage_scope,
+            crate::procedure::schema::StageScope::TeardownEach
+                | crate::procedure::schema::StageScope::TeardownAll
+        )
+    }
+
+    /// Cancel one slot's remaining work: its queued non-teardown jobs and
+    /// its delayed retries. Its TeardownEach stays queued and runs; the
+    /// other slots and the shared stages are untouched. Records the slot
+    /// as stopped with `cause`, see `SlotStop`.
+    pub fn cancel_slot_jobs(
+        &mut self,
+        slot_id: &str,
+        cause: Option<ShutdownCause>,
+        reason: &str,
+    ) -> CancelledWork {
+        let mut cancelled = CancelledWork::default();
+
         self.job_queue.retain(|job| {
-            if job.slot_id.as_deref() == Some(slot_id)
-                && !matches!(
-                    job.stage_scope,
-                    crate::procedure::schema::StageScope::TeardownEach
-                )
-                && !matches!(
-                    job.stage_scope,
-                    crate::procedure::schema::StageScope::TeardownAll
-                )
-            {
-                cancelled_jobs.push(job.clone());
+            if job.slot_id.as_deref() == Some(slot_id) && !Self::is_teardown(job) {
+                cancelled.jobs.push(job.clone());
                 false
             } else {
                 true
             }
         });
 
-        // Mark cancelled jobs as completed with skipped status
-        for job in &cancelled_jobs {
-            let result = JobResult {
-                phase_result: crate::job::PhaseResult::Skip,
-                phase_outcome: crate::job::Outcome::Skip,
-                next_action: None, // Will be computed in completion handler
-                timeout_secs: None,
-                error: None,
-                exit_code: None,
-                measurements: vec![],
-                logs: vec![],
-                started_at: chrono::Utc::now(),
-                completed_at: chrono::Utc::now(),
-                resource_metrics: None,
-                unit: None,
-                input_unit_info: None,
-                retry_count: job.retry_count,
-                run_metadata: Default::default(),
-                unit_metadata: Default::default(),
-            };
-            // Populate job_info so cancelled jobs appear in the report
-            self.job_info.insert(job.id, JobInfo::from_job(job));
-            // Cancelled jobs from queue are original jobs (not yet started)
-            if job.retry_count == 0 {
-                self.complete_original_job(job.id, result);
-            } else {
-                self.complete_job(job.id, result);
-            }
+        for job in &cancelled.jobs {
+            self.complete_as_cancelled(job.id, JobInfo::from_job(job), job.retry_count);
         }
 
-        cancelled_jobs
+        cancelled.retries =
+            self.abort_pending_retries(|p| p.slot_id.as_deref() == Some(slot_id));
+
+        if !cancelled.is_empty() {
+            log::info!(
+                "Cancelling {} jobs and {} pending retries of slot {}: {}",
+                cancelled.jobs.len(),
+                cancelled.retries.len(),
+                slot_id,
+                reason
+            );
+        }
+
+        self.mark_slot_stopped(slot_id, cause, reason);
+
+        cancelled
     }
 
-    /// Cancel all remaining jobs (for stop_on_first_failure)
-    /// Note: Teardown phases are NEVER cancelled - they must run for cleanup
+    /// Cancel every slot's remaining work (a shared stage failed, or a
+    /// stop was asked for the whole execution). Teardown phases are NEVER
+    /// cancelled: they must run for cleanup. Slots deferred under
+    /// slot-first are cancelled whole, TeardownEach included: none of
+    /// their setup ran, so there is nothing of theirs to tear down.
     ///
     /// `cause` is what the CALLER knows about why the run is stopping. It is
     /// deliberately not inferred here: a cancellation triggered by a phase
@@ -269,62 +451,49 @@ impl OrchestratorState {
     /// when a phase merely *finished* under an operator stop — and that must
     /// not be relabelled as a failure. Pass `None` when the cause was
     /// already recorded by whoever raised `shutdown_requested`.
-    pub fn cancel_all_jobs(&mut self, reason: &str, cause: Option<ShutdownCause>) -> Vec<Job> {
-        let mut cancelled_jobs = Vec::new();
+    pub fn cancel_all_jobs(&mut self, reason: &str, cause: Option<ShutdownCause>) -> CancelledWork {
+        let mut cancelled = CancelledWork::default();
 
         // Drain the queue but preserve teardown phases
         let all_jobs: Vec<Job> = self.job_queue.drain(..).collect();
-
         for job in all_jobs {
-            // Never cancel teardown phases - they must run for cleanup
-            if matches!(
-                job.stage_scope,
-                crate::procedure::schema::StageScope::TeardownEach
-                    | crate::procedure::schema::StageScope::TeardownAll
-            ) {
+            if Self::is_teardown(&job) {
                 self.job_queue.push_back(job);
             } else {
-                cancelled_jobs.push(job);
+                cancelled.jobs.push(job);
             }
         }
 
-        if !cancelled_jobs.is_empty() {
-            log::info!("Cancelling {} jobs: {}", cancelled_jobs.len(), reason);
+        // Deferred slots were never enqueued, so they are not in the
+        // submitted total yet; count them in before counting them done.
+        for (_, jobs) in self.pending_slot_jobs.drain(..) {
+            self.total_jobs_submitted += jobs.len();
+            cancelled.jobs.extend(jobs);
         }
 
-        // Mark all cancelled jobs as skipped (they didn't run, not errors)
-        for job in &cancelled_jobs {
-            let result = JobResult {
-                phase_result: crate::job::PhaseResult::Skip,
-                phase_outcome: crate::job::Outcome::Skip,
-                next_action: None,
-                timeout_secs: None,
-                error: None,
-                exit_code: None,
-                measurements: vec![],
-                logs: vec![],
-                started_at: chrono::Utc::now(),
-                completed_at: chrono::Utc::now(),
-                resource_metrics: None,
-                unit: None,
-                input_unit_info: None,
-                retry_count: job.retry_count,
-                run_metadata: Default::default(),
-                unit_metadata: Default::default(),
-            };
-            // Populate job_info so cancelled jobs appear in the report
-            self.job_info.insert(job.id, JobInfo::from_job(job));
-            // Cancelled jobs from queue are original jobs (not yet started)
-            if job.retry_count == 0 {
-                self.complete_original_job(job.id, result);
-            } else {
-                self.complete_job(job.id, result);
-            }
+        for job in &cancelled.jobs {
+            self.complete_as_cancelled(job.id, JobInfo::from_job(job), job.retry_count);
+        }
+
+        cancelled.retries = self.abort_pending_retries(|_| true);
+
+        if !cancelled.is_empty() {
+            log::info!(
+                "Cancelling {} jobs and {} pending retries: {}",
+                cancelled.jobs.len(),
+                cancelled.retries.len(),
+                reason
+            );
+        }
+
+        let slots = self.slots.clone();
+        for slot in &slots {
+            self.mark_slot_stopped(slot, cause, reason);
         }
 
         // Only set shutdown flag if no teardown phases remain
         // (teardown phases must still run for cleanup)
-        if self.job_queue.is_empty() {
+        if self.job_queue.is_empty() && self.teardown_procedure_jobs.is_empty() {
             match cause {
                 Some(cause) => self.request_shutdown(cause),
                 // Caller has no cause of its own (a phase merely finished
@@ -334,7 +503,7 @@ impl OrchestratorState {
             }
         }
 
-        cancelled_jobs
+        cancelled
     }
 
     /// Add a job to the queue
@@ -440,7 +609,7 @@ impl OrchestratorState {
 }
 
 #[cfg(test)]
-mod shutdown_cause_tests {
+mod stop_scope_tests {
     use super::*;
     use crate::procedure::schema::StageScope;
 
@@ -468,7 +637,7 @@ mod shutdown_cause_tests {
         with_teardown.enqueue_job(job(StageScope::Main));
         with_teardown.enqueue_job(job(StageScope::TeardownAll));
         let cancelled = with_teardown.cancel_all_jobs("x", Some(ShutdownCause::PhaseFailure));
-        assert_eq!(cancelled.len(), 1, "only the main phase is cancelled");
+        assert_eq!(cancelled.jobs.len(), 1, "only the main phase is cancelled");
         assert!(!with_teardown.shutdown_requested);
         assert_eq!(with_teardown.shutdown_cause, None);
 
@@ -484,5 +653,131 @@ mod shutdown_cause_tests {
         no_cause.cancel_all_jobs("x", None);
         assert!(no_cause.shutdown_requested);
         assert_eq!(no_cause.shutdown_cause, None);
+    }
+
+    /// Stop scope = job scope. Cancelling slot A leaves slot B's queued
+    /// main phase alone, keeps A's TeardownEach, aborts A's delayed retry
+    /// (resolving its dependency), and records A as stopped with the
+    /// caller's cause. The execution flag stays down.
+    #[tokio::test]
+    async fn cancel_slot_jobs_touches_one_slot_only() {
+        let mut state = OrchestratorState::new(1);
+        state.slots = vec!["a".into(), "b".into()];
+        state.enqueue_job(slot_job(StageScope::Main, "a"));
+        state.enqueue_job(slot_job(StageScope::Main, "b"));
+        state.enqueue_job(slot_job(StageScope::TeardownEach, "a"));
+        state.enqueue_job(slot_job(StageScope::TeardownEach, "b"));
+        state.enqueue_job(job(StageScope::TeardownAll));
+
+        let retry_id = Uuid::new_v4();
+        let dep_id = Uuid::new_v4();
+        let handle = tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await });
+        state.pending_delayed_retry_handles.push(PendingDelayedRetry {
+            handle,
+            phase_key: "k".into(),
+            phase_name: "Phase".into(),
+            function: "f".into(),
+            slot_id: Some("a".into()),
+            job_id: retry_id,
+            dependency_id: dep_id,
+            retry_count: 2,
+        });
+
+        let cancelled = state.cancel_slot_jobs("a", Some(ShutdownCause::PhaseFailure), "a failed");
+
+        assert_eq!(cancelled.jobs.len(), 1, "only A's main phase is cancelled");
+        assert_eq!(cancelled.retries.len(), 1, "A's pending retry is aborted");
+        assert!(cancelled.retries[0].handle.is_finished() || {
+            tokio::task::yield_now().await;
+            cancelled.retries[0].handle.is_finished()
+        });
+        assert!(state.completed_jobs.contains(&dep_id), "aborted retry unblocks dependents");
+        assert_eq!(
+            state.job_results[&retry_id].retry_count, 2,
+            "the skip records the attempt that was pending"
+        );
+        assert!(state.pending_delayed_retry_handles.is_empty());
+        assert_eq!(state.job_queue.len(), 4, "B's main, both TeardownEach, TeardownAll stay");
+        assert!(state.job_queue.iter().any(|j| j.slot_id.as_deref() == Some("b")
+            && matches!(j.stage_scope, StageScope::Main)));
+        assert!(state.is_slot_stopped("a"));
+        assert!(!state.is_slot_stopped("b"));
+        assert_eq!(state.slot_stops["a"].cause, Some(ShutdownCause::PhaseFailure));
+        assert!(!state.shutdown_requested, "a slot stop never raises the execution flag");
+        assert!(state.is_stopping_for(Some("a")));
+        assert!(!state.is_stopping_for(Some("b")));
+        assert!(!state.is_stopping_for(None));
+    }
+
+    /// An execution-wide cancel marks every slot, drains the slots still
+    /// deferred under slot-first (their TeardownEach included: nothing
+    /// of theirs was set up), and leaves the flag down while a shared
+    /// teardown is still to run.
+    #[test]
+    fn cancel_all_jobs_marks_every_slot_and_drains_deferred_slots() {
+        let mut state = OrchestratorState::new(1);
+        state.slots = vec!["a".into(), "b".into()];
+        state.enqueue_job(slot_job(StageScope::Main, "a"));
+        state.enqueue_job(slot_job(StageScope::TeardownEach, "a"));
+        state.pending_slot_jobs = vec![(
+            "b".into(),
+            vec![slot_job(StageScope::Main, "b"), slot_job(StageScope::TeardownEach, "b")],
+        )];
+        state.teardown_procedure_jobs = vec![job(StageScope::TeardownAll)];
+
+        let cancelled = state.cancel_all_jobs("setup failed", Some(ShutdownCause::PhaseFailure));
+
+        assert_eq!(cancelled.jobs.len(), 3, "A's main plus both of B's deferred jobs");
+        assert_eq!(state.total_jobs_submitted, 4, "B's deferred jobs join the submitted total");
+        assert_eq!(state.original_jobs_completed, 3);
+        assert!(state.pending_slot_jobs.is_empty());
+        assert_eq!(state.job_queue.len(), 1, "A's TeardownEach stays");
+        assert!(state.is_slot_stopped("a") && state.is_slot_stopped("b"));
+        assert_eq!(state.slot_stops["b"].cause, Some(ShutdownCause::PhaseFailure));
+        assert!(!state.shutdown_requested, "TeardownEach and TeardownAll still have to run");
+        assert!(!state.is_complete());
+    }
+
+    /// The operator path: a slot that finished every phase keeps no
+    /// outstanding work and must not be marked; one with a job queued is.
+    #[test]
+    fn mark_outstanding_slots_stopped_spares_finished_slots() {
+        let mut state = OrchestratorState::new(1);
+        state.slots = vec!["done".into(), "live".into(), "never".into(), "empty".into()];
+        let finished = slot_job(StageScope::Main, "done");
+        let finished_id = finished.id;
+        state.enqueue_job(finished);
+        state.enqueue_job(slot_job(StageScope::Main, "live"));
+        state.pending_slot_jobs = vec![("never".into(), vec![slot_job(StageScope::Main, "never")])];
+        state.job_info.insert(finished_id, JobInfo::from_job(&state.job_queue[0]));
+        let popped = state.job_queue.pop_front().unwrap();
+        state.complete_job(popped.id, skipped());
+
+        state.request_shutdown(ShutdownCause::Operator);
+        state.mark_outstanding_slots_stopped("Execution stopped by user");
+
+        assert!(!state.is_slot_stopped("done"));
+        assert_eq!(state.slot_stops["live"].cause, Some(ShutdownCause::Operator));
+        assert!(state.is_slot_stopped("never"), "a deferred slot that never started was cut too");
+        assert!(!state.is_slot_stopped("empty"), "a slot with no job of its own has nothing to cut");
+
+        // A shared teardown still queued: every slot, the empty one
+        // included, was cut before its execution finished.
+        let mut with_shared = OrchestratorState::new(1);
+        with_shared.slots = vec!["empty".into()];
+        with_shared.enqueue_job(job(StageScope::TeardownAll));
+        with_shared.request_shutdown(ShutdownCause::Operator);
+        with_shared.mark_outstanding_slots_stopped("Execution stopped by user");
+        assert!(with_shared.is_slot_stopped("empty"));
+    }
+
+    fn skipped() -> JobResult {
+        OrchestratorState::skip_result(0)
+    }
+
+    fn slot_job(scope: StageScope, slot: &str) -> Job {
+        let mut j = job(scope);
+        j.slot_id = Some(slot.to_string());
+        j
     }
 }

@@ -69,6 +69,34 @@ impl Orchestrator {
         }
     }
 
+    /// Skipped events for a cancellation: the queued jobs it removed and
+    /// the delayed retries it aborted, which had no queued job to speak
+    /// for them.
+    pub(super) async fn emit_cancelled_work(
+        &self,
+        cancelled: &crate::state::CancelledWork,
+        reason: &str,
+    ) {
+        self.emit_cancelled_jobs(&cancelled.jobs, reason, JobStatus::Skipped, Outcome::Skip)
+            .await;
+        for pending in &cancelled.retries {
+            self.event_sink.emit(&ExecutionEvent::JobProgress {
+                job_id: pending.job_id.to_string(),
+                slot_id: pending.slot_id.clone(),
+                phase_key: pending.phase_key.clone(),
+                phase_name: pending.phase_name.clone(),
+                stage_scope: crate::procedure::schema::StageScope::Main,
+                status: JobStatus::Skipped,
+                worker_id: None,
+                started_at: None,
+                timeout_ms: None,
+                outcome: Some(Outcome::Skip),
+                retry_count: pending.retry_count,
+                error: Some(format!("Retry cancelled: {reason}")),
+            });
+        }
+    }
+
     pub(super) async fn emit_plug_scope_event(&self, status: &str) {
         if status == "pass" || status == "error" {
             let mut state = self.state.write().await;
