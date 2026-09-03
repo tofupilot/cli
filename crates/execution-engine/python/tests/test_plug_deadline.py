@@ -167,8 +167,10 @@ class SocketHygieneTest(unittest.TestCase):
         with self.assertRaises(Exception):
             plug.measure()
 
-        self.assertEqual(len(created), 1)
-        self.assertEqual(created[0].fileno(), -1, "socket leaked after connect failure")
+        # One socket per connect attempt, every one of them closed.
+        self.assertEqual(len(created), tp_worker.PLUG_CONNECT_ATTEMPTS)
+        for sock in created:
+            self.assertEqual(sock.fileno(), -1, "socket leaked after connect failure")
 
 
 if __name__ == "__main__":

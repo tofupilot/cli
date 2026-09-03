@@ -12,6 +12,7 @@ import time
 import gc
 import json
 import threading
+import select
 import socket
 from typing import Dict, Any
 from pathlib import Path
@@ -91,8 +92,14 @@ class LogCapturingStream:
         self.job_id = job_id
         self.buffer = ""
         self.emit_to_stderr = emit_to_stderr
+        # Handler threads and a running method may print concurrently.
+        self._lock = threading.Lock()
 
     def write(self, text):
+        with self._lock:
+            self._write_locked(text)
+
+    def _write_locked(self, text):
         self.buffer += text
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
@@ -141,6 +148,18 @@ class PlugHandler:
         self._initialized = False
         self._init_error = None
         self._init_start_time = time.time()
+        # One method call at a time on the instance, like a SCPI socket.
+        # Control requests (GetStatus, Cleanup, Shutdown) do NOT take
+        # this lock, so a long or abandoned method never blocks the
+        # engine's health probe or its shutdown sequence.
+        self._call_lock = threading.Lock()
+        # Set once the service must stop accepting connections: after a
+        # Shutdown, or after a Cleanup on an initialized plug.
+        self.shutdown_event = threading.Event()
+        # serve() waits for an in-flight Cleanup before exiting so
+        # interpreter teardown cannot cut __del__ short.
+        self.cleanup_started = threading.Event()
+        self.cleanup_done = threading.Event()
 
         # Initialize logging
         self.logs = Logs()
@@ -207,24 +226,27 @@ class PlugHandler:
 
         state = {}
         for attr_name in dir(self.plug_instance):
-            if not attr_name.startswith("_") and not callable(
-                getattr(self.plug_instance, attr_name)
-            ):
-                try:
-                    value = getattr(self.plug_instance, attr_name)
-                    if isinstance(value, (str, int, float, bool, type(None))):
-                        state[attr_name] = str(value)
-                except Exception:
-                    pass
+            if attr_name.startswith("_"):
+                continue
+            try:
+                value = getattr(self.plug_instance, attr_name)
+                if not callable(value) and isinstance(
+                    value, (str, int, float, bool, type(None))
+                ):
+                    state[attr_name] = str(value)
+            except Exception:
+                pass
 
         return state
 
-    def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def handle_request(
+        self, request: Dict[str, Any], conn: "socket.socket | None" = None
+    ) -> Dict[str, Any]:
         """Handle a single NDJSON request and return a response dict."""
         req_type = request.get("type", "")
 
         if req_type == "CallMethod":
-            return self._handle_call_method(request)
+            return self._handle_call_method(request, conn)
         elif req_type == "GetStatus":
             return self._handle_get_status()
         elif req_type == "Cleanup":
@@ -234,7 +256,25 @@ class PlugHandler:
         else:
             return {"success": False, "error": f"Unknown request type: {req_type}"}
 
-    def _handle_call_method(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _caller_gone(conn) -> bool:
+        """True when the worker already closed its end (phase deadline hit,
+        worker killed). A queued request whose caller is gone must not run:
+        the phase already failed, and firing an instrument write minutes
+        later is worse than dropping it."""
+        if conn is None:
+            return False
+        try:
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                return False
+            return conn.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def _handle_call_method(
+        self, request: Dict[str, Any], conn=None
+    ) -> Dict[str, Any]:
         try:
             # Wait for background initialization
             if self._init_thread and self._init_thread.is_alive():
@@ -260,15 +300,35 @@ class PlugHandler:
             kwargs_json = request.get("kwargs_json", "")
             kwargs = json.loads(kwargs_json) if kwargs_json else {}
 
-            method_func = getattr(self.plug_instance, method_name)
-            result = method_func(*args, **kwargs)
+            abandoned = {
+                "success": False,
+                "error": f"{method_name} skipped: caller closed the connection before it ran",
+            }
+            # Checked before waiting for the lock and again after getting
+            # it: the wait can be long when many slots share the plug.
+            if self._caller_gone(conn):
+                return abandoned
+            with self._call_lock:
+                if self._caller_gone(conn):
+                    return abandoned
+                # Bound the method only now: a Cleanup that won the lock
+                # first has dropped the instance, and a reference taken
+                # earlier would keep it alive past its __del__.
+                instance = self.plug_instance
+                if instance is None:
+                    return {
+                        "success": False,
+                        "error": f"{method_name} skipped: plug {self.display_name} was cleaned up",
+                    }
+                result = getattr(instance, method_name)(*args, **kwargs)
+                state = self._get_plug_state()
 
             result_json = json.dumps(result) if result is not None else None
 
             return {
                 "success": True,
                 "result_json": result_json,
-                "state": self._get_plug_state(),
+                "state": state,
             }
 
         except Exception as e:
@@ -297,25 +357,60 @@ class PlugHandler:
         if not self.plug_instance:
             return {"success": False, "error": "Plug not initialized"}
 
-        return {"success": True, "state": self._get_plug_state()}
+        # Health probe must answer even while a method runs; the state
+        # snapshot is best effort and skipped when the instance is busy.
+        state: Dict[str, str] = {}
+        if self._call_lock.acquire(blocking=False):
+            try:
+                state = self._get_plug_state()
+            finally:
+                self._call_lock.release()
+        return {"success": True, "state": state}
 
     def _handle_cleanup(self) -> Dict[str, Any]:
+        self.cleanup_started.set()
+        try:
+            return self._cleanup()
+        finally:
+            self.cleanup_done.set()
+
+    def _cleanup(self) -> Dict[str, Any]:
         cleanup_start = time.time()
 
         self.logs.info(f"Plug '{self.display_name}' starting cleanup")
 
         if self.plug_instance:
-            self.logs.info(f"  -> Deleting plug instance (will call __del__)")
-            del self.plug_instance
-            self.plug_instance = None
-
-            gc.collect()
-            self.logs.info(f"  -> Garbage collection completed (__del__ has finished)")
+            # Rust allows 5 s for Cleanup. Wait up to 3 s for an in-flight
+            # method so dropping the reference really runs __del__; past
+            # that, the running method keeps its bound reference and
+            # __del__ is deferred until it returns or the process exits.
+            acquired = self._call_lock.acquire(timeout=3.0)
+            try:
+                self.logs.info(f"  -> Deleting plug instance (will call __del__)")
+                del self.plug_instance
+                self.plug_instance = None
+                gc.collect()
+            finally:
+                if acquired:
+                    self._call_lock.release()
+            if acquired:
+                self.logs.info(f"  -> Garbage collection completed (__del__ has finished)")
+            else:
+                # sys.stderr is the WARNING-level capture stream Rust reads.
+                print(
+                    f"Plug '{self.display_name}': a method is still running; "
+                    "__del__ deferred until it returns",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         cleanup_duration = time.time() - cleanup_start
         self.logs.info(
             f"Plug '{self.display_name}' cleanup complete ({cleanup_duration:.2f}s)"
         )
+
+        if self._initialized:
+            self.shutdown_event.set()
 
         return {
             "success": True,
@@ -325,27 +420,32 @@ class PlugHandler:
 
     def _handle_shutdown(self) -> Dict[str, Any]:
         self.logs.info(f"Plug '{self.display_name}' shutting down")
+        self.shutdown_event.set()
         return {"success": True, "message": "Service shutting down"}
 
 
 def handle_connection(conn: socket.socket, handler: PlugHandler):
     """Handle a single TCP connection: read request, write response."""
     try:
+        # A client that connects and never sends must not pin a thread.
+        conn.settimeout(30.0)
         buf = b""
         while b"\n" not in buf:
             chunk = conn.recv(65536)
             if not chunk:
                 return
             buf += chunk
+        conn.settimeout(None)
 
         line, _ = buf.split(b"\n", 1)
         request = json.loads(line.decode("utf-8"))
 
-        response = handler.handle_request(request)
+        response = handler.handle_request(request, conn)
         conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
     except Exception as e:
-        print(f"Connection handler error: {e}", file=_original_stderr)
+        _original_stderr.write(f"Connection handler error: {e}\n")
+        _original_stderr.flush()
         try:
             error_resp = {"success": False, "error": str(e)}
             conn.sendall((json.dumps(error_resp) + "\n").encode("utf-8"))
@@ -367,7 +467,13 @@ def serve(
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     port = server.getsockname()[1]
-    server.listen(5)
+    # Every worker opens one connection per call. With N slots in flight
+    # the connects arrive in a burst; with the old `listen(5)` the overflow
+    # was reset (macOS, Windows: ECONNRESET / broken pipe) or stalled on
+    # SYN retransmits (Linux). The backlog is a safety margin only:
+    # connections are accepted immediately into a thread and queue on the
+    # handler's call lock, not in the kernel.
+    server.listen(min(1024, socket.SOMAXCONN))
 
     # Print port for Rust to discover
     print(f"NDJSON_PORT:{port}", flush=True, file=original_stdout)
@@ -378,7 +484,7 @@ def serve(
         flush=True,
     )
 
-    shutdown_event = threading.Event()
+    shutdown_event = handler.shutdown_event
 
     try:
         while not shutdown_event.is_set():
@@ -388,16 +494,20 @@ def serve(
             except socket.timeout:
                 continue
 
-            # Handle connection
-            handle_connection(conn, handler)
-
-            # Check if shutdown was requested
-            if not handler.plug_instance and handler._initialized:
-                break
+            # One thread per connection: accept never waits on a running
+            # method. Method calls serialize on handler._call_lock.
+            threading.Thread(
+                target=handle_connection, args=(conn, handler), daemon=True
+            ).start()
     except KeyboardInterrupt:
         print(f"Plug '{display_name}' interrupted", file=_original_stderr)
     finally:
         server.close()
+        # Interpreter exit freezes daemon threads. Give a Cleanup that is
+        # still running __del__ a bounded chance to finish first; Rust
+        # kills the process a few seconds after Shutdown anyway.
+        if handler.cleanup_started.is_set():
+            handler.cleanup_done.wait(3.0)
 
 
 if __name__ == "__main__":

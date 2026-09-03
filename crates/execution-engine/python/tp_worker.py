@@ -19,6 +19,7 @@ import base64
 import inspect
 import queue
 import threading
+import random
 import socket
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union, Literal
@@ -1441,6 +1442,16 @@ class Measurements:
 # soak, firmware flash), so its only deadline is the phase's.
 PLUG_CONNECT_TIMEOUT_S = 30.0
 
+# A connect() that is refused or reset is retried: the request was never
+# delivered, so replaying it cannot double-execute an instrument write.
+# Nothing after a successful connect is ever retried — once the request
+# line may have reached the service, only the caller knows whether the
+# method is idempotent. Covers the window where the engine respawns a
+# plug service. Connection bursts are handled server-side (threaded
+# accept in tp_plug.py); this retry is not the fix for them.
+PLUG_CONNECT_ATTEMPTS = 3
+PLUG_CONNECT_RETRY_BASE_S = 0.05
+
 
 class Plug:
     """NDJSON TCP client for communicating with hardware plug services"""
@@ -1474,6 +1485,39 @@ class Plug:
 
         return method_wrapper
 
+    def _connect(
+        self, host: str, port: int, method: str, remaining: Optional[float]
+    ) -> socket.socket:
+        """Open the per-call connection, retrying refused/reset connects."""
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, PLUG_CONNECT_ATTEMPTS + 1):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(
+                    PLUG_CONNECT_TIMEOUT_S
+                    if remaining is None
+                    else min(PLUG_CONNECT_TIMEOUT_S, remaining)
+                )
+                sock.connect((host, port))
+                return sock
+            except (ConnectionRefusedError, ConnectionResetError) as e:
+                sock.close()
+                last_error = e
+                if attempt == PLUG_CONNECT_ATTEMPTS:
+                    break
+                delay = PLUG_CONNECT_RETRY_BASE_S * attempt + random.uniform(
+                    0, PLUG_CONNECT_RETRY_BASE_S
+                )
+                # Never sleep past the phase deadline.
+                remaining = self._remaining(method)
+                if remaining is not None and delay >= remaining:
+                    break
+                time.sleep(delay)
+            except BaseException:
+                sock.close()
+                raise
+        raise last_error
+
     def call(self, method: str, args: list = None) -> Any:
         """Call a method on the plug service via NDJSON TCP"""
         if args is None:
@@ -1488,16 +1532,9 @@ class Plug:
 
             remaining = self._remaining(method)
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host, port_str = self.address.split(":")
+            sock = self._connect(host, int(port_str), method, remaining)
             try:
-                sock.settimeout(
-                    PLUG_CONNECT_TIMEOUT_S
-                    if remaining is None
-                    else min(PLUG_CONNECT_TIMEOUT_S, remaining)
-                )
-                host, port_str = self.address.split(":")
-                sock.connect((host, int(port_str)))
-
                 sock.settimeout(self._remaining(method))
                 sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
 
