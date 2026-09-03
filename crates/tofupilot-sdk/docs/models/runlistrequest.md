@@ -11,6 +11,8 @@
 | `procedure_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `procedure_versions` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `deployment_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `execution_ids` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
+| `slot_keys` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `environments` | `Option<Vec<Environment>>` | :heavy_minus_sign: | N/A |
 | `serial_numbers` | `Option<Vec<String>>` | :heavy_minus_sign: | N/A |
 | `samples` | `Option<Vec<Sample>>` | :heavy_minus_sign: | N/A |

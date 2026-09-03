@@ -27,6 +27,10 @@ pub struct PhaseState {
     /// `TuiState::apply` on `PhaseStarted`. Used to render the Time column
     /// as an offset from the run's start.
     pub started_at: Option<std::time::Instant>,
+    /// Slot this row tracks. None for shared stages and for every phase
+    /// of a single-slot run. Multi-slot runs seed one row per (phase,
+    /// slot) so each slot's status is tracked on its own.
+    pub slot_id: Option<String>,
 }
 
 /// Per-component typed state. Parallel to `ActiveUiRequest::components`.
@@ -160,6 +164,10 @@ fn default_array(v: &Option<ComponentValue>) -> Vec<String> {
 pub struct ActiveUiRequest {
     pub request_id: String,
     pub phase_key: String,
+    /// Slot the prompt belongs to (multi-slot procedures). Gates
+    /// `ui_update` routing and prompt clearing so a sibling slot's
+    /// prompt on the same phase key survives its neighbour finishing.
+    pub slot_id: Option<String>,
     pub components: Vec<UiComponent>,
     pub states: Vec<ComponentState>,
     pub requires_input: bool,
@@ -181,6 +189,7 @@ impl ActiveUiRequest {
         Self {
             request_id: request.request_id.clone(),
             phase_key: request.phase_key.clone(),
+            slot_id: request.slot_id.clone(),
             components,
             states,
             requires_input,
@@ -354,6 +363,9 @@ pub struct TuiState {
     /// them; not user-visible (it's a UUID).
     pub execution_id: String,
     pub procedure_id: String,
+    /// Slot keys from `RunStarted.slots`; more than one means the phase
+    /// rows are seeded per slot.
+    pub slots: Vec<String>,
     pub phases: Vec<PhaseState>,
     pub outcome: Option<String>,
     pub done: bool,
@@ -427,6 +439,7 @@ impl TuiState {
         Self {
             execution_id: String::new(),
             procedure_id: String::new(),
+            slots: Vec::new(),
             phases: Vec::new(),
             outcome: None,
             done: false,
@@ -496,24 +509,41 @@ impl TuiState {
                 procedure_id,
                 execution_id,
                 phases,
+                slots,
                 ..
             } => {
                 self.procedure_id = procedure_id;
                 self.execution_id = execution_id;
+                let multi = slots.len() > 1;
+                self.slots = slots;
+                // Multi-slot: slot-scoped stages fan out to one row per
+                // (phase, slot); shared stages keep a single slot-less
+                // row. Single-slot runs keep the flat shape (slot None).
                 self.phases = phases
                     .into_iter()
-                    .map(|p| PhaseState {
-                        key: p.key,
-                        name: p.name,
-                        status: PhaseStatus::Pending,
-                        measurements: Vec::new(),
-                        started_at: None,
+                    .flat_map(|p| {
+                        let shared = matches!(p.stage.as_str(), "setup_all" | "teardown_all");
+                        let slot_ids: Vec<Option<String>> = if multi && !shared {
+                            self.slots.iter().cloned().map(Some).collect()
+                        } else {
+                            vec![None]
+                        };
+                        slot_ids.into_iter().map(move |slot_id| PhaseState {
+                            key: p.key.clone(),
+                            name: p.name.clone(),
+                            status: PhaseStatus::Pending,
+                            measurements: Vec::new(),
+                            started_at: None,
+                            slot_id,
+                        })
                     })
                     .collect();
                 self.run_started_at = Some(std::time::Instant::now());
             }
-            StationEvent::PhaseStarted { phase_key, .. } => {
-                if let Some(p) = self.phases.iter_mut().find(|p| p.key == phase_key) {
+            StationEvent::PhaseStarted {
+                phase_key, slot_id, ..
+            } => {
+                if let Some(p) = self.find_phase_mut(&phase_key, slot_id.as_deref()) {
                     p.status = PhaseStatus::Running;
                     p.started_at = Some(std::time::Instant::now());
                 }
@@ -522,9 +552,10 @@ impl TuiState {
                 phase_key,
                 outcome,
                 measurements,
+                slot_id,
                 ..
             } => {
-                if let Some(p) = self.phases.iter_mut().find(|p| p.key == phase_key) {
+                if let Some(p) = self.find_phase_mut(&phase_key, slot_id.as_deref()) {
                     p.status = match outcome.as_str() {
                         super::super::outcomes::PASS => PhaseStatus::Pass,
                         super::super::outcomes::SKIP => PhaseStatus::Skip,
@@ -535,12 +566,16 @@ impl TuiState {
                     };
                     p.measurements = measurements;
                 }
+                // Only the prompt of this phase AND slot: a sibling slot's
+                // prompt on the same phase key survives its neighbour.
                 if let Some(ref ui) = self.active_ui {
-                    if ui.phase_key == phase_key {
+                    if ui.phase_key == phase_key && ui.slot_id.as_deref() == slot_id.as_deref() {
                         self.active_ui = None;
                     }
                 }
-                self.pending_ui.retain(|r| r.phase_key != phase_key);
+                self.pending_ui.retain(|r| {
+                    r.phase_key != phase_key || r.slot_id.as_deref() != slot_id.as_deref()
+                });
                 self.promote_pending_ui();
             }
             StationEvent::RunComplete { outcome, .. } => {
@@ -643,30 +678,48 @@ impl TuiState {
             _ => return,
         };
 
+        // Slot gate, mirroring the web reducer (`applyUiUpdateToRequest`):
+        // an update carrying a slot lands only on that slot's prompt; a
+        // slot-less update (shared stage) applies to any prompt on the
+        // phase.
+        let slot_matches = |req_slot: Option<&str>| slot_id.is_none() || req_slot == slot_id;
         if let Some(ui) = self.active_ui.as_mut() {
-            if ui.phase_key == phase_key {
+            if ui.phase_key == phase_key && slot_matches(ui.slot_id.as_deref()) {
                 if let Some(c) = ui.components.iter_mut().find(|c| c.key == id) {
                     c.value = Some(value.clone());
                 }
             }
         }
-        // KNOWN LIMITATION: TUI's `ActiveUiRequest` doesn't carry the
-        // slot_id today, so a multi-slot run fanning per-slot
-        // `ui_update`s on a shared-phase prompt has all updates land
-        // on whatever prompt happens to be active. Web reducer gates
-        // on slot match (`applyUiUpdateToRequest`); fixing here
-        // requires threading `slot_id` through `ActiveUiRequest::new`
-        // + `UiRequestData`. Documented to revisit once multi-slot
-        // CLI runs render in the TUI.
-        let _ = slot_id;
         for req in self.pending_ui.iter_mut() {
-            if req.phase_key != phase_key {
+            if req.phase_key != phase_key || !slot_matches(req.slot_id.as_deref()) {
                 continue;
             }
             if let Some(c) = req.config.components.iter_mut().find(|c| c.key == id) {
                 c.value = Some(value.clone());
             }
         }
+    }
+
+    /// The row tracking `(phase_key, slot_id)`. Exact match first; then
+    /// the phase's slot-less row (single-slot runs, shared stages hit by
+    /// a slot-tagged event); then key-only, so plan drift updates some
+    /// row rather than dropping the event.
+    fn find_phase_mut(
+        &mut self,
+        phase_key: &str,
+        slot_id: Option<&str>,
+    ) -> Option<&mut PhaseState> {
+        let idx = self
+            .phases
+            .iter()
+            .position(|p| p.key == phase_key && p.slot_id.as_deref() == slot_id)
+            .or_else(|| {
+                self.phases
+                    .iter()
+                    .position(|p| p.key == phase_key && p.slot_id.is_none())
+            })
+            .or_else(|| self.phases.iter().position(|p| p.key == phase_key))?;
+        self.phases.get_mut(idx)
     }
 
     pub fn set_ui_request(&mut self, request: &UiRequestData) {
@@ -971,6 +1024,133 @@ mod tests {
         let mut s = TuiState::new();
         s.promote_pending_ui();
         assert!(s.active_ui.is_none());
+    }
+
+    fn multi_slot_run_started() -> StationEvent {
+        StationEvent::RunStarted {
+            procedure_id: "PROC-1".into(),
+            procedure_name: "Test Procedure".into(),
+            execution_id: "exec-test".into(),
+            phases: vec![
+                PhasePlan {
+                    key: "setup".into(),
+                    name: "Setup".into(),
+                    stage: "setup_all".into(),
+                },
+                PhasePlan {
+                    key: "measure".into(),
+                    name: "Measure".into(),
+                    stage: "main".into(),
+                },
+            ],
+            slots: vec!["s1".into(), "s2".into()],
+            plugs: Vec::new(),
+            timestamp: None,
+            run_id: None,
+            deployment_id: None,
+            unit: None,
+            only_phase: None,
+        }
+    }
+
+    fn phase_complete(phase_key: &str, outcome: &str, slot_id: Option<&str>) -> StationEvent {
+        StationEvent::PhaseComplete {
+            phase_key: phase_key.into(),
+            name: phase_key.into(),
+            outcome: outcome.into(),
+            measurements: Vec::new(),
+            slot_id: slot_id.map(String::from),
+            attempt: 1,
+            started_at: None,
+            ended_at: None,
+            duration_ms: None,
+            error: None,
+            logs: Vec::new(),
+            execution_id: None,
+        }
+    }
+
+    /// setup_all → one shared row; main → one row per slot.
+    #[test]
+    fn multi_slot_seeds_per_slot_rows_and_shared_rows() {
+        let mut s = TuiState::new();
+        s.apply(multi_slot_run_started());
+        assert_eq!(s.phases.len(), 3);
+        assert_eq!(s.slots, vec!["s1".to_string(), "s2".to_string()]);
+        assert!(s
+            .phases
+            .iter()
+            .any(|p| p.key == "setup" && p.slot_id.is_none()));
+        assert!(s
+            .phases
+            .iter()
+            .any(|p| p.key == "measure" && p.slot_id.as_deref() == Some("s1")));
+        assert!(s
+            .phases
+            .iter()
+            .any(|p| p.key == "measure" && p.slot_id.as_deref() == Some("s2")));
+    }
+
+    #[test]
+    fn phase_complete_targets_matching_slot_row_only() {
+        let mut s = TuiState::new();
+        s.apply(multi_slot_run_started());
+        s.apply(phase_complete("measure", "FAIL", Some("s2")));
+        let row = |slot: &str| {
+            s.phases
+                .iter()
+                .find(|p| p.key == "measure" && p.slot_id.as_deref() == Some(slot))
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(row("s1"), PhaseStatus::Pending);
+        assert_eq!(row("s2"), PhaseStatus::Fail);
+    }
+
+    /// s2 finishing must not clear s1's active prompt on the same phase.
+    #[test]
+    fn phase_complete_clears_only_matching_slot_prompt() {
+        let mut s = TuiState::new();
+        s.apply(multi_slot_run_started());
+        let mut r1 = ui_request("r1", "measure");
+        r1.slot_id = Some("s1".into());
+        let mut r2 = ui_request("r2", "measure");
+        r2.slot_id = Some("s2".into());
+        s.set_ui_request(&r1);
+        s.set_ui_request(&r2);
+        s.apply(phase_complete("measure", "PASS", Some("s2")));
+        assert_eq!(s.active_ui.as_ref().unwrap().request_id, "r1");
+        assert!(s.pending_ui.is_empty());
+    }
+
+    #[test]
+    fn ui_update_gates_on_slot() {
+        let mut s = TuiState::new();
+        s.apply(multi_slot_run_started());
+        let mut r1 = ui_request("r1", "measure");
+        r1.slot_id = Some("s1".into());
+        r1.config.components = vec![UiComponent {
+            key: "val".into(),
+            ..UiComponent::new(ComponentType::Text)
+        }];
+        s.set_ui_request(&r1);
+        let update = |slot: &str, value: &str| StationEvent::UiUpdate {
+            phase_key: "measure".into(),
+            action: "set_value".into(),
+            data: Some(format!(r#"{{"id":"val","value":"{value}"}}"#)),
+            job_id: None,
+            slot_id: Some(slot.into()),
+            execution_id: Some("exec-test".into()),
+        };
+        // s2's update must not touch s1's prompt; s1's lands.
+        s.apply(update("s2", "leaked"));
+        assert!(s.active_ui.as_ref().unwrap().components[0].value.is_none());
+        s.apply(update("s1", "ok"));
+        assert!(matches!(
+            s.active_ui.as_ref().unwrap().components[0].value,
+            Some(ComponentValue::String(ref v)) if v == "ok"
+        ));
     }
 
     #[test]

@@ -12,6 +12,9 @@
 | `duration` | `String` | :heavy_check_mark: | ISO 8601 duration of the run (computed from started_at and ended_at). |
 | `outcome` | `LogGetOutcome` | :heavy_check_mark: | Final result of the run execution. |
 | `docstring` | `NullableField<String>` | :heavy_minus_sign: | Additional notes or documentation about this test run. |
+| `execution_id` | `Option<String>` | :heavy_minus_sign: | Groups the runs produced by one multi-slot execution, one run per slot. Null for single-slot runs. |
+| `slot_key` | `Option<String>` | :heavy_minus_sign: | Key of the fixture slot that produced this run. Null for single-slot runs. |
+| `slot_name` | `Option<String>` | :heavy_minus_sign: | Display name of the slot as declared at run time. Null when absent. |
 | `created_by_user` | `NullableField<RunListCreatedByUser>` | :heavy_minus_sign: | User whose API key was used to create this run. Only returned if `all` or `created_by` is included. |
 | `created_by_station` | `NullableField<RunListCreatedByStation>` | :heavy_minus_sign: | Station whose API key was used to create this run. Only returned if `all` or `created_by` is included. |
 | `operated_by` | `NullableField<RunListOperatedBy>` | :heavy_minus_sign: | Operator of this run: a linked organization member (id/email set) or a declared free-text name (id/email null). Only returned if `all` or `operated_by` is included. |

@@ -19,11 +19,13 @@ pub enum CliEvent {
     RunStarted {
         procedure_id: String,
         protocol_version: &'static str,
+        /// Per-start identity minted by the CLI. On a multi-slot procedure
+        /// every slot's uploaded run carries it as `execution_id`, so an
+        /// agent can find the N runs of one start on the dashboard.
+        execution_id: String,
     },
     /// Phase plan (emitted after run_started once the engine has loaded the procedure).
-    Plan {
-        phases: Vec<PhasePlanPayload>,
-    },
+    Plan { phases: Vec<PhasePlanPayload> },
     PhaseStarted {
         phase_key: String,
         /// 1-indexed attempt number for this phase. Always 1 unless the phase
@@ -78,9 +80,7 @@ pub enum CliEvent {
         unit: AgentIdentifyUnit,
     },
     /// Pre-run identify prompt timed out before the operator answered.
-    IdentifyTimeout {
-        request_id: String,
-    },
+    IdentifyTimeout { request_id: String },
     UiError {
         request_id: Option<String>,
         reason: UiErrorReason,
@@ -217,16 +217,18 @@ pub enum CliEvent {
     RunFinished {
         outcome: String,
         exit_code: i32,
+        /// Multi-slot only: each slot's own outcome (`slot_id` → outcome
+        /// string), the outcome its uploaded run carries. Absent on a
+        /// single-slot run, whose `outcome` already is the run's.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        slot_outcomes: HashMap<String, String>,
     },
     /// The procedure subprocess terminated before emitting a complete run
     /// (e.g. SyntaxError at import time, ImportError, raise at module load,
     /// mid-phase sys.exit / segfault). Followed immediately by RunFinished.
     /// `stderr_tail` contains the last ~4KB of the subprocess's stderr so
     /// agents can diagnose without redirecting stderr themselves.
-    RunCrashed {
-        exit_code: i32,
-        stderr_tail: String,
-    },
+    RunCrashed { exit_code: i32, stderr_tail: String },
     /// Reply to `get_state`. Enumerates every phase the CLI has seen so
     /// far and the outcome if finished. Agents use this to recover after
     /// a parse glitch or to sanity-check their own event parsing.
@@ -263,10 +265,7 @@ pub enum CliEvent {
     /// Upload attempt starting. Mirrors `StationEvent::RunUploadStarted`
     /// for agent-mode debuggability — without it the CLI's upload path
     /// is opaque from the JSON stream.
-    RunUploadStarted {
-        queue_id: String,
-        attempt: u32,
-    },
+    RunUploadStarted { queue_id: String, attempt: u32 },
     /// Upload finished successfully. Surfaces the `run_id` the API
     /// minted plus the dashboard URL so agents can hyperlink.
     RunUploadSucceeded {
@@ -289,10 +288,7 @@ pub enum CliEvent {
         next_retry_at: Option<String>,
     },
     /// Entry removed from the queue (operator dropped or TTL expired).
-    RunUploadDropped {
-        queue_id: String,
-        reason: String,
-    },
+    RunUploadDropped { queue_id: String, reason: String },
     /// Non-fatal CLI-side anomaly the agent should surface to its user.
     /// Covers gaps the protocol can't express as a typed event — e.g. an
     /// unknown `type` from the python connector (Rust missing a variant),

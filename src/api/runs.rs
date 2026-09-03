@@ -44,6 +44,15 @@ pub struct CreateArgs {
     /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
     #[arg(long)]
     pub client_run_ref: Option<String>,
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Minted by the client once per start and shared by every slot run of that start. Omit for single-slot runs.
+    #[arg(long)]
+    pub execution_id: Option<String>,
+    /// Key of the fixture slot that produced this run, from the procedure execution.slots config. Requires execution_id. One run per slot per execution.
+    #[arg(long)]
+    pub slot_key: Option<String>,
+    /// Display name of the slot as declared at run time. Requires slot_key. Stored as-is so later fixture renames do not rewrite old runs.
+    #[arg(long)]
+    pub slot_name: Option<String>,
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[arg(long)]
     pub procedure_version: Option<String>,
@@ -113,6 +122,12 @@ pub struct LsArgs {
     /// deployment_ids
     #[arg(long, num_args = 1..)]
     pub deployment_ids: Option<Vec<String>>,
+    /// execution_ids
+    #[arg(long, num_args = 1..)]
+    pub execution_ids: Option<Vec<String>>,
+    /// slot_keys
+    #[arg(long, num_args = 1..)]
+    pub slot_keys: Option<Vec<String>>,
     /// environments
     #[arg(long, num_args = 1..)]
     pub environments: Option<Vec<String>>,
@@ -288,6 +303,15 @@ async fn execute_create(client: &TofuPilot, args: CreateArgs, json_mode: bool) -
     if let Some(ref v) = args.client_run_ref {
         builder = builder.client_run_ref(v);
     }
+    if let Some(ref v) = args.execution_id {
+        builder = builder.execution_id(v);
+    }
+    if let Some(ref v) = args.slot_key {
+        builder = builder.slot_key(v);
+    }
+    if let Some(ref v) = args.slot_name {
+        builder = builder.slot_name(v);
+    }
     if let Some(ref v) = args.procedure_version {
         builder = builder.procedure_version(v);
     }
@@ -429,6 +453,12 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
     }
     if let Some(ref v) = args.deployment_ids {
         builder = builder.deployment_ids(v.clone());
+    }
+    if let Some(ref v) = args.execution_ids {
+        builder = builder.execution_ids(v.clone());
+    }
+    if let Some(ref v) = args.slot_keys {
+        builder = builder.slot_keys(v.clone());
     }
     if let Some(ref v) = args.environments {
         let mut parsed: Vec<Environment> = Vec::new();

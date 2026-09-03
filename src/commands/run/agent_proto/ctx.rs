@@ -97,6 +97,10 @@ pub struct AgentProtoCtx {
     /// stdin reader consults this so `get_state` / `abort_run` can
     /// respond meaningfully before the run has booted or after it ends.
     lifecycle: Arc<RwLock<RunLifecycle>>,
+    /// Per-slot outcomes recorded by the engine sink on `Complete`, read
+    /// back by `run_finished`. Sync Mutex for the same reason as
+    /// `history`. Empty on single-slot runs.
+    pub slot_outcomes: Arc<StdMutex<std::collections::HashMap<String, String>>>,
 }
 
 impl AgentProtoCtx {
@@ -115,6 +119,7 @@ impl AgentProtoCtx {
             history: Arc::new(StdMutex::new(PhaseHistory::default())),
             abort_tx: Arc::new(RwLock::new(Some(abort_tx))),
             lifecycle: Arc::new(RwLock::new(RunLifecycle::NotStarted)),
+            slot_outcomes: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         }
     }
 

@@ -121,6 +121,71 @@ pub trait IdentifyHost: Send + Sync {
     }
 }
 
+/// The slot a unit is identified for. `{slot}` and `{slot_name}` in any
+/// `default_value` of the unit block (and of the root `operated_by:`)
+/// expand to the slot key and its display name, so one `unit:` block
+/// serves every slot of a fixture and `auto_identify: true` works
+/// headless on a multi-slot station:
+///
+/// ```yaml
+/// unit:
+///   auto_identify: true
+///   serial_number:
+///     default_value: "BURNIN-{slot}"
+/// ```
+///
+/// `{slot_name}` falls back to the key when the slot has no name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotRef<'a> {
+    pub key: &'a str,
+    pub name: Option<&'a str>,
+}
+
+impl<'a> SlotRef<'a> {
+    pub fn new(key: &'a str, name: Option<&'a str>) -> Self {
+        Self { key, name }
+    }
+
+    pub fn expand(&self, value: &str) -> String {
+        value
+            .replace("{slot}", self.key)
+            .replace("{slot_name}", self.name.unwrap_or(self.key))
+    }
+
+    fn expand_field(&self, field: &mut crate::procedure::UnitFieldConfig) {
+        if let Some(v) = field.default_value.as_mut() {
+            *v = self.expand(v);
+        }
+    }
+
+    /// The unit block with every `default_value` expanded for this slot.
+    pub fn expand_config(&self, cfg: &UnitConfig) -> UnitConfig {
+        let mut out = cfg.clone();
+        for field in [
+            &mut out.serial_number,
+            &mut out.part_number,
+            &mut out.revision_number,
+            &mut out.batch_number,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.expand_field(field);
+        }
+        if let Some(sub) = out.sub_units.as_mut() {
+            for item in sub.0.iter_mut().filter_map(|i| i.serial_number.as_mut()) {
+                self.expand_field(item);
+            }
+        }
+        if let Some(md) = out.metadata.as_mut() {
+            for field in md.values_mut() {
+                self.expand_field(field);
+            }
+        }
+        out
+    }
+}
+
 /// Resolve a unit identity for one slot.
 ///
 /// * `auto_identify: true` — short-circuits to `default_value` fields,
@@ -135,9 +200,27 @@ pub async fn identify(
     // Procedure-root `operated_by:` — run attribution prompted on the
     // same identification screen; None when the YAML omits it.
     operated_by: Option<&crate::procedure::UnitFieldConfig>,
-    slot_id: Option<&str>,
+    // The slot this unit is identified for: stamps `PromptRequest.slot_id`
+    // and expands `{slot}` / `{slot_name}` in the defaults. None on a
+    // single-slot run or a connector framework.
+    slot: Option<SlotRef<'_>>,
     host: &dyn IdentifyHost,
 ) -> Result<UnitInfo, IdentifyError> {
+    let expanded_cfg;
+    let expanded_operated_by;
+    let (cfg, operated_by) = match slot {
+        Some(slot) => {
+            expanded_cfg = slot.expand_config(cfg);
+            expanded_operated_by = operated_by.cloned().map(|mut f| {
+                slot.expand_field(&mut f);
+                f
+            });
+            (&expanded_cfg, expanded_operated_by.as_ref())
+        }
+        None => (cfg, operated_by),
+    };
+    let slot_id = slot.map(|s| s.key);
+
     if cfg.auto_identify {
         return resolve::auto_identify_unit_info(cfg, operated_by)
             .map_err(IdentifyError::Validation);
@@ -247,7 +330,9 @@ mod tests {
             metadata: None,
         };
         let host = FakeHost::ok(HashMap::new());
-        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some(SlotRef::new("default", None)), &host)
+            .await
+            .unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         // Host was never called.
         assert!(host.captured.lock().unwrap().is_none());
@@ -279,7 +364,7 @@ mod tests {
         let host = NoUiHost {
             captured: Mutex::new(None),
         };
-        let err = identify(&cfg, None, Some("default"), &host)
+        let err = identify(&cfg, None, Some(SlotRef::new("default", None)), &host)
             .await
             .unwrap_err();
         assert!(matches!(err, IdentifyError::NoUi(_)));
@@ -309,7 +394,9 @@ mod tests {
         let host = NoUiHost {
             captured: Mutex::new(None),
         };
-        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some(SlotRef::new("default", None)), &host)
+            .await
+            .unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-AUTO"));
         assert!(host.captured.lock().unwrap().is_none());
     }
@@ -322,7 +409,9 @@ mod tests {
         reply.insert("part_number".to_string(), "PN-1".to_string());
         let host = FakeHost::ok(reply);
 
-        let info = identify(&cfg, None, Some("default"), &host).await.unwrap();
+        let info = identify(&cfg, None, Some(SlotRef::new("default", None)), &host)
+            .await
+            .unwrap();
         assert_eq!(info.serial_number.as_deref(), Some("SN-1"));
         assert_eq!(info.part_number.as_deref(), Some("PN-1"));
 
@@ -354,5 +443,83 @@ mod tests {
             IdentifyError::Validation(_) => {}
             other => panic!("expected Validation, got {other}"),
         }
+    }
+
+    fn cfg_with_slot_defaults() -> UnitConfig {
+        UnitConfig {
+            auto_identify: true,
+            serial_number: Some(UnitFieldConfig {
+                default_value: Some("BURNIN-{slot}".to_string()),
+                ..UnitFieldConfig::default()
+            }),
+            part_number: Some(UnitFieldConfig {
+                default_value: Some("PCB".to_string()),
+                ..UnitFieldConfig::default()
+            }),
+            batch_number: Some(UnitFieldConfig {
+                default_value: Some("{slot_name}".to_string()),
+                ..UnitFieldConfig::default()
+            }),
+            ..UnitConfig::default()
+        }
+    }
+
+    /// `{slot}` / `{slot_name}` expand per slot on the auto-identify path,
+    /// which is what lets an 80-slot burn-in rack start headless.
+    #[tokio::test]
+    async fn auto_identify_expands_slot_placeholders() {
+        let cfg = cfg_with_slot_defaults();
+        let host = FakeHost::ok(HashMap::new());
+        let info = identify(&cfg, None, Some(SlotRef::new("s03", Some("Nest 3"))), &host)
+            .await
+            .unwrap();
+        assert_eq!(info.serial_number.as_deref(), Some("BURNIN-s03"));
+        assert_eq!(info.batch_number.as_deref(), Some("Nest 3"));
+        assert!(
+            host.captured.lock().unwrap().is_none(),
+            "no prompt on auto_identify"
+        );
+    }
+
+    /// Without a name `{slot_name}` reads the key; without a slot the
+    /// placeholders are left alone (single-slot runs never see them).
+    #[tokio::test]
+    async fn slot_name_falls_back_to_key_and_no_slot_leaves_text() {
+        let cfg = cfg_with_slot_defaults();
+        let host = FakeHost::ok(HashMap::new());
+        let info = identify(&cfg, None, Some(SlotRef::new("s03", None)), &host)
+            .await
+            .unwrap();
+        assert_eq!(info.batch_number.as_deref(), Some("s03"));
+        let info = identify(&cfg, None, None, &host).await.unwrap();
+        assert_eq!(info.serial_number.as_deref(), Some("BURNIN-{slot}"));
+    }
+
+    /// The prompt path expands the defaults the operator sees too.
+    #[tokio::test]
+    async fn prompt_defaults_are_expanded_for_the_slot() {
+        let mut cfg = cfg_with_slot_defaults();
+        cfg.auto_identify = false;
+        let mut reply = HashMap::new();
+        reply.insert("serial_number".to_string(), "SN-1".to_string());
+        reply.insert("part_number".to_string(), "PCB".to_string());
+        let host = FakeHost::ok(reply);
+        identify(&cfg, None, Some(SlotRef::new("s07", None)), &host)
+            .await
+            .unwrap();
+        let req = host.captured.lock().unwrap().clone().unwrap();
+        assert_eq!(req.slot_id.as_deref(), Some("s07"));
+        let serial = req
+            .components
+            .iter()
+            .find(|c| c.key == "serial_number")
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", serial.default_value),
+            format!(
+                "{:?}",
+                Some(crate::ui::ComponentValue::String("BURNIN-s07".to_string()))
+            )
+        );
     }
 }

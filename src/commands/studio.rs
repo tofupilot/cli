@@ -642,7 +642,7 @@ async fn handle_upload_run(
             None
         }
     };
-    let Some((_, mut queued)) = taken else {
+    let Some((_, queued_runs)) = taken else {
         crate::log::warn(&format!(
             "studio: no retained run for execution {execution_id}"
         ));
@@ -660,16 +660,17 @@ async fn handle_upload_run(
     // other procedure-derived field and a studio run has none, while
     // `procedure_version` came from the procedure's own file and stays
     // as-is.
-    queued.request.procedure_id = procedure_id.clone();
-
-    crate::commands::run::spawn_upload(
-        &creds,
-        &procedure_id,
-        queued,
-        false,
-        None,
-        Some(upload_bus.clone()),
-    );
+    for mut queued in queued_runs {
+        queued.request.procedure_id = procedure_id.clone();
+        crate::commands::run::spawn_upload(
+            &creds,
+            &procedure_id,
+            queued,
+            false,
+            None,
+            Some(upload_bus.clone()),
+        );
+    }
 }
 
 /// Which project a bare `tofupilot studio` opens, in priority order:

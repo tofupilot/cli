@@ -1,0 +1,51 @@
+# e2e fixture: four slots on two workers, headless identify through
+# `{slot}` placeholders. One start must yield four slot outcomes on
+# `run_finished` and one uploaded run per slot.
+name: Multi-slot smoke
+version: 1.0.0
+description: Four-slot fixture with shared setup and teardown
+
+execution:
+  strategy: phase_first
+  workers: 2
+  slots:
+    - key: s1
+      name: Nest 1
+    - key: s2
+      name: Nest 2
+    - key: s3
+      name: Nest 3
+    - key: s4
+      name: Nest 4
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: "SMOKE-{slot}"
+  part_number:
+    default_value: "PCB-SMOKE"
+  batch_number:
+    default_value: "{slot_name}"
+
+setup:
+  - key: power_on
+    name: Power on rack
+    scope: execution
+    python: phases.rack:power_on
+  - key: prep
+    name: Prepare nest
+    python: phases.nest:prep
+
+main:
+  - key: measure
+    name: Measure
+    python: phases.nest:measure
+
+teardown:
+  - key: release
+    name: Release nest
+    python: phases.nest:release
+  - key: power_off
+    name: Power off rack
+    scope: execution
+    python: phases.rack:power_off

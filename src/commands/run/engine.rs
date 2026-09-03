@@ -110,44 +110,77 @@ struct CompletedPhase {
     measurements: Vec<execution_engine::measurements::Measurement>,
     logs: Vec<execution_engine::log::LogEntry>,
     error: Option<String>,
+    /// Slot this phase ran for. None for shared stages (setup / teardown
+    /// at execution scope), which belong to every slot's run.
+    slot_id: Option<String>,
 }
 
+/// Resolved unit identity of one slot, keyed by slot in `RunData.units`.
+#[derive(Default, Clone, Debug)]
+struct UnitSnapshot {
+    serial: Option<String>,
+    part: Option<String>,
+    revision: Option<String>,
+    batch: Option<String>,
+    /// Operated-by resolved through the unit pipeline (identify prompt,
+    /// `unit.operated_by` binding, Python write). Takes precedence over
+    /// the session email forwarded on the WS run command when building
+    /// the upload request.
+    operated_by: Option<String>,
+    sub_units: Option<Vec<String>>,
+}
+
+/// One metadata contribution: the slot it belongs to (None = shared,
+/// applies to every slot's run), the source (identify step or phase
+/// key), and the map. A retry REPLACES its (slot, source) entry.
+type MetadataSource = (
+    Option<String>,
+    String,
+    std::collections::HashMap<String, serde_json::Value>,
+);
+
 /// Collected run-level data from execution events.
+///
+/// One accumulator for the whole execution: phases, metadata and
+/// attachments are tagged with the slot that produced them (None =
+/// shared stage) and `build_run_request` projects one upload per slot
+/// out of it. A single-slot procedure has exactly one slot, so the
+/// projection is the identity.
 struct RunData {
     phases: Vec<CompletedPhase>,
     run_outcome: Option<Outcome>,
+    /// Per-slot outcomes from `ExecutionEvent::Complete`, each slot
+    /// aggregated by the engine from its own phases plus the shared
+    /// stages. Empty on crash paths; `build_run_request` falls back to
+    /// `run_outcome`.
+    slot_outcomes: std::collections::HashMap<String, Outcome>,
     run_id: Option<String>,
     start_time: Option<chrono::DateTime<chrono::Utc>>,
     end_time: Option<chrono::DateTime<chrono::Utc>>,
-    unit_serial: Option<String>,
-    unit_part: Option<String>,
-    unit_revision: Option<String>,
-    unit_batch: Option<String>,
-    /// Operated-by email resolved through the unit pipeline (identify
-    /// prompt, `unit.operated_by` binding, Python write). Takes
-    /// precedence over the session email forwarded on the WS run
-    /// command when building the upload request.
-    unit_operated_by: Option<String>,
-    unit_sub_units: Option<Vec<String>>,
-    /// Run-level metadata contributions in completion order, one entry
-    /// per source (identify step or phase key). A retry REPLACES its
-    /// phase's whole entry — so keys a failed attempt wrote but the
-    /// passing retry didn't rewrite don't leak into the upload. The
-    /// upload map is folded from these in order (later sources win
-    /// per key).
-    run_metadata_sources: Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
+    /// Resolved unit per slot key.
+    units: std::collections::HashMap<String, UnitSnapshot>,
+    /// Run-level metadata contributions in completion order. A retry
+    /// REPLACES its phase's whole entry — so keys a failed attempt wrote
+    /// but the passing retry didn't rewrite don't leak into the upload.
+    /// A slot's upload map is folded from the entries whose slot matches
+    /// or is None, in order (later sources win per key).
+    run_metadata_sources: Vec<MetadataSource>,
     /// Unit-level metadata contributions, same replace-per-source
     /// semantics. The operator identify-form entry lands first (pre-run)
     /// so phase writes override it per key.
-    unit_metadata_sources: Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
+    unit_metadata_sources: Vec<MetadataSource>,
     /// Attachments written to the report dir during the run, accumulated
-    /// for the upload queue. The native engine path emits AttachmentAdded
-    /// live but, unlike the framework connectors, didn't collect them for
+    /// for the upload queue and tagged with the producing slot (None =
+    /// shared stage). The native engine path emits AttachmentAdded live
+    /// but, unlike the framework connectors, didn't collect them for
     /// upload — so a station `attach.data` image never reached the cloud
     /// and never showed on the remote dashboard. Collected here (only when
     /// the event carries an on-disk path) so the upload queue ships them
     /// and emits AttachmentUploaded.
-    attachments: Vec<crate::commands::run::queue::QueuedAttachment>,
+    attachments: Vec<(
+        Option<String>,
+        crate::commands::run::queue::QueuedAttachment,
+    )>,
 }
 
 /// EventSink that projects to StationEvents for TUI/WebSocket and accumulates data for upload.
@@ -175,8 +208,9 @@ struct CliEventSink {
     /// `ExecutionEvent::UnitIdentified` arm and read synchronously
     /// when emitting `StationEvent::RunStarted` so operator-UI sees
     /// the unit on `auto_identify: true` runs (no `UiRequest`/
-    /// `UiResponse` cycle to capture it from). Single-slot today;
-    /// the last write wins (same as `RunData.unit_serial`).
+    /// `UiResponse` cycle to capture it from). One cell for the whole
+    /// execution: on a multi-slot run the last identified slot wins,
+    /// and consumers read each slot's unit off `identify_resolved`.
     resolved_unit: Arc<std::sync::Mutex<Option<station_protocol::UnitInfo>>>,
     /// Tickets of the deferred `RunData` writes spawned by `emit()`
     /// (phase accumulation, stats, outcome, attachments, mid-run unit
@@ -196,6 +230,10 @@ struct CliEventSink {
     /// on `RunStarted` so "Run again" can repeat the partial run
     /// instead of silently escalating to the whole procedure.
     only_phase: Option<String>,
+    /// Slot keys the procedure was submitted with, in declaration order.
+    /// A mid-run unit update from a shared stage (no slot) applies to
+    /// every one of them.
+    slots: Vec<String>,
     /// Flipped on the first post-submit sign of life from the engine
     /// (job dispatched, plug status, UI request, log line…). The
     /// dispatch-stall watchdog in `run_yaml_procedure` races this flag:
@@ -216,6 +254,7 @@ impl CliEventSink {
         execution_id: String,
         deployment_id: Option<String>,
         only_phase: Option<String>,
+        slots: Vec<String>,
     ) -> Self {
         let router = EventRouter::new(tx.clone(), agent.clone(), execution_id.clone());
         Self {
@@ -228,18 +267,15 @@ impl CliEventSink {
             execution_id,
             deployment_id,
             only_phase,
+            slots,
             data: Arc::new(Mutex::new(RunData {
                 phases: Vec::new(),
                 run_outcome: None,
+                slot_outcomes: std::collections::HashMap::new(),
                 run_id: None,
                 start_time: None,
                 end_time: None,
-                unit_serial: None,
-                unit_part: None,
-                unit_revision: None,
-                unit_batch: None,
-                unit_operated_by: None,
-                unit_sub_units: None,
+                units: std::collections::HashMap::new(),
                 run_metadata_sources: Vec::new(),
                 unit_metadata_sources: Vec::new(),
                 attachments: Vec::new(),
@@ -470,20 +506,33 @@ impl EventSink for CliEventSink {
                     measurements: measurements.clone(),
                     logs: logs.clone(),
                     error: error.clone(),
+                    slot_id: slot_id.clone(),
                 };
                 let data = self.data.clone();
                 let run_md = run_metadata.clone();
                 let unit_md = unit_metadata.clone();
                 let source_key = phase_key.clone();
+                let source_slot = slot_id.clone();
                 self.spawn_run_data_write(async move {
                     // Same lock acquisition keeps phase data and metadata
-                    // atomic per event. Each phase key is one metadata
-                    // source; a retry replaces the whole entry, so keys a
-                    // failed attempt wrote don't leak into a passing run.
+                    // atomic per event. Each (slot, phase key) is one
+                    // metadata source; a retry replaces the whole entry,
+                    // so keys a failed attempt wrote don't leak into a
+                    // passing run.
                     let mut d = data.lock().await;
                     d.phases.push(phase);
-                    upsert_metadata_source(&mut d.run_metadata_sources, &source_key, run_md);
-                    upsert_metadata_source(&mut d.unit_metadata_sources, &source_key, unit_md);
+                    upsert_metadata_source(
+                        &mut d.run_metadata_sources,
+                        &source_slot,
+                        &source_key,
+                        run_md,
+                    );
+                    upsert_metadata_source(
+                        &mut d.unit_metadata_sources,
+                        &source_slot,
+                        &source_key,
+                        unit_md,
+                    );
                 });
             }
 
@@ -504,6 +553,7 @@ impl EventSink for CliEventSink {
                 run_outcome,
                 run_id,
                 end_time,
+                slot_outcomes,
                 ..
             } => {
                 let outcome_str = run_outcome
@@ -517,13 +567,33 @@ impl EventSink for CliEventSink {
                     run_id.clone(),
                 );
 
+                // Multi-slot: hand the agent protocol each slot's outcome
+                // for `run_finished`. Single slot keeps the wire as it was.
+                if slot_outcomes.len() > 1 {
+                    if let Some(ref agent) = self.agent {
+                        if let Ok(mut map) = agent.slot_outcomes.lock() {
+                            *map = slot_outcomes
+                                .iter()
+                                .map(|(slot, o)| {
+                                    (
+                                        slot.clone(),
+                                        super::outcomes::from_execution_outcome(o).to_string(),
+                                    )
+                                })
+                                .collect();
+                        }
+                    }
+                }
+
                 let data = self.data.clone();
                 let ro = *run_outcome;
+                let so = slot_outcomes.clone();
                 let ri = run_id.clone();
                 let et = *end_time;
                 self.spawn_run_data_write(async move {
                     let mut d = data.lock().await;
                     d.run_outcome = ro;
+                    d.slot_outcomes = so;
                     d.run_id = ri;
                     d.end_time = et;
                 });
@@ -819,6 +889,7 @@ impl EventSink for CliEventSink {
                 // the push completes well before the post-run queue build.
                 if let Some(stored) = path.clone() {
                     let data = self.data.clone();
+                    let slot = slot_id.clone();
                     let queued_attachment = crate::commands::run::queue::QueuedAttachment {
                         name: name.clone(),
                         path: stored,
@@ -826,7 +897,10 @@ impl EventSink for CliEventSink {
                         phase_key: phase_key.clone(),
                     };
                     self.spawn_run_data_write(async move {
-                        data.lock().await.attachments.push(queued_attachment);
+                        data.lock()
+                            .await
+                            .attachments
+                            .push((slot, queued_attachment));
                     });
                 }
             }
@@ -848,8 +922,20 @@ impl EventSink for CliEventSink {
                 {
                     let data = self.data.clone();
                     let info = unit_info.clone();
+                    let slot = slot_id.clone();
+                    let all_slots = self.slots.clone();
                     self.spawn_run_data_write(async move {
-                        apply_unit_info_to_run_data(&data, &info).await;
+                        // A slot's own update lands on that slot; a
+                        // shared stage writing unit fields (no slot)
+                        // updates every slot.
+                        match slot {
+                            Some(slot) => apply_unit_info_to_run_data(&data, &slot, &info).await,
+                            None => {
+                                for slot in &all_slots {
+                                    apply_unit_info_to_run_data(&data, slot, &info).await;
+                                }
+                            }
+                        }
                     });
                 }
                 let wire_unit = unit_info_to_wire(unit_info);
@@ -1088,27 +1174,40 @@ fn engine_outcome_to_phase(outcome: &Outcome) -> RunGetPhasesOutcome {
 /// entry stays first (phases override it) and a retried phase keeps its
 /// completion-order slot while dropping its failed attempt's keys.
 fn upsert_metadata_source(
-    sources: &mut Vec<(String, std::collections::HashMap<String, serde_json::Value>)>,
+    sources: &mut Vec<MetadataSource>,
+    slot: &Option<String>,
     source: &str,
     map: std::collections::HashMap<String, serde_json::Value>,
 ) {
-    if let Some(entry) = sources.iter_mut().find(|(k, _)| k == source) {
-        entry.1 = map;
+    if let Some(entry) = sources
+        .iter_mut()
+        .find(|(s, k, _)| s == slot && k == source)
+    {
+        entry.2 = map;
     } else if !map.is_empty() {
-        sources.push((source.to_string(), map));
+        sources.push((slot.clone(), source.to_string(), map));
     }
 }
 
-/// Fold metadata sources into the upload map, in order (later per-key
-/// writes win).
+/// Fold the metadata sources relevant to `slot` into its upload map, in
+/// order (later per-key writes win). Shared sources (slot None) apply to
+/// every slot's run.
 fn fold_metadata_sources(
-    sources: &[(String, std::collections::HashMap<String, serde_json::Value>)],
+    sources: &[MetadataSource],
+    slot: &str,
 ) -> std::collections::HashMap<String, serde_json::Value> {
     let mut merged = std::collections::HashMap::new();
-    for (_, map) in sources {
-        merged.extend(map.clone());
+    for (source_slot, _, map) in sources {
+        if source_slot.is_none() || source_slot.as_deref() == Some(slot) {
+            merged.extend(map.clone());
+        }
     }
     merged
+}
+
+/// Whether a slot-tagged item belongs in `slot`'s run: its own, or shared.
+fn belongs_to_slot(item_slot: &Option<String>, slot: &str) -> bool {
+    item_slot.is_none() || item_slot.as_deref() == Some(slot)
 }
 
 /// Cap a merged metadata map at the server's 50-keys-per-entity limit.
@@ -1358,8 +1457,18 @@ fn build_measurement(
     b.build().map_err(|e| e.to_string().into())
 }
 
+/// The grouping fields stamped on a multi-slot upload:
+/// `(execution_id, slot_key, slot_name)`. None on a single-slot run,
+/// which keeps its wire shape exactly as before multi-slot existed.
+type SlotStamp<'a> = Option<(&'a str, &'a str, Option<&'a str>)>;
+
+/// One slot's `runs.create` request, projected out of the shared
+/// accumulator: the slot's own phases plus the shared stages, its unit,
+/// its metadata, and the outcome the engine computed for it.
 fn build_run_request(
     data: &RunData,
+    slot: &str,
+    stamp: SlotStamp<'_>,
     procedure_id: &str,
     procedure_dir: &Path,
     // The procedure file actually being run. Passed explicitly rather
@@ -1368,17 +1477,51 @@ fn build_run_request(
     procedure_yaml: &Path,
     operated_by: Option<&str>,
 ) -> crate::error::CliResult<RunCreateRequest> {
-    let outcome = data
-        .run_outcome
-        .as_ref()
+    // Multi-slot: the engine's per-slot outcome (own phases plus shared
+    // stages, under the slot's own stop state), never the run rollup that
+    // would mark every slot FAIL for one failing unit. Single slot keeps
+    // the run outcome it always uploaded. Crash paths have neither → Error.
+    let outcome = stamp
+        .and_then(|_| data.slot_outcomes.get(slot))
+        .or(data.run_outcome.as_ref())
         .map(engine_outcome_to_sdk)
         .unwrap_or(RunGetOutcome::Error);
 
-    let started_at = data.start_time.unwrap_or_else(chrono::Utc::now);
-    let ended_at = data.end_time.unwrap_or_else(chrono::Utc::now);
-
-    let phases: Vec<RunCreatePhases> = data
+    // A slot's run spans the slot's OWN phases, not the whole execution:
+    // a slot done at t+10s of a 5-minute execution must not upload as a
+    // 5-minute run, and the shared teardown that waits for the last slot
+    // must not stretch every slot's duration to it. Shared stages are
+    // still listed in `phases`. Falls back to the shared stages' window
+    // when the slot ran nothing of its own, then to the execution window.
+    let exec_started = data.start_time.unwrap_or_else(chrono::Utc::now);
+    let exec_ended = data.end_time.unwrap_or_else(chrono::Utc::now);
+    let slot_phases: Vec<&CompletedPhase> = data
         .phases
+        .iter()
+        .filter(|p| belongs_to_slot(&p.slot_id, slot))
+        .collect();
+    let window = |own_only: bool| {
+        let times = slot_phases
+            .iter()
+            .filter(|p| !own_only || p.slot_id.is_some())
+            .filter_map(|p| {
+                Some((
+                    super::time_fmt::parse_rfc3339(&p.started_at)?,
+                    super::time_fmt::parse_rfc3339(&p.completed_at)?,
+                ))
+            });
+        let (mut start, mut end) = (None, None);
+        for (s, e) in times {
+            start = Some(start.map_or(s, |v: chrono::DateTime<chrono::Utc>| v.min(s)));
+            end = Some(end.map_or(e, |v: chrono::DateTime<chrono::Utc>| v.max(e)));
+        }
+        start.zip(end)
+    };
+    let (started_at, ended_at) = window(true)
+        .or_else(|| window(false))
+        .unwrap_or((exec_started, exec_ended));
+
+    let phases: Vec<RunCreatePhases> = slot_phases
         .iter()
         .filter_map(|p| {
             let measurements: Vec<RunCreateMeasurements> = p
@@ -1408,9 +1551,9 @@ fn build_run_request(
         })
         .collect();
 
-    // Collect logs from all phases into run-level logs
-    let logs: Vec<RunCreateLogs> = data
-        .phases
+    // Collect logs from the slot's phases (shared stages included) into
+    // run-level logs
+    let logs: Vec<RunCreateLogs> = slot_phases
         .iter()
         .flat_map(|p| {
             p.logs.iter().map(|l| {
@@ -1431,10 +1574,8 @@ fn build_run_request(
         })
         .collect();
 
-    let serial = data
-        .unit_serial
-        .clone()
-        .unwrap_or_else(|| "UNKNOWN".to_string());
+    let unit = data.units.get(slot).cloned().unwrap_or_default();
+    let serial = unit.serial.clone().unwrap_or_else(|| "UNKNOWN".to_string());
 
     let mut b = RunCreateRequest::builder()
         .outcome(outcome)
@@ -1448,17 +1589,24 @@ fn build_run_request(
         b = b.logs(logs);
     }
 
-    if let Some(ref pn) = data.unit_part {
+    if let Some(ref pn) = unit.part {
         b = b.part_number(pn);
     }
-    if let Some(ref rn) = data.unit_revision {
+    if let Some(ref rn) = unit.revision {
         b = b.revision_number(rn);
     }
-    if let Some(ref bn) = data.unit_batch {
+    if let Some(ref bn) = unit.batch {
         b = b.batch_number(bn);
     }
-    if let Some(ref su) = data.unit_sub_units {
+    if let Some(ref su) = unit.sub_units {
         b = b.sub_units(su.clone());
+    }
+
+    if let Some((execution_id, slot_key, slot_name)) = stamp {
+        b = b.execution_id(execution_id).slot_key(slot_key);
+        if let Some(name) = slot_name {
+            b = b.slot_name(name);
+        }
     }
 
     // Empty maps must not call the builders — the SDK would serialize
@@ -1468,14 +1616,14 @@ fn build_run_request(
     // oversized map doesn't reject the whole run upload.
     let run_md = cap_metadata_keys(
         "run metadata",
-        &fold_metadata_sources(&data.run_metadata_sources),
+        &fold_metadata_sources(&data.run_metadata_sources, slot),
     );
     if !run_md.is_empty() {
         b = b.metadata(run_md);
     }
     let unit_md = cap_metadata_keys(
         "unit metadata",
-        &fold_metadata_sources(&data.unit_metadata_sources),
+        &fold_metadata_sources(&data.unit_metadata_sources, slot),
     );
     if !unit_md.is_empty() {
         b = b.unit_metadata(unit_md);
@@ -1499,8 +1647,8 @@ fn build_run_request(
     // The blank filter drives the FALLBACK (an emptied prompt must fall
     // through to the session email); clamp_operated_by is the boundary guard
     // on whatever wins. See its doc comment for why over-length is clamped.
-    let candidate = data
-        .unit_operated_by
+    let candidate = unit
+        .operated_by
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .or(operated_by);
@@ -1571,28 +1719,30 @@ fn wire_unit_to_engine(info: station_protocol::UnitInfo) -> execution_engine::un
 /// across runs / hosts / hashmap implementations.
 async fn apply_unit_info_to_run_data(
     run_data: &Arc<Mutex<RunData>>,
+    slot_id: &str,
     info: &execution_engine::unit::UnitInfo,
 ) {
     let mut d = run_data.lock().await;
+    let unit = d.units.entry(slot_id.to_string()).or_default();
     if let Some(ref sn) = info.serial_number {
-        d.unit_serial = Some(sn.clone());
+        unit.serial = Some(sn.clone());
     }
     if let Some(ref pn) = info.part_number {
-        d.unit_part = Some(pn.clone());
+        unit.part = Some(pn.clone());
     }
     if let Some(ref rn) = info.revision_number {
-        d.unit_revision = Some(rn.clone());
+        unit.revision = Some(rn.clone());
     }
     if let Some(ref bn) = info.batch_number {
-        d.unit_batch = Some(bn.clone());
+        unit.batch = Some(bn.clone());
     }
     if let Some(ref ob) = info.operated_by {
-        d.unit_operated_by = Some(ob.clone());
+        unit.operated_by = Some(ob.clone());
     }
     if let Some(ref sub) = info.sub_units {
         let mut entries: Vec<(&String, &String)> = sub.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        d.unit_sub_units = Some(entries.into_iter().map(|(_, v)| v.clone()).collect());
+        unit.sub_units = Some(entries.into_iter().map(|(_, v)| v.clone()).collect());
     }
     // Operator-entered identify-form metadata lands pre-run as the
     // first source; Python `unit.metadata[...]` writes arrive later via
@@ -1602,11 +1752,62 @@ async fn apply_unit_info_to_run_data(
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect();
-        upsert_metadata_source(&mut d.unit_metadata_sources, "identify_unit", map);
+        upsert_metadata_source(
+            &mut d.unit_metadata_sources,
+            &Some(slot_id.to_string()),
+            "identify_unit",
+            map,
+        );
     }
 }
 
-/// Run a YAML procedure and return a QueuedRun for upload.
+/// The attachments of one slot's run: its own, plus the shared stages'.
+/// The upload queue deletes a file once uploaded, so a shared attachment
+/// referenced by several runs would vanish under the second one; every
+/// slot after the first gets its own copy (a hard link where the
+/// filesystem allows it) next to the original.
+fn attachments_for_slot(
+    all: &[(
+        Option<String>,
+        crate::commands::run::queue::QueuedAttachment,
+    )],
+    slot: &str,
+    slot_index: usize,
+) -> Vec<crate::commands::run::queue::QueuedAttachment> {
+    all.iter()
+        .filter(|(s, _)| belongs_to_slot(s, slot))
+        .filter_map(|(s, att)| {
+            if s.is_some() || slot_index == 0 {
+                return Some(att.clone());
+            }
+            let source = Path::new(&att.path);
+            let file_name = source.file_name()?.to_string_lossy();
+            let safe_slot: String = slot
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let copy = source.with_file_name(format!("{safe_slot}.{file_name}"));
+            let linked = std::fs::hard_link(source, &copy)
+                .or_else(|_| std::fs::copy(source, &copy).map(|_| ()));
+            match linked {
+                Ok(()) => Some(crate::commands::run::queue::QueuedAttachment {
+                    path: copy.to_string_lossy().to_string(),
+                    ..att.clone()
+                }),
+                Err(e) => {
+                    crate::log::warn(&format!(
+                        "attachment '{}' not duplicated for slot {slot}: {e}",
+                        att.name
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Run a YAML procedure and return the QueuedRuns for upload, one per
+/// slot (a single-slot procedure yields exactly one).
 #[allow(clippy::too_many_arguments)]
 // `python_path`: pre-resolved venv interpreter for this deployment.
 // Threaded into the orchestrator so workers + plug services skip the
@@ -1647,7 +1848,7 @@ pub async fn run_yaml_procedure(
     // phase selection) — passed wholesale so new run-scoped flags don't
     // keep growing this signature.
     run_opts: super::RunOptions,
-) -> (i32, Option<QueuedRun>) {
+) -> (i32, Vec<QueuedRun>) {
     let super::RunOptions {
         debug,
         station_plug_host,
@@ -1666,7 +1867,7 @@ pub async fn run_yaml_procedure(
                 1,
                 format!("Failed to load procedure: {e}"),
             );
-            return (1, None);
+            return (1, Vec::new());
         }
     };
 
@@ -1704,7 +1905,7 @@ pub async fn run_yaml_procedure(
             1,
             format!("Procedure cannot start:\n{}", ref_problems.join("\n")),
         );
-        return (1, None);
+        return (1, Vec::new());
     }
 
     // Debug mode forces a single worker so the fixed debug port doesn't
@@ -1743,24 +1944,19 @@ pub async fn run_yaml_procedure(
     let orchestrator_execution_id = execution_id.to_string();
     let run_id = uuid::Uuid::new_v4().to_string();
 
-    // Multi-slot YAML upload isn't wired yet — RunData is single-slot
-    // and `build_run_create_request` emits one upload per run. Reject
-    // upfront when the caller would lose per-slot identity rather than
-    // collapsing into "UNKNOWN".
-    if slots.len() > 1 && procedure_def.unit.is_some() {
-        emit_crash(
-            &event_tx,
-            &agent,
-            procedure_id,
-            execution_id,
-            "multi_slot_unsupported",
-            1,
-            "Multi-slot YAML procedures are not yet supported by the CLI \
-             upload path. Run with a single slot."
-                .to_string(),
-        );
-        return (1, None);
-    }
+    // Display names of the declared slots, keyed by slot key. Stamped on
+    // each slot's upload as `slot_name` and expanded into `{slot_name}`
+    // defaults. Empty on the synthetic single slot.
+    let slot_names: std::collections::HashMap<String, String> = procedure_def
+        .execution
+        .as_ref()
+        .map(|e| {
+            e.slots
+                .iter()
+                .map(|s| (s.key.clone(), s.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Snapshot the unit config before `procedure_def` moves into the
     // orchestrator. `identify(...)` only needs the unit block.
@@ -1842,6 +2038,7 @@ pub async fn run_yaml_procedure(
         execution_id.to_string(),
         super::deployment_id::lookup_deployment_id(procedure_id),
         only_phase.clone(),
+        slots.clone(),
     );
     let run_data = sink.data.clone();
     let pending_run_data_writes = sink.pending_writes.clone();
@@ -1855,6 +2052,7 @@ pub async fn run_yaml_procedure(
     // `runs.create`'s `metadata`; no API or SDK change.
     if let Some(phase_key) = &only_phase {
         run_data.lock().await.run_metadata_sources.push((
+            None,
             "studio_partial_run".to_string(),
             std::iter::once((
                 "studio_partial_run".to_string(),
@@ -1877,7 +2075,7 @@ pub async fn run_yaml_procedure(
         // initialize() may have spawned a partial worker pool
         // before failing — tear it down so we don't leak.
         let _ = orchestrator.shutdown().await;
-        return (1, None);
+        return (1, Vec::new());
     }
 
     // Identify-unit step: canonical framework entry point. It always
@@ -1934,11 +2132,11 @@ pub async fn run_yaml_procedure(
                         format!("reuse_unit failed validation: {err}"),
                     );
                     let _ = orchestrator.shutdown().await;
-                    return (1, None);
+                    return (1, Vec::new());
                 }
                 let mut infos = std::collections::HashMap::new();
                 for slot_id in &slots {
-                    apply_unit_info_to_run_data(&run_data, &info).await;
+                    apply_unit_info_to_run_data(&run_data, slot_id, &info).await;
                     event_sink.emit(&ExecutionEvent::UnitIdentified {
                         slot_id: Some(slot_id.clone()),
                         unit_info: info.clone(),
@@ -1980,7 +2178,10 @@ pub async fn run_yaml_procedure(
                     let identify_fut = execution_engine::identify(
                         cfg,
                         operated_by_cfg.as_ref(),
-                        Some(slot_id),
+                        Some(execution_engine::SlotRef::new(
+                            slot_id,
+                            slot_names.get(slot_id).map(String::as_str),
+                        )),
                         &host,
                     );
                     tokio::pin!(identify_fut);
@@ -1990,7 +2191,7 @@ pub async fn run_yaml_procedure(
                     };
                     match result {
                         Some(Ok(info)) => {
-                            apply_unit_info_to_run_data(&run_data, &info).await;
+                            apply_unit_info_to_run_data(&run_data, slot_id, &info).await;
                             event_sink.emit(&ExecutionEvent::UnitIdentified {
                                 slot_id: Some(slot_id.clone()),
                                 unit_info: info.clone(),
@@ -2008,7 +2209,7 @@ pub async fn run_yaml_procedure(
                                 format!("{err}"),
                             );
                             let _ = orchestrator.shutdown().await;
-                            return (1, None);
+                            return (1, Vec::new());
                         }
                         None => {
                             // Cancel during identify: drop any parked
@@ -2023,7 +2224,7 @@ pub async fn run_yaml_procedure(
                                 None,
                             );
                             let _ = orchestrator.shutdown().await;
-                            return (1, None);
+                            return (1, Vec::new());
                         }
                     }
                 }
@@ -2034,7 +2235,7 @@ pub async fn run_yaml_procedure(
         };
 
     if let Err(e) = orchestrator
-        .submit_procedure(slots, strategy, unit_infos, only_phase.as_deref())
+        .submit_procedure(slots.clone(), strategy, unit_infos, only_phase.as_deref())
         .await
     {
         emit_crash(
@@ -2047,7 +2248,7 @@ pub async fn run_yaml_procedure(
             format!("Failed to submit procedure: {e}"),
         );
         let _ = orchestrator.shutdown().await;
-        return (1, None);
+        return (1, Vec::new());
     }
 
     // Clone Arcs out of the orchestrator so the Stop/Kill paths can
@@ -2187,7 +2388,7 @@ pub async fn run_yaml_procedure(
             if let Some(dir) = &attachment_dir {
                 let _ = std::fs::remove_dir_all(dir);
             }
-            return (1, None);
+            return (1, Vec::new());
         }
     };
 
@@ -2214,19 +2415,31 @@ pub async fn run_yaml_procedure(
         let _ = handle.await;
     }
 
-    // Build RunCreateRequest from accumulated data
+    // One RunCreateRequest per slot out of the accumulated data. A
+    // single-slot procedure (the synthetic "default" slot included)
+    // keeps the exact pre-multi-slot wire shape: no execution_id /
+    // slot_key stamped, one QueuedRun.
     let data = run_data.lock().await;
-    match build_run_request(
-        &data,
-        procedure_id,
-        procedure_dir,
-        procedure_yaml,
-        operated_by.as_deref(),
-    ) {
-        Ok(request) => {
-            let queued = QueuedRun {
+    let is_multi = slots.len() > 1;
+    let mut queued_runs: Vec<QueuedRun> = Vec::with_capacity(slots.len());
+    for (i, slot) in slots.iter().enumerate() {
+        let stamp: SlotStamp<'_> = is_multi.then_some((
+            execution_id,
+            slot.as_str(),
+            slot_names.get(slot).map(String::as_str),
+        ));
+        match build_run_request(
+            &data,
+            slot,
+            stamp,
+            procedure_id,
+            procedure_dir,
+            procedure_yaml,
+            operated_by.as_deref(),
+        ) {
+            Ok(request) => queued_runs.push(QueuedRun {
                 request,
-                attachments: data.attachments.clone(),
+                attachments: attachments_for_slot(&data.attachments, slot, i),
                 run_id: None,
                 attempt_count: 0,
                 last_attempt_at: None,
@@ -2234,21 +2447,22 @@ pub async fn run_yaml_procedure(
                 parked: false,
                 last_error: None,
                 queued_at: None,
-            };
-            (exit_code, Some(queued))
-        }
-        Err(e) => {
-            crate::log::error(&format!("Failed to build run request: {e}"));
-            // No QueuedRun means the upload queue never runs, so its
-            // per-run attachment cleanup never fires. Drop the scratch dir
-            // here or every failed-to-build run leaks its attachment files
-            // under ~/.tofupilot/attachments/ forever.
-            if let Some(dir) = &attachment_dir {
-                let _ = std::fs::remove_dir_all(dir);
+            }),
+            Err(e) => {
+                crate::log::error(&format!("Failed to build run request for slot {slot}: {e}"));
             }
-            (exit_code, None)
         }
     }
+    if queued_runs.is_empty() {
+        // No QueuedRun means the upload queue never runs, so its per-run
+        // attachment cleanup never fires. Drop the scratch dir here or
+        // every failed-to-build run leaks its attachment files under
+        // ~/.tofupilot/attachments/ forever.
+        if let Some(dir) = &attachment_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    (exit_code, queued_runs)
 }
 
 /// Emit a crash diagnostic on every channel that needs it:
@@ -2516,19 +2730,41 @@ mod tests {
         RunData {
             phases: Vec::new(),
             run_outcome: None,
+            slot_outcomes: std::collections::HashMap::new(),
             run_id: None,
             start_time: None,
             end_time: None,
-            unit_serial: Some("SN-TEST".to_string()),
-            unit_part: None,
-            unit_revision: None,
-            unit_batch: None,
-            unit_operated_by: None,
-            unit_sub_units: None,
+            units: [(
+                "default".to_string(),
+                UnitSnapshot {
+                    serial: Some("SN-TEST".to_string()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
             run_metadata_sources: Vec::new(),
             unit_metadata_sources: Vec::new(),
             attachments: Vec::new(),
         }
+    }
+
+    fn default_unit(data: &mut RunData) -> &mut UnitSnapshot {
+        data.units.entry("default".to_string()).or_default()
+    }
+
+    /// `build_run_request` for the synthetic single slot, no stamp.
+    fn build_single(data: &RunData, dir: &std::path::Path) -> RunCreateRequest {
+        build_run_request(
+            data,
+            "default",
+            None,
+            "proc-1",
+            dir,
+            &dir.join("procedure.yaml"),
+            None,
+        )
+        .unwrap()
     }
 
     fn md(
@@ -2545,10 +2781,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut data = empty_run_data();
         data.run_metadata_sources.push((
+            None,
             "phase_a".into(),
             md(&[("modification", serde_json::json!("MOD-42"))]),
         ));
         data.unit_metadata_sources.push((
+            None,
             "phase_a".into(),
             md(&[
                 ("asset_owner", serde_json::json!("lab-3")),
@@ -2557,14 +2795,7 @@ mod tests {
             ]),
         ));
 
-        let req = build_run_request(
-            &data,
-            "proc-1",
-            tmp.path(),
-            &tmp.path().join("procedure.yaml"),
-            None,
-        )
-        .unwrap();
+        let req = build_single(&data, tmp.path());
 
         let rmd = req.metadata.expect("run metadata set");
         assert_eq!(rmd.get("modification"), Some(&serde_json::json!("MOD-42")));
@@ -2583,16 +2814,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut data = empty_run_data();
         let max = execution_engine::unit::OPERATED_BY_MAX_CHARS;
-        data.unit_operated_by = Some("x".repeat(300));
+        default_unit(&mut data).operated_by = Some("x".repeat(300));
 
-        let req = build_run_request(
-            &data,
-            "proc-1",
-            tmp.path(),
-            &tmp.path().join("procedure.yaml"),
-            None,
-        )
-        .unwrap();
+        let req = build_single(&data, tmp.path());
 
         assert_eq!(req.operated_by.as_deref(), Some("x".repeat(max).as_str()));
     }
@@ -2605,16 +2829,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut data = empty_run_data();
         let name = "é".repeat(200);
-        data.unit_operated_by = Some(name.clone());
+        default_unit(&mut data).operated_by = Some(name.clone());
 
-        let req = build_run_request(
-            &data,
-            "proc-1",
-            tmp.path(),
-            &tmp.path().join("procedure.yaml"),
-            None,
-        )
-        .unwrap();
+        let req = build_single(&data, tmp.path());
 
         assert_eq!(req.operated_by.as_deref(), Some(name.as_str()));
     }
@@ -2626,11 +2843,12 @@ mod tests {
         let mut sources = Vec::new();
         upsert_metadata_source(
             &mut sources,
+            &None,
             "check_voltage",
             md(&[("error_code", serde_json::json!("E42"))]),
         );
-        upsert_metadata_source(&mut sources, "check_voltage", md(&[]));
-        let merged = fold_metadata_sources(&sources);
+        upsert_metadata_source(&mut sources, &None, "check_voltage", md(&[]));
+        let merged = fold_metadata_sources(&sources, "default");
         assert!(!merged.contains_key("error_code"));
     }
 
@@ -2639,21 +2857,24 @@ mod tests {
         let mut sources = Vec::new();
         upsert_metadata_source(
             &mut sources,
+            &None,
             "identify_unit",
             md(&[("modification", serde_json::json!("MOD-1"))]),
         );
         upsert_metadata_source(
             &mut sources,
+            &None,
             "phase_a",
             md(&[("modification", serde_json::json!("MOD-42"))]),
         );
         // Re-identify replaces in place, staying before phase_a
         upsert_metadata_source(
             &mut sources,
+            &None,
             "identify_unit",
             md(&[("modification", serde_json::json!("MOD-2"))]),
         );
-        let merged = fold_metadata_sources(&sources);
+        let merged = fold_metadata_sources(&sources, "default");
         assert_eq!(
             merged.get("modification"),
             Some(&serde_json::json!("MOD-42"))
@@ -2664,14 +2885,7 @@ mod tests {
     fn build_run_request_omits_empty_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let data = empty_run_data();
-        let req = build_run_request(
-            &data,
-            "proc-1",
-            tmp.path(),
-            &tmp.path().join("procedure.yaml"),
-            None,
-        )
-        .unwrap();
+        let req = build_single(&data, tmp.path());
         assert!(req.metadata.is_none());
         assert!(req.unit_metadata.is_none());
     }
@@ -2681,6 +2895,7 @@ mod tests {
         let mut sources = Vec::new();
         upsert_metadata_source(
             &mut sources,
+            &None,
             "phase_a",
             md(&[
                 ("line", serde_json::json!("L3")),
@@ -2689,10 +2904,11 @@ mod tests {
         );
         upsert_metadata_source(
             &mut sources,
+            &None,
             "phase_b",
             md(&[("modification", serde_json::json!("MOD-42"))]),
         );
-        let merged = fold_metadata_sources(&sources);
+        let merged = fold_metadata_sources(&sources, "default");
         assert_eq!(
             merged.get("modification"),
             Some(&serde_json::json!("MOD-42"))
@@ -2738,9 +2954,9 @@ mod tests {
                     .collect(),
             ),
         };
-        apply_unit_info_to_run_data(&data, &info).await;
+        apply_unit_info_to_run_data(&data, "default", &info).await;
         let d = data.lock().await;
-        let merged = fold_metadata_sources(&d.unit_metadata_sources);
+        let merged = fold_metadata_sources(&d.unit_metadata_sources, "default");
         assert_eq!(
             merged.get("modification"),
             Some(&serde_json::json!("MOD-7"))
@@ -3035,5 +3251,260 @@ mod tests {
         assert_eq!(aggs[1]["type"], "count");
         assert_eq!(aggs[1]["value"], 5.0);
         assert!(aggs[1].get("validators").is_none());
+    }
+
+    fn completed_phase(name: &str, slot_id: Option<&str>, outcome: Outcome) -> CompletedPhase {
+        CompletedPhase {
+            name: name.to_string(),
+            outcome,
+            started_at: "2026-01-01T00:00:00Z".into(),
+            completed_at: "2026-01-01T00:00:01Z".into(),
+            retry_count: 0,
+            measurements: Vec::new(),
+            logs: Vec::new(),
+            error: None,
+            slot_id: slot_id.map(String::from),
+        }
+    }
+
+    fn two_slot_data() -> RunData {
+        let mut data = empty_run_data();
+        data.units = [
+            (
+                "s1".to_string(),
+                UnitSnapshot {
+                    serial: Some("SN-A".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "s2".to_string(),
+                UnitSnapshot {
+                    serial: Some("SN-B".into()),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        data.phases
+            .push(completed_phase("setup", None, Outcome::Pass));
+        let mut late = completed_phase("measure", Some("s1"), Outcome::Pass);
+        late.started_at = "2026-01-01T00:00:05Z".into();
+        late.completed_at = "2026-01-01T00:00:09Z".into();
+        data.phases.push(late);
+        data.phases
+            .push(completed_phase("measure", Some("s2"), Outcome::Fail));
+        data.slot_outcomes.insert("s1".into(), Outcome::Pass);
+        data.slot_outcomes.insert("s2".into(), Outcome::Fail);
+        data.run_outcome = Some(Outcome::Fail);
+        data.start_time = Some("2026-01-01T00:00:00Z".parse().unwrap());
+        data.end_time = Some("2026-01-01T00:05:00Z".parse().unwrap());
+        data
+    }
+
+    /// One request per slot: its own unit, its own phases plus the shared
+    /// stage, the engine's per-slot outcome (never the run rollup), a
+    /// window spanning its own phases, and the grouping stamp.
+    #[test]
+    fn multi_slot_requests_split_phases_units_and_outcomes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = two_slot_data();
+        let req1 = build_run_request(
+            &data,
+            "s1",
+            Some(("exec-1", "s1", Some("Left Nest"))),
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
+        let req2 = build_run_request(
+            &data,
+            "s2",
+            Some(("exec-1", "s2", None)),
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(req1.serial_number, "SN-A");
+        assert_eq!(req2.serial_number, "SN-B");
+        assert_eq!(req1.phases.as_ref().map(|p| p.len()), Some(2));
+        assert_eq!(req2.phases.as_ref().map(|p| p.len()), Some(2));
+        assert!(matches!(req1.outcome, RunGetOutcome::Pass));
+        assert!(matches!(req2.outcome, RunGetOutcome::Fail));
+        // s1's window: its own measure :05–:09, not the shared setup at :00
+        // nor the five-minute execution; s2's own phase ran :00–:01.
+        assert_eq!(req1.started_at.to_rfc3339(), "2026-01-01T00:00:05+00:00");
+        assert_eq!(req1.ended_at.to_rfc3339(), "2026-01-01T00:00:09+00:00");
+        assert_eq!(req2.started_at.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(req2.ended_at.to_rfc3339(), "2026-01-01T00:00:01+00:00");
+        let j1 = serde_json::to_value(&req1).unwrap();
+        assert_eq!(j1["execution_id"], "exec-1");
+        assert_eq!(j1["slot_key"], "s1");
+        assert_eq!(j1["slot_name"], "Left Nest");
+        let j2 = serde_json::to_value(&req2).unwrap();
+        assert_eq!(j2["slot_key"], "s2");
+        assert!(j2.get("slot_name").is_none_or(|v| v.is_null()));
+    }
+
+    /// The shared teardown that waits for the last slot must not stretch
+    /// an early slot's run to it; a slot that ran nothing of its own
+    /// (cancelled before its first phase) falls back to the shared window.
+    #[test]
+    fn slot_window_ignores_shared_teardown_and_falls_back_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut data = two_slot_data();
+        let mut teardown = completed_phase("power_off", None, Outcome::Pass);
+        teardown.started_at = "2026-01-01T00:04:00Z".into();
+        teardown.completed_at = "2026-01-01T00:04:30Z".into();
+        data.phases.push(teardown);
+        data.units.insert("s3".into(), UnitSnapshot::default());
+        let build = |slot: &str| {
+            build_run_request(
+                &data,
+                slot,
+                Some(("exec-1", slot, None)),
+                "proc-1",
+                tmp.path(),
+                &tmp.path().join("procedure.yaml"),
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            build("s1").ended_at.to_rfc3339(),
+            "2026-01-01T00:00:09+00:00"
+        );
+        assert_eq!(
+            build("s1").phases.as_ref().map(|p| p.len()),
+            Some(3),
+            "shared stages still listed"
+        );
+        let empty = build("s3");
+        assert_eq!(empty.started_at.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(empty.ended_at.to_rfc3339(), "2026-01-01T00:04:30+00:00");
+    }
+
+    /// The single-slot wire shape is untouched: no grouping fields at all.
+    #[test]
+    fn single_slot_request_carries_no_grouping_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let req = build_single(&empty_run_data(), tmp.path());
+        let j = serde_json::to_value(&req).unwrap();
+        for k in ["execution_id", "slot_key", "slot_name"] {
+            assert!(j.get(k).is_none_or(|v| v.is_null()), "{k} must be absent");
+        }
+    }
+
+    /// A slot the engine reported no outcome for (crash mid-run) falls
+    /// back to the run outcome, never to a sibling's.
+    #[test]
+    fn slot_without_engine_outcome_falls_back_to_run_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut data = two_slot_data();
+        data.slot_outcomes.clear();
+        data.run_outcome = Some(Outcome::Error);
+        let req = build_run_request(
+            &data,
+            "s1",
+            Some(("exec-1", "s1", None)),
+            "proc-1",
+            tmp.path(),
+            &tmp.path().join("procedure.yaml"),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(req.outcome, RunGetOutcome::Error));
+    }
+
+    #[test]
+    fn slot_metadata_does_not_leak_across_slots() {
+        let mut sources = Vec::new();
+        upsert_metadata_source(
+            &mut sources,
+            &Some("s1".to_string()),
+            "phase_a",
+            md(&[("temp", serde_json::json!(21))]),
+        );
+        upsert_metadata_source(
+            &mut sources,
+            &None,
+            "setup",
+            md(&[("fixture", serde_json::json!("F-9"))]),
+        );
+        let s1 = fold_metadata_sources(&sources, "s1");
+        let s2 = fold_metadata_sources(&sources, "s2");
+        assert_eq!(s1.get("temp"), Some(&serde_json::json!(21)));
+        assert_eq!(s1.get("fixture"), Some(&serde_json::json!("F-9")));
+        assert!(!s2.contains_key("temp"));
+        assert_eq!(s2.get("fixture"), Some(&serde_json::json!("F-9")));
+    }
+
+    /// A shared attachment reaches every slot's run on its own file; a
+    /// slot's attachment stays with its slot.
+    #[test]
+    fn shared_attachments_fan_out_with_their_own_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared_path = tmp.path().join("rig.png");
+        std::fs::write(&shared_path, b"png").unwrap();
+        let own_path = tmp.path().join("s2-scope.png");
+        std::fs::write(&own_path, b"png").unwrap();
+        let att =
+            |name: &str, path: &std::path::Path| crate::commands::run::queue::QueuedAttachment {
+                name: name.into(),
+                path: path.to_string_lossy().to_string(),
+                mimetype: "image/png".into(),
+                phase_key: "p".into(),
+            };
+        let all = vec![
+            (None, att("rig", &shared_path)),
+            (Some("s2".to_string()), att("scope", &own_path)),
+        ];
+
+        let s1 = attachments_for_slot(&all, "s1", 0);
+        let s2 = attachments_for_slot(&all, "s2", 1);
+
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].path, shared_path.to_string_lossy());
+        assert_eq!(s2.len(), 2);
+        let s2_shared = s2.iter().find(|a| a.name == "rig").unwrap();
+        assert_ne!(
+            s2_shared.path,
+            shared_path.to_string_lossy(),
+            "second slot gets its own copy"
+        );
+        assert!(std::path::Path::new(&s2_shared.path).exists());
+        assert!(s2.iter().any(|a| a.name == "scope"));
+    }
+
+    /// A unit update from a shared stage (no slot) lands on every slot;
+    /// a slot's own update on that slot only.
+    #[tokio::test]
+    async fn unit_updates_are_scoped_by_slot() {
+        let data = Arc::new(Mutex::new(two_slot_data()));
+        let info = execution_engine::unit::UnitInfo {
+            serial_number: None,
+            part_number: None,
+            revision_number: Some("B".into()),
+            batch_number: None,
+            operated_by: None,
+            sub_units: None,
+            status: "complete".into(),
+            metadata: None,
+        };
+        apply_unit_info_to_run_data(&data, "s2", &info).await;
+        let d = data.lock().await;
+        assert_eq!(d.units["s1"].revision, None);
+        assert_eq!(d.units["s2"].revision.as_deref(), Some("B"));
+        assert_eq!(
+            d.units["s2"].serial.as_deref(),
+            Some("SN-B"),
+            "other fields untouched"
+        );
     }
 }

@@ -1,7 +1,11 @@
 # Agent protocol — authoritative notes
 
-- **Spec revision**: 1.0 — 2026-04-21
+- **Spec revision**: 1.1 — 2026-09-03
 - **Wire `protocol_version`**: 1.0
+
+Revision 1.1 adds `execution_id` on `run_started` and `slot_outcomes` on
+`run_finished` (multi-slot procedures). Additive, so the wire version
+stays 1.0.
 
 The two track the same number by convention. The spec revision covers
 this document's text; the wire version (emitted on `run_started`)
@@ -112,7 +116,7 @@ is the single source of truth for exact field names, types, and
 
 | `type`                 | Purpose                                               |
 |------------------------|-------------------------------------------------------|
-| `run_started`          | First event. Carries `procedure_id`, `protocol_version`. |
+| `run_started`          | First event. Carries `procedure_id`, `protocol_version`, `execution_id` (shared by every slot's uploaded run). |
 | `plan`                 | Phase plan: ordered list of `{key, name}` tuples.      |
 | `phase_started`        | Phase entered execution. `(phase_key, attempt, slot_id)`. |
 | `phase_finished`       | Phase finished. Outcome + timestamps + `duration_ms` + optional `error`. |
@@ -130,7 +134,7 @@ is the single source of truth for exact field names, types, and
 | `run_crashed`          | Subprocess died before a proper `test_end`. Immediately precedes `run_finished`. |
 | `run_upload_queued`    | Run persisted to local queue for deferred upload. |
 | `internal_warning`     | Non-fatal CLI-side anomaly (truncation, unknown python event, …). |
-| `run_finished`         | Last event. `outcome` + `exit_code`.                   |
+| `run_finished`         | Last event. `outcome` + `exit_code`; on a multi-slot procedure also `slot_outcomes` (`slot_id` → outcome, one per uploaded run). |
 
 Stdin commands (agent → CLI): `ui_response`, `abort_run`, `get_state`.
 See `events.rs::CliCommand`.

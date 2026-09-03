@@ -25,6 +25,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 
 if len(sys.argv) != 3:
@@ -109,6 +110,8 @@ watchdog.start()
 saw_run_started = False
 saw_run_finished = False
 run_outcome = None
+slot_outcomes = {}
+slots_seen = set()
 crash = None
 phase_outcomes = []
 
@@ -119,6 +122,12 @@ try:
         except Exception:
             continue
         etype = evt.get("type")
+        # Lifecycle trace on stderr so a CI failure shows what the driver
+        # saw and when, not only the final verdict.
+        if etype in ("run_started", "ui_request", "identify_request", "ui_timeout",
+                     "identify_timeout", "run_crashed", "run_finished"):
+            print(f"[smoke {time.strftime('%H:%M:%S')}] {etype} {evt.get('request_id', '')}",
+                  file=sys.stderr, flush=True)
         if etype == "run_started":
             saw_run_started = True
         elif etype in ("ui_request", "identify_request"):
@@ -129,13 +138,18 @@ try:
             }
             proc.stdin.write(json.dumps(resp) + "\n")
             proc.stdin.flush()
+            print(f"[smoke {time.strftime('%H:%M:%S')}] answered {evt['request_id']}",
+                  file=sys.stderr, flush=True)
         elif etype == "phase_finished":
             phase_outcomes.append((evt.get("phase_key"), evt.get("outcome")))
+            if evt.get("slot_id") is not None:
+                slots_seen.add(evt["slot_id"])
         elif etype == "run_crashed":
             crash = evt
         elif etype == "run_finished":
             saw_run_finished = True
             run_outcome = evt.get("outcome")
+            slot_outcomes = evt.get("slot_outcomes") or {}
             break
 finally:
     watchdog.cancel()
@@ -159,6 +173,17 @@ if not phase_outcomes:
     errors.append("no phase_finished event — the procedure executed nothing")
 if run_outcome != EXPECT:
     errors.append(f"run outcome {run_outcome!r}, expected {EXPECT!r}")
+# Multi-slot procedures: `run_finished.slot_outcomes` names every slot that
+# ran a phase, each with the outcome its own uploaded run carries.
+if len(slots_seen) > 1:
+    missing = sorted(slots_seen - set(slot_outcomes))
+    if missing:
+        errors.append(f"run_finished.slot_outcomes lacks slots {missing}")
+    bad = {k: v for k, v in slot_outcomes.items() if v != EXPECT}
+    if bad:
+        errors.append(f"slot outcomes {bad}, expected every slot {EXPECT!r}")
+elif slot_outcomes:
+    errors.append("single-slot run must not carry slot_outcomes")
 
 if errors:
     print("SMOKE FAILED:", file=sys.stderr)
@@ -169,7 +194,8 @@ if errors:
         print("[stderr tail]", tail[-1000:], file=sys.stderr)
     sys.exit(1)
 
+slot_note = f", slots={slot_outcomes}" if slot_outcomes else ""
 print(
-    f"SMOKE OK: {len(phase_outcomes)} phase(s) executed, outcome={run_outcome} "
+    f"SMOKE OK: {len(phase_outcomes)} phase(s) executed, outcome={run_outcome}{slot_note} "
     f"({', '.join(f'{k}={o}' for k, o in phase_outcomes)})"
 )

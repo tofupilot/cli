@@ -67,6 +67,7 @@ pub async fn initialize(
     json_mode: bool,
     tui_enabled: bool,
     procedure_id: &str,
+    execution_id: &str,
     procedure_dir: &Path,
     options: &Options,
 ) -> Result<Option<Initialized>, i32> {
@@ -97,6 +98,7 @@ pub async fn initialize(
     emitter.enqueue(CliEvent::RunStarted {
         procedure_id: procedure_id.to_string(),
         protocol_version: events::PROTOCOL_VERSION,
+        execution_id: execution_id.to_string(),
     });
 
     let stdin_handle = spawn_stdin_reader(ctx.clone());

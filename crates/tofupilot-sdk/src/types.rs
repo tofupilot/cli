@@ -3058,6 +3058,15 @@ pub struct RunCreateRequest {
     /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_run_ref: Option<String>,
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Minted by the client once per start and shared by every slot run of that start. Omit for single-slot runs.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub execution_id: NullableField<String>,
+    /// Key of the fixture slot that produced this run, from the procedure execution.slots config. Requires execution_id. One run per slot per execution.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub slot_key: NullableField<String>,
+    /// Display name of the slot as declared at run time. Requires slot_key. Stored as-is so later fixture renames do not rewrite old runs.
+    #[serde(default, skip_serializing_if = "nullable_is_absent")]
+    pub slot_name: NullableField<String>,
     /// Specific version of the test procedure used for the run. Matched case-insensitively. If none exist, a procedure with this procedure version will be created. If no procedure version is specified, the run will not be linked to any specific version.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub procedure_version: NullableField<String>,
@@ -3113,6 +3122,9 @@ pub struct RunCreateRequestBuilder {
     procedure_id: Option<String>,
     deployment_id: NullableField<String>,
     client_run_ref: Option<String>,
+    execution_id: NullableField<String>,
+    slot_key: NullableField<String>,
+    slot_name: NullableField<String>,
     procedure_version: NullableField<String>,
     operated_by: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -3165,6 +3177,48 @@ impl RunCreateRequestBuilder {
     /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
     pub fn client_run_ref(mut self, value: impl Into<String>) -> Self {
         self.client_run_ref = Some(value.into());
+        self
+    }
+
+    /// Set the `execution_id` field.
+    ///
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Minted by the client once per start and shared by every slot run of that start. Omit for single-slot runs.
+    pub fn execution_id(mut self, value: impl Into<String>) -> Self {
+        self.execution_id = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `execution_id` to null.
+    pub fn execution_id_null(mut self) -> Self {
+        self.execution_id = NullableField::Null;
+        self
+    }
+
+    /// Set the `slot_key` field.
+    ///
+    /// Key of the fixture slot that produced this run, from the procedure execution.slots config. Requires execution_id. One run per slot per execution.
+    pub fn slot_key(mut self, value: impl Into<String>) -> Self {
+        self.slot_key = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `slot_key` to null.
+    pub fn slot_key_null(mut self) -> Self {
+        self.slot_key = NullableField::Null;
+        self
+    }
+
+    /// Set the `slot_name` field.
+    ///
+    /// Display name of the slot as declared at run time. Requires slot_key. Stored as-is so later fixture renames do not rewrite old runs.
+    pub fn slot_name(mut self, value: impl Into<String>) -> Self {
+        self.slot_name = NullableField::Value(value.into());
+        self
+    }
+
+    /// Explicitly set `slot_name` to null.
+    pub fn slot_name_null(mut self) -> Self {
+        self.slot_name = NullableField::Null;
         self
     }
 
@@ -3295,6 +3349,9 @@ impl RunCreateRequestBuilder {
                 .ok_or_else(|| "missing required field: procedure_id".to_string())?,
             deployment_id: self.deployment_id,
             client_run_ref: self.client_run_ref,
+            execution_id: self.execution_id,
+            slot_key: self.slot_key,
+            slot_name: self.slot_name,
             procedure_version: self.procedure_version,
             operated_by: self.operated_by,
             started_at: self.started_at
@@ -3465,6 +3522,10 @@ pub struct RunListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_keys: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<Environment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_numbers: Option<Vec<String>>,
@@ -3535,6 +3596,8 @@ pub struct RunListRequestBuilder {
     procedure_ids: Option<Vec<String>>,
     procedure_versions: Option<Vec<String>>,
     deployment_ids: Option<Vec<String>>,
+    execution_ids: Option<Vec<String>>,
+    slot_keys: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
@@ -3595,6 +3658,18 @@ impl RunListRequestBuilder {
     /// Set the `deployment_ids` field.
     pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `execution_ids` field.
+    pub fn execution_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.execution_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_keys` field.
+    pub fn slot_keys(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.slot_keys = Some(value.into());
         self
     }
 
@@ -3761,6 +3836,8 @@ impl RunListRequestBuilder {
             procedure_ids: self.procedure_ids,
             procedure_versions: self.procedure_versions,
             deployment_ids: self.deployment_ids,
+            execution_ids: self.execution_ids,
+            slot_keys: self.slot_keys,
             environments: self.environments,
             serial_numbers: self.serial_numbers,
             samples: self.samples,
@@ -4143,6 +4220,15 @@ pub struct RunListData {
     /// Additional notes or documentation about this test run.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub docstring: NullableField<String>,
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Null for single-slot runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    /// Key of the fixture slot that produced this run. Null for single-slot runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_key: Option<String>,
+    /// Display name of the slot as declared at run time. Null when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_name: Option<String>,
     /// User whose API key was used to create this run. Only returned if `all` or `created_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub created_by_user: NullableField<RunListCreatedByUser>,
@@ -4178,6 +4264,9 @@ pub struct RunListDataBuilder {
     duration: Option<String>,
     outcome: Option<LogGetOutcome>,
     docstring: NullableField<String>,
+    execution_id: Option<String>,
+    slot_key: Option<String>,
+    slot_name: Option<String>,
     created_by_user: NullableField<RunListCreatedByUser>,
     created_by_station: NullableField<RunListCreatedByStation>,
     operated_by: NullableField<RunListOperatedBy>,
@@ -4246,6 +4335,30 @@ impl RunListDataBuilder {
     /// Explicitly set `docstring` to null.
     pub fn docstring_null(mut self) -> Self {
         self.docstring = NullableField::Null;
+        self
+    }
+
+    /// Set the `execution_id` field.
+    ///
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Null for single-slot runs.
+    pub fn execution_id(mut self, value: impl Into<String>) -> Self {
+        self.execution_id = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_key` field.
+    ///
+    /// Key of the fixture slot that produced this run. Null for single-slot runs.
+    pub fn slot_key(mut self, value: impl Into<String>) -> Self {
+        self.slot_key = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_name` field.
+    ///
+    /// Display name of the slot as declared at run time. Null when absent.
+    pub fn slot_name(mut self, value: impl Into<String>) -> Self {
+        self.slot_name = Some(value.into());
         self
     }
 
@@ -4331,6 +4444,9 @@ impl RunListDataBuilder {
             outcome: self.outcome
                 .ok_or_else(|| "missing required field: outcome".to_string())?,
             docstring: self.docstring,
+            execution_id: self.execution_id,
+            slot_key: self.slot_key,
+            slot_name: self.slot_name,
             created_by_user: self.created_by_user,
             created_by_station: self.created_by_station,
             operated_by: self.operated_by,
@@ -6204,6 +6320,15 @@ pub struct RunGetResponse {
     /// Additional notes or documentation about this test run.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub docstring: NullableField<String>,
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Null for single-slot runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    /// Key of the fixture slot that produced this run. Null for single-slot runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_key: Option<String>,
+    /// Display name of the slot as declared at run time. Null when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_name: Option<String>,
     /// User whose API key was used to create this run. Only returned if `all` or `created_by` is included.
     #[serde(default, skip_serializing_if = "nullable_is_absent")]
     pub created_by_user: NullableField<RunGetCreatedByUser>,

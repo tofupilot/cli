@@ -45,5 +45,6 @@ pub(crate) mod test_support;
 
 pub use event_sink::{EventSink, ExecutionEvent, MultiSink, NullSink, PlannedPhase, PlannedPlug};
 pub use identify_unit::{
-    identify, IdentifyError, IdentifyHost, IdentifyHostError, PromptRequest, IDENTIFY_PHASE_KEY,
+    identify, IdentifyError, IdentifyHost, IdentifyHostError, PromptRequest, SlotRef,
+    IDENTIFY_PHASE_KEY,
 };

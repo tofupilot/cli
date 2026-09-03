@@ -106,6 +106,9 @@ pub struct CreateBuilder<'a> {
     procedure_id: Option<String>,
     deployment_id: Option<NullableField<String>>,
     client_run_ref: Option<String>,
+    execution_id: Option<NullableField<String>>,
+    slot_key: Option<NullableField<String>>,
+    slot_name: Option<NullableField<String>>,
     procedure_version: Option<NullableField<String>>,
     operated_by: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -132,6 +135,9 @@ impl<'a> CreateBuilder<'a> {
             procedure_id: None,
             deployment_id: None,
             client_run_ref: None,
+            execution_id: None,
+            slot_key: None,
+            slot_name: None,
             procedure_version: None,
             operated_by: None,
             started_at: None,
@@ -186,6 +192,48 @@ impl<'a> CreateBuilder<'a> {
     /// Idempotency reference for this upload, minted and persisted by the caller BEFORE the request is sent. When a second request carries the same reference, it is recognised as a retry of the first and returns the run already created rather than creating another one. That is what makes an upload safe to retry after a lost or timed-out response. The reference must be unique per organization and must never be reused for different data: derive it from the credential id returned at login plus a counter persisted locally (the CLI sends `<credential id>_<counter>`), never from a timestamp alone, since a clock can go backwards. Omit the field and every request creates a new run, exactly as before.
     pub fn client_run_ref(mut self, value: impl Into<String>) -> Self {
         self.client_run_ref = Some(value.into());
+        self
+    }
+
+    /// Set the `execution_id` field.
+    ///
+    /// Groups the runs produced by one multi-slot execution, one run per slot. Minted by the client once per start and shared by every slot run of that start. Omit for single-slot runs.
+    pub fn execution_id(mut self, value: impl Into<String>) -> Self {
+        self.execution_id = Some(NullableField::Value(value.into()));
+        self
+    }
+
+    /// Explicitly set `execution_id` to null.
+    pub fn execution_id_null(mut self) -> Self {
+        self.execution_id = Some(NullableField::Null);
+        self
+    }
+
+    /// Set the `slot_key` field.
+    ///
+    /// Key of the fixture slot that produced this run, from the procedure execution.slots config. Requires execution_id. One run per slot per execution.
+    pub fn slot_key(mut self, value: impl Into<String>) -> Self {
+        self.slot_key = Some(NullableField::Value(value.into()));
+        self
+    }
+
+    /// Explicitly set `slot_key` to null.
+    pub fn slot_key_null(mut self) -> Self {
+        self.slot_key = Some(NullableField::Null);
+        self
+    }
+
+    /// Set the `slot_name` field.
+    ///
+    /// Display name of the slot as declared at run time. Requires slot_key. Stored as-is so later fixture renames do not rewrite old runs.
+    pub fn slot_name(mut self, value: impl Into<String>) -> Self {
+        self.slot_name = Some(NullableField::Value(value.into()));
+        self
+    }
+
+    /// Explicitly set `slot_name` to null.
+    pub fn slot_name_null(mut self) -> Self {
+        self.slot_name = Some(NullableField::Null);
         self
     }
 
@@ -315,6 +363,9 @@ impl<'a> CreateBuilder<'a> {
         if body.client_run_ref.is_some() {
             self.client_run_ref = body.client_run_ref;
         }
+        self.execution_id = Some(body.execution_id);
+        self.slot_key = Some(body.slot_key);
+        self.slot_name = Some(body.slot_name);
         self.procedure_version = Some(body.procedure_version);
         if body.operated_by.is_some() {
             self.operated_by = body.operated_by;
@@ -394,6 +445,9 @@ impl<'a> CreateBuilder<'a> {
                 ))?,
             deployment_id: self.deployment_id.unwrap_or(NullableField::Absent),
             client_run_ref: self.client_run_ref,
+            execution_id: self.execution_id.unwrap_or(NullableField::Absent),
+            slot_key: self.slot_key.unwrap_or(NullableField::Absent),
+            slot_name: self.slot_name.unwrap_or(NullableField::Absent),
             procedure_version: self.procedure_version.unwrap_or(NullableField::Absent),
             operated_by: self.operated_by,
             started_at: self.started_at
@@ -459,6 +513,8 @@ pub struct ListBuilder<'a> {
     procedure_ids: Option<Vec<String>>,
     procedure_versions: Option<Vec<String>>,
     deployment_ids: Option<Vec<String>>,
+    execution_ids: Option<Vec<String>>,
+    slot_keys: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
@@ -497,6 +553,8 @@ impl<'a> ListBuilder<'a> {
             procedure_ids: None,
             procedure_versions: None,
             deployment_ids: None,
+            execution_ids: None,
+            slot_keys: None,
             environments: None,
             serial_numbers: None,
             samples: None,
@@ -559,6 +617,18 @@ impl<'a> ListBuilder<'a> {
     /// Set the `deployment_ids` query parameter.
     pub fn deployment_ids(mut self, value: impl Into<Vec<String>>) -> Self {
         self.deployment_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `execution_ids` query parameter.
+    pub fn execution_ids(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.execution_ids = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_keys` query parameter.
+    pub fn slot_keys(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.slot_keys = Some(value.into());
         self
     }
 
@@ -772,6 +842,16 @@ impl<'a> ListBuilder<'a> {
         if let Some(ref val) = self.deployment_ids {
             for item in val {
                 request = request.query(&[("deployment_ids", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.execution_ids {
+            for item in val {
+                request = request.query(&[("execution_ids", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.slot_keys {
+            for item in val {
+                request = request.query(&[("slot_keys", item.to_string())]);
             }
         }
         if let Some(ref val) = self.environments {

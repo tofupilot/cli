@@ -154,7 +154,10 @@ fn phase_row<'a>(state: &TuiState, phase: &'a super::state::PhaseState) -> Row<'
     Row::new(vec![
         Cell::from(Span::styled(time_str, Style::default().fg(palette::MUTED))),
         Cell::from(Span::styled(
-            phase.name.clone(),
+            match &phase.slot_id {
+                Some(slot) => format!("{} [{slot}]", phase.name),
+                None => phase.name.clone(),
+            },
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Cell::from(Span::styled(

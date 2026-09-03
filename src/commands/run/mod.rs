@@ -180,8 +180,9 @@ pub struct RunOptions {
 }
 
 /// Most recent finished run retained for a later explicit upload
-/// (Studio's post-run Upload button), keyed by execution id.
-pub type RetainedRun = std::sync::Arc<tokio::sync::Mutex<Option<(String, queue::QueuedRun)>>>;
+/// (Studio's post-run Upload button), keyed by execution id. One
+/// QueuedRun per slot; a single-slot run parks exactly one.
+pub type RetainedRun = std::sync::Arc<tokio::sync::Mutex<Option<(String, Vec<queue::QueuedRun>)>>>;
 
 /// Source of the procedure to run.
 #[derive(Clone, Debug)]
@@ -998,6 +999,7 @@ pub async fn start(
         json_mode,
         tui_enabled,
         procedure_id,
+        &execution_id,
         &package_dir,
         &run_opts.agent,
     )
@@ -1350,6 +1352,10 @@ pub async fn start(
         // `RunStarted` rebuilt state.
         let exit_code = (&mut run_fut).await;
 
+        // Every slot's upload gets the same chance the single upload
+        // always had: the drain budget below. See `PENDING_UPLOADS`.
+        await_pending_uploads(crate::config::timeouts::PUBLISH_DRAIN).await;
+
         if let Some(h) = tui_handle {
             let _ = h.await;
         }
@@ -1397,9 +1403,15 @@ pub async fn start(
             // plan / ui_*) before announcing the run is done, so agents
             // always see the full lifecycle before run_finished.
             agent.emitter.flush().await;
+            let slot_outcomes = agent
+                .slot_outcomes
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
             agent.emitter.enqueue(CliEvent::RunFinished {
                 outcome: outcomes::from_exit_code(exit_code).to_string(),
                 exit_code,
+                slot_outcomes,
             });
             agent.emitter.flush().await;
             // No events may legitimately follow run_finished. Finalize so
@@ -1857,7 +1869,7 @@ async fn run_test(
             let agent_for_upload = agent.clone();
             let bus_for_upload = event_tx.clone();
             let retain_slot = run_opts.retain_queued_run.clone();
-            let (exit_code, queued_run) = engine::run_yaml_procedure(
+            let (exit_code, queued_runs) = engine::run_yaml_procedure(
                 procedure_yaml,
                 package_dir,
                 python_path,
@@ -1876,20 +1888,27 @@ async fn run_test(
             .await;
 
             if upload {
-                if let (Some(creds), Some(queued)) = (creds, queued_run) {
-                    spawn_upload(
-                        creds,
-                        procedure_id,
-                        queued,
-                        json_mode,
-                        agent_for_upload.as_ref(),
-                        Some(bus_for_upload),
-                    );
+                if let Some(creds) = creds {
+                    // One upload per slot run; each mints its own
+                    // idempotency reference in the queue.
+                    for queued in queued_runs {
+                        spawn_upload(
+                            creds,
+                            procedure_id,
+                            queued,
+                            json_mode,
+                            agent_for_upload.as_ref(),
+                            Some(bus_for_upload.clone()),
+                        );
+                    }
                 }
-            } else if let (Some(slot), Some(queued)) = (retain_slot, queued_run) {
-                // Studio: park the finished run so an explicit UploadRun
-                // command can publish it later. Most recent run wins.
-                *slot.lock().await = Some((execution_id.to_string(), queued));
+            } else if let Some(slot) = retain_slot {
+                if !queued_runs.is_empty() {
+                    // Studio: park the finished run(s) so an explicit
+                    // UploadRun command can publish them later. Most
+                    // recent run wins.
+                    *slot.lock().await = Some((execution_id.to_string(), queued_runs));
+                }
             }
 
             exit_code
@@ -2128,6 +2147,30 @@ fn resolve_procedure_id(procedure_id_arg: Option<&str>, json_mode: bool) -> Resu
         .0)
 }
 
+/// Upload tasks spawned by `spawn_upload` and not yet joined. A one-shot
+/// `run` exits right after the run ends; before multi-slot the single
+/// upload usually finished inside the publisher drain, but N concurrent
+/// uploads did not, and the process exit cut them mid-request (the fake
+/// dashboard saw broken pipes, the queue kept retrying). `start()` awaits
+/// these inside the same drain budget, so nothing new is waited on: an
+/// upload that misses it stays queued for `queue retry` exactly as before.
+static PENDING_UPLOADS: std::sync::LazyLock<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Join every upload spawned so far, giving up after `budget`. Tasks still
+/// running after the budget are left alone: they keep going while the
+/// process lives and their queue entry survives if it does not.
+pub(crate) async fn await_pending_uploads(budget: std::time::Duration) {
+    let handles: Vec<tokio::task::JoinHandle<()>> = PENDING_UPLOADS
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default();
+    if handles.is_empty() {
+        return;
+    }
+    let _ = tokio::time::timeout(budget, futures::future::join_all(handles)).await;
+}
+
 pub(crate) fn spawn_upload(
     creds: &Credentials,
     procedure_id: &str,
@@ -2176,7 +2219,7 @@ pub(crate) fn spawn_upload(
 
     let upload_creds = creds.clone();
     let bus_for_task = bus.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         queue::upload_queued_run(
             crate::http::client(),
             &upload_creds,
@@ -2187,6 +2230,12 @@ pub(crate) fn spawn_upload(
         )
         .await;
     });
+    if let Ok(mut pending) = PENDING_UPLOADS.lock() {
+        // Long-lived stations spawn one per run: keep the list to the
+        // tasks still running.
+        pending.retain(|h| !h.is_finished());
+        pending.push(handle);
+    }
 }
 
 #[cfg(test)]
