@@ -52,7 +52,13 @@ impl IdentifyHost for CliIdentifyHost {
         let (resp_tx, resp_rx) = oneshot::channel();
         {
             let mut channels = UI_RESPONSE_CHANNELS.lock().await;
-            channels.insert(req.request_id.clone(), resp_tx);
+            channels.insert(
+                req.request_id.clone(),
+                execution_engine::ui::PendingUi {
+                    sender: resp_tx,
+                    components: req.components.clone(),
+                },
+            );
         }
 
         // Broadcast the dedicated identify event. Dashboard, kiosk,

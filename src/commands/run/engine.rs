@@ -2128,7 +2128,7 @@ pub async fn run_yaml_procedure(
     // `reuse_unit`) skips its identify prompt; every other slot is
     // identified as usual, one prompt at a time. Reuse is gated on
     // `unit_cfg` (always Some thanks to the default block above): a
-    // procedure with no unit schema cannot validate a reused unit.
+    // procedure with no unit schema has no shape for a reused unit.
     let identify_host = identify_host::CliIdentifyHost {
         router: EventRouter::new(event_tx.clone(), agent.clone(), execution_id.to_string()),
         ui_tx: ui_tx.clone(),
@@ -2147,29 +2147,16 @@ pub async fn run_yaml_procedure(
             .or_else(|| reuse_unit.clone());
         let info = match reused {
             Some(reused) => {
-                // Validate against the procedure's `unit_cfg` so a stale
-                // or hand-crafted reuse can't bypass regex / required-
-                // field constraints; same check the identify path runs
-                // on the operator's answer. The root `operated_by:` too.
-                let info = wire_unit_to_engine(reused);
-                if let Err(err) = execution_engine::unit::validate_unit_info(
-                    &info,
-                    &Some(cfg.clone()),
-                    operated_by_cfg.as_ref(),
-                ) {
-                    emit_crash(
-                        &event_tx,
-                        &agent,
-                        procedure_id,
-                        execution_id,
-                        "identify_unit_failed",
-                        1,
-                        format!("reuse_unit failed validation: {err}"),
-                    );
-                    let _ = orchestrator.shutdown().await;
-                    return (1, Vec::new());
-                }
-                info
+                // No validation here, deliberately. The reused values
+                // were already accepted by the identify form that
+                // produced them; re-judging them against the
+                // procedure's CURRENT `unit:` config turned a config
+                // edit between two runs into an instant crash the
+                // operator could neither understand nor correct — the
+                // reuse path has no prompt to fall back to (TP-1092).
+                // "Run again" means exactly that: the same unit, the
+                // same values, no second gate.
+                wire_unit_to_engine(reused)
             }
             None => {
                 // Race the operator prompt against cancellation: a Stop

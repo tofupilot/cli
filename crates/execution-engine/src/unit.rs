@@ -74,39 +74,45 @@ fn validate_unit_field(
         }
 
         // Check min_length on trimmed value
+        // Lengths count characters, not bytes, to agree with the wire
+        // gate in station-protocol and the message wording.
+        let chars = trimmed.chars().count();
         if let Some(min) = config.min_length {
-            if trimmed.len() < min {
+            if chars < min {
                 return Err(format!(
                     "{} must be at least {} characters (got {})",
-                    field_name,
-                    min,
-                    trimmed.len()
+                    field_name, min, chars
                 ));
             }
         }
 
         // Check max_length on trimmed value
         if let Some(max) = config.max_length {
-            if trimmed.len() > max {
+            if chars > max {
                 return Err(format!(
                     "{} must be at most {} characters (got {})",
-                    field_name,
-                    max,
-                    trimmed.len()
+                    field_name, max, chars
                 ));
             }
         }
 
-        // Check pattern on trimmed value
+        // Check pattern on trimmed value. Never quote the raw regex to
+        // the operator: the authored pattern_message when there is one,
+        // a derived character-level message when the pattern explains
+        // itself, the bare verdict otherwise. This error ships on the
+        // wire, so the kiosk and the TUI recite the same words.
         if let Some(pattern) = &config.pattern {
-            let regex = regex::Regex::new(pattern)
+            let regex = crate::pattern_messages::compile_field_pattern(pattern)
                 .map_err(|e| format!("Invalid validation pattern for {}: {}", field_name, e))?;
 
             if !regex.is_match(trimmed) {
-                return Err(format!(
-                    "{} does not match required format: {}",
-                    field_name, pattern
-                ));
+                return Err(match &config.pattern_message {
+                    Some(msg) => format!("{}: {}", field_name, msg),
+                    None => match crate::pattern_messages::derive_pattern_error(pattern, trimmed) {
+                        Some(derived) => format!("{}: {}", field_name, derived),
+                        None => format!("{} does not match the required format", field_name),
+                    },
+                });
             }
         }
     }
@@ -129,40 +135,39 @@ fn validate_sub_unit_field(
 
     // Apply constraints if config exists
     if let Some(field_config) = config {
-        // Check min_length
+        let chars = trimmed.chars().count();
         if let Some(min) = field_config.min_length {
-            if trimmed.len() < min {
+            if chars < min {
                 return Err(format!(
                     "{} must be at least {} characters (got {})",
-                    label,
-                    min,
-                    trimmed.len()
+                    label, min, chars
                 ));
             }
         }
 
-        // Check max_length
         if let Some(max) = field_config.max_length {
-            if trimmed.len() > max {
+            if chars > max {
                 return Err(format!(
                     "{} must be at most {} characters (got {})",
-                    label,
-                    max,
-                    trimmed.len()
+                    label, max, chars
                 ));
             }
         }
 
-        // Check pattern
+        // Check pattern — same message policy as validate_unit_field:
+        // authored pattern_message, then derived, never the raw regex.
         if let Some(pattern) = &field_config.pattern {
-            let regex = regex::Regex::new(pattern)
+            let regex = crate::pattern_messages::compile_field_pattern(pattern)
                 .map_err(|e| format!("Invalid validation pattern for {}: {}", label, e))?;
 
             if !regex.is_match(trimmed) {
-                return Err(format!(
-                    "{} does not match required format: {}",
-                    label, pattern
-                ));
+                return Err(match &field_config.pattern_message {
+                    Some(msg) => format!("{}: {}", label, msg),
+                    None => match crate::pattern_messages::derive_pattern_error(pattern, trimmed) {
+                        Some(derived) => format!("{}: {}", label, derived),
+                        None => format!("{} does not match the required format", label),
+                    },
+                });
             }
         }
     }
@@ -281,6 +286,43 @@ pub struct PendingUnitInput {
 
 #[cfg(test)]
 mod tests {
+    /// TP-1086: the identify-unit field this task was filed against.
+    /// A pattern locks the format of the whole serial — before this it
+    /// was a substring search, so a scan carrying extra label text
+    /// around a valid serial was accepted and stored.
+    #[test]
+    fn unit_field_pattern_must_match_the_whole_serial() {
+        use super::*;
+        let field = crate::procedure::UnitFieldConfig {
+            pattern: Some("SN-[0-9]+".to_string()),
+            ..Default::default()
+        };
+        let entry = |s: &str| Some(s.to_string());
+        assert!(validate_unit_field("Serial number", &entry("SN-0042"), &field).is_ok());
+        let err = validate_unit_field("Serial number", &entry("SCRAP SN-0042 XX"), &field)
+            .unwrap_err();
+        assert!(err.starts_with("Serial number"), "{err}");
+    }
+
+    #[test]
+    fn unit_field_lengths_count_characters_not_bytes() {
+        // The wire gate in station-protocol counts characters. If this
+        // backstop counted bytes, a value the gate accepted would still
+        // kill the run with `identify_unit_failed`.
+        use super::*;
+        let field = crate::procedure::UnitFieldConfig {
+            min_length: Some(10),
+            max_length: Some(10),
+            ..Default::default()
+        };
+        let entry = |s: &str| Some(s.to_string());
+        // 10 characters, 12 bytes.
+        assert!(validate_unit_field("Operator", &entry("Zoé Müller"), &field).is_ok());
+        let err = validate_unit_field("Operator", &entry("Zoé Müllers"), &field).unwrap_err();
+        assert!(err.contains("(got 11)"), "{err}");
+        assert!(validate_sub_unit_field("Board", "Zoé Müller", &Some(field.clone())).is_ok());
+    }
+
     #[test]
     fn operated_by_over_the_ceiling_is_rejected_without_any_config() {
         // The common case is a procedure that declares no `operated_by:` block
@@ -358,9 +400,12 @@ mod tests {
             min_length: Some(5),
             max_length: None,
             pattern: None,
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "BAT-001", &config);
         assert!(result.is_ok());
@@ -372,9 +417,12 @@ mod tests {
             min_length: Some(10),
             max_length: None,
             pattern: None,
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "BAT", &config);
         assert!(result.is_err());
@@ -387,9 +435,12 @@ mod tests {
             min_length: None,
             max_length: Some(20),
             pattern: None,
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "BAT-001", &config);
         assert!(result.is_ok());
@@ -401,9 +452,12 @@ mod tests {
             min_length: None,
             max_length: Some(5),
             pattern: None,
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "BAT-001-LONG", &config);
         assert!(result.is_err());
@@ -416,9 +470,12 @@ mod tests {
             min_length: None,
             max_length: None,
             pattern: Some(r"^BAT-\d{3}$".to_string()),
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "BAT-001", &config);
         assert!(result.is_ok());
@@ -430,15 +487,47 @@ mod tests {
             min_length: None,
             max_length: None,
             pattern: Some(r"^BAT-\d{3}$".to_string()),
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "INVALID", &config);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("does not match required format"));
+        // A sequence pattern derives its character-level message —
+        // never the raw regex (TP-760).
+        let err = result.unwrap_err();
+        assert!(err.contains("Should start with “BAT-”"), "got: {err}");
+        assert!(!err.contains(r"^BAT-\d{3}$"));
+
+        // A branching pattern can't derive: the bare verdict.
+        let branching = Some(UnitFieldConfig {
+            pattern: Some(r"^(BAT|MOT)-\d{3}$".to_string()),
+            ..Default::default()
+        });
+        let err = validate_sub_unit_field("Battery", "INVALID", &branching).unwrap_err();
+        assert!(err.contains("does not match the required format"), "got: {err}");
+        assert!(!err.contains(r"^(BAT|MOT)-\d{3}$"));
+    }
+
+    #[test]
+    fn test_validate_sub_unit_field_pattern_fail_uses_pattern_message() {
+        let config = Some(UnitFieldConfig {
+            min_length: None,
+            max_length: None,
+            pattern: Some(r"^BAT-\d{3}$".to_string()),
+            pattern_message: Some("Scan the label under the cell, like BAT-042".to_string()),
+            default_value: None,
+            placeholder: None,
+            description: None,
+            prefix: None,
+            suffix: None,
+        });
+        let err = validate_sub_unit_field("Battery", "INVALID", &config).unwrap_err();
+        assert!(err.contains("Scan the label under the cell, like BAT-042"));
+        assert!(!err.contains(r"^BAT-\d{3}$"));
     }
 
     #[test]
@@ -447,9 +536,12 @@ mod tests {
             min_length: Some(3),
             max_length: Some(10),
             pattern: None,
+            pattern_message: None,
             default_value: None,
             placeholder: None,
             description: None,
+            prefix: None,
+            suffix: None,
         });
         let result = validate_sub_unit_field("Battery", "  BAT-001  ", &config);
         assert!(result.is_ok());
@@ -627,9 +719,12 @@ mod tests {
                     min_length: None,
                     max_length: None,
                     pattern: Some(r"^BAT-\d+$".to_string()),
+                    pattern_message: None,
                     default_value: None,
                     placeholder: None,
                     description: None,
+                    prefix: None,
+                    suffix: None,
                 }),
             },
             SubUnitItemConfig {
@@ -639,9 +734,12 @@ mod tests {
                     min_length: None,
                     max_length: None,
                     pattern: Some(r"^MOT-\d+$".to_string()),
+                    pattern_message: None,
                     default_value: None,
                     placeholder: None,
                     description: None,
+                    prefix: None,
+                    suffix: None,
                 }),
             },
         ]);
@@ -659,9 +757,12 @@ mod tests {
                 min_length: None,
                 max_length: None,
                 pattern: Some(r"^BAT-\d+$".to_string()),
+                pattern_message: None,
                 default_value: None,
                 placeholder: None,
                 description: None,
+                prefix: None,
+                suffix: None,
             }),
         }]);
         let sub_units = create_sub_units_map(vec![("battery_pack", "INVALID")]);
@@ -669,7 +770,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("Battery Pack"));
-        assert!(err.contains("does not match required format"));
+        // Derived from the sequence pattern — never the raw regex.
+        assert!(err.contains("Should start with “BAT-”"), "got: {err}");
+        assert!(!err.contains(r"^BAT-\d+$"));
     }
 
     #[test]
@@ -681,9 +784,12 @@ mod tests {
                 min_length: Some(10),
                 max_length: None,
                 pattern: None,
+                pattern_message: None,
                 default_value: None,
                 placeholder: None,
                 description: None,
+                prefix: None,
+                suffix: None,
             }),
         }]);
         let sub_units = create_sub_units_map(vec![("battery", "BAT")]);

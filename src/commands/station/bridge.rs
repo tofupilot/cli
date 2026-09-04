@@ -10,7 +10,8 @@ use crate::commands::auth::credentials::Credentials;
 /// Stream bridge for standalone `tofupilot run`.
 ///
 /// Creates its own stream connection. Publishes events, sends telemetry,
-/// and routes UiResponse commands to the execution engine.
+/// and routes UiResponse commands through the validated submit path,
+/// publishing the accept/reject verdict back to the dashboard.
 ///
 /// The background task exits naturally when every broadcast sender for
 /// event_rx is dropped. `flush()` lets the caller wait for that drain with
@@ -145,7 +146,18 @@ impl StreamBridge {
                             Some(super::client::StreamMsg::Command(
                                 StationCommand::UiResponse { request_id, values }
                             )) => {
-                                crate::commands::run::ui_response::send(&request_id, values).await;
+                                // Same validated door as the local WS pump:
+                                // a bad serial stays on the dashboard form
+                                // with per-field messages instead of
+                                // resolving the prompt and crashing the
+                                // run downstream. The verdict goes back
+                                // over the stream so the dashboard leaves
+                                // "submitting" without its fallback timer.
+                                let verdict = crate::commands::run::ui_response::submit(
+                                    request_id, values,
+                                )
+                                .await;
+                                let _ = event_pub.publish(&verdict).await;
                             }
                             None => break,
                             _ => {}

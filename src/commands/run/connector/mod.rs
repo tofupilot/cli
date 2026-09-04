@@ -841,7 +841,13 @@ pub async fn run_openhtf(
                     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                     {
                         let mut channels = UI_RESPONSE_CHANNELS.lock().await;
-                        channels.insert(prompt_id.clone(), resp_tx);
+                        channels.insert(
+                            prompt_id.clone(),
+                            execution_engine::ui::PendingUi {
+                                sender: resp_tx,
+                                components: request_data.config.components.clone(),
+                            },
+                        );
                     }
 
                     if let Some(ref ui) = ui_tx {

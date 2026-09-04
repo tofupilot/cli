@@ -624,6 +624,24 @@ pub struct UnitFieldConfig {
     /// Regex pattern for validation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+
+    /// Error message shown to the operator when the value does not
+    /// match `pattern`. Without it, the UI derives a message from
+    /// charset-only patterns ("Remove '#' — allowed: …") and shows a
+    /// generic "Doesn't match the required format" for structural ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_message: Option<String>,
+
+    /// Fixed text prepended to the operator's input. The stored value is
+    /// `prefix + input + suffix`; `min_length` / `max_length` / `pattern`
+    /// validate the operator's typed input, before the affixes are
+    /// composed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    /// Fixed text appended to the operator's input (see `prefix`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
 }
 
 impl Default for UnitFieldConfig {
@@ -635,8 +653,65 @@ impl Default for UnitFieldConfig {
             min_length: None,
             max_length: None,
             pattern: None,
+            pattern_message: None,
+            prefix: None,
+            suffix: None,
         }
     }
+}
+
+/// Validate one field's `prefix` / `suffix` at procedure-load time.
+/// `charset_restricted` marks unit-identity fields (serial / part /
+/// revision / batch / sub-unit numbers) whose final value the server
+/// rejects outside `[a-zA-Z0-9_.:+-]` — a bad affix there would only
+/// fail at upload, after the test has run.
+pub fn validate_unit_field_affixes(
+    ctx: &str,
+    cfg: &UnitFieldConfig,
+    charset_restricted: bool,
+) -> Result<(), String> {
+    for (name, affix) in [("prefix", cfg.prefix.as_deref()), ("suffix", cfg.suffix.as_deref())] {
+        let Some(affix) = affix else { continue };
+        if affix.is_empty() || affix.chars().count() > 50 {
+            return Err(format!(
+                "{ctx}.{name} must be between 1 and 50 characters"
+            ));
+        }
+        if charset_restricted && !is_identity_charset(affix) {
+            return Err(format!(
+                "{ctx}.{name} '{affix}' is invalid: only letters, digits and _ . : + - are allowed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The server's charset for unit identity values (`runs.create`) — the
+/// same `UNIT_FIELD_CHARSET_PATTERN` the shared validator stamps on
+/// pattern-less identity components, compiled the same way, so the two
+/// cannot drift apart.
+fn is_identity_charset(s: &str) -> bool {
+    static CHARSET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    CHARSET
+        .get_or_init(|| {
+            station_protocol::pattern_messages::compile_field_pattern(
+                station_protocol::pattern_messages::UNIT_FIELD_CHARSET_PATTERN,
+            )
+            .expect("UNIT_FIELD_CHARSET_PATTERN compiles")
+        })
+        .is_match(s)
+}
+
+/// Whether a phase component's `bind` lands in a unit identity field —
+/// the ones `compose_bound_affixes` wraps and the server charset-checks.
+/// `unit.metadata.*` and `run.*` are free text and stay out.
+fn binds_unit_identity(bind: &str) -> bool {
+    matches!(
+        bind,
+        "unit.serial_number" | "unit.part_number" | "unit.revision_number" | "unit.batch_number"
+    ) || bind
+        .strip_prefix("unit.sub_units.")
+        .is_some_and(|k| !k.is_empty())
 }
 
 /// Configuration for a specific sub-unit with custom label and constraints
@@ -789,6 +864,42 @@ impl UnitConfig {
             }
         }
 
+        Ok(())
+    }
+
+    /// Load-time check of every field's `prefix` / `suffix` (length and,
+    /// for identity fields, the server charset). The root `operated_by:`
+    /// config is validated separately by the loader — it lives outside
+    /// this struct.
+    pub fn validate_affixes(&self) -> Result<(), String> {
+        let identity_fields = [
+            ("unit.serial_number", self.serial_number.as_ref()),
+            ("unit.part_number", self.part_number.as_ref()),
+            ("unit.revision_number", self.revision_number.as_ref()),
+            ("unit.batch_number", self.batch_number.as_ref()),
+        ];
+        for (ctx, cfg) in identity_fields {
+            if let Some(cfg) = cfg {
+                validate_unit_field_affixes(ctx, cfg, true)?;
+            }
+        }
+        if let Some(sub_units) = self.sub_units.as_ref() {
+            for item in &sub_units.0 {
+                if let Some(cfg) = item.serial_number.as_ref() {
+                    validate_unit_field_affixes(
+                        &format!("unit.sub_units.{}.serial_number", item.get_key()),
+                        cfg,
+                        true,
+                    )?;
+                }
+            }
+        }
+        // Metadata values are free text server-side — length check only.
+        if let Some(md) = self.metadata.as_ref() {
+            for (key, cfg) in md {
+                validate_unit_field_affixes(&format!("unit.metadata.{key}"), cfg, false)?;
+            }
+        }
         Ok(())
     }
 }
@@ -2259,6 +2370,8 @@ pub struct UIComponentYaml {
     max_length: Option<u32>,
     #[serde(default)]
     pattern: Option<String>,
+    #[serde(default)]
+    pattern_message: Option<String>,
     #[serde(default, deserialize_with = "serde_trim::option_string_trim")]
     prefix: Option<String>,
     #[serde(default, deserialize_with = "serde_trim::option_string_trim")]
@@ -2332,6 +2445,7 @@ impl From<UIComponentYaml> for UIComponent {
             min_length: yaml.min_length,
             max_length: yaml.max_length,
             pattern: yaml.pattern,
+            pattern_message: yaml.pattern_message,
             prefix: yaml.prefix,
             suffix: yaml.suffix,
             trim: yaml.trim,
@@ -2411,6 +2525,10 @@ pub struct UIComponent {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(length(max = 500))]
     pub pattern: Option<String>,
+    /// Error message shown when the value does not match `pattern`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(length(max = 500))]
+    pub pattern_message: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(length(max = 50))]
@@ -2487,6 +2605,7 @@ impl UIComponent {
             min_length: self.min_length,
             max_length: self.max_length,
             pattern: self.pattern.clone(),
+            pattern_message: self.pattern_message.clone(),
             prefix: self.prefix.clone(),
             suffix: self.suffix.clone(),
             trim: self.trim,
@@ -2562,6 +2681,30 @@ impl UIComponent {
                         self.key, f
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Load-time twin of `validate_unit_field_affixes` for a phase
+    /// `text_input` bound to a unit identity field: its `prefix` /
+    /// `suffix` compose into the recorded value, so a character the
+    /// server rejects would only surface at upload, after the test ran.
+    pub fn validate_identity_affixes(&self) -> Result<(), String> {
+        if self.component_type != UIComponentType::TextInput {
+            return Ok(());
+        }
+        let Some(bind) = self.bind.as_deref() else { return Ok(()) };
+        if !binds_unit_identity(bind) {
+            return Ok(());
+        }
+        for (name, affix) in [("prefix", self.prefix.as_deref()), ("suffix", self.suffix.as_deref())] {
+            let Some(affix) = affix else { continue };
+            if !affix.is_empty() && !is_identity_charset(affix) {
+                return Err(format!(
+                    "Component '{}': {name} '{affix}' is invalid for `bind: {bind}`: only letters, digits and _ . : + - are allowed",
+                    self.key
+                ));
             }
         }
         Ok(())
@@ -2784,6 +2927,70 @@ main:
         // too many
         let many: Vec<String> = (0..51).map(|i| format!("k{i}")).collect();
         assert!(validate_metadata_keys(many.iter().map(|s| s.as_str()), "metadata").is_err());
+    }
+
+    #[test]
+    fn validate_unit_field_affix_rules() {
+        let with_prefix = |p: &str| UnitFieldConfig {
+            prefix: Some(p.to_string()),
+            ..Default::default()
+        };
+        // valid, charset-restricted
+        assert!(validate_unit_field_affixes("unit.serial_number", &with_prefix("SN-"), true).is_ok());
+        // charset violation only rejected on identity fields
+        assert!(validate_unit_field_affixes("unit.serial_number", &with_prefix("SN "), true).is_err());
+        assert!(validate_unit_field_affixes("unit.metadata.note", &with_prefix("has space "), false).is_ok());
+        // empty and over-long rejected everywhere
+        assert!(validate_unit_field_affixes("unit.serial_number", &with_prefix(""), true).is_err());
+        let long = "p".repeat(51);
+        assert!(validate_unit_field_affixes("unit.serial_number", &with_prefix(&long), true).is_err());
+        // suffix checked with the same rules
+        let bad_suffix = UnitFieldConfig {
+            suffix: Some("@eu".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_unit_field_affixes("unit.serial_number", &bad_suffix, true).is_err());
+        assert!(validate_unit_field_affixes("operated_by", &bad_suffix, false).is_ok());
+    }
+
+    #[test]
+    fn bound_text_input_affixes_get_the_identity_charset_check() {
+        let comp = |bind: &str, prefix: &str| -> UIComponent {
+            serde_yaml::from_str(&format!(
+                "key: sn\ntype: text_input\nbind: {bind}\nprefix: \"{prefix}\"\n"
+            ))
+            .unwrap()
+        };
+        // Component affixes are trimmed at parse, so the violation here
+        // is a character the server rejects, not a stray space.
+        assert!(comp("unit.serial_number", "SN-").validate_identity_affixes().is_ok());
+        let err = comp("unit.serial_number", "SN#").validate_identity_affixes().unwrap_err();
+        assert!(err.contains("prefix 'SN#'"), "got: {err}");
+        assert!(comp("unit.sub_units.battery", "BAT/").validate_identity_affixes().is_err());
+        // Free text server-side: no charset rule.
+        assert!(comp("unit.metadata.note", "note#").validate_identity_affixes().is_ok());
+        assert!(comp("run.operated_by", "Dr.").validate_identity_affixes().is_ok());
+        assert!(comp("measurements.board", "PCB/").validate_identity_affixes().is_ok());
+        // Only text inputs compose.
+        let mut num = comp("unit.serial_number", "SN#");
+        num.component_type = UIComponentType::NumberInput;
+        assert!(num.validate_identity_affixes().is_ok());
+    }
+
+    #[test]
+    fn unit_config_validate_affixes_covers_all_fields() {
+        let mut cfg = UnitConfig::default();
+        assert!(cfg.validate_affixes().is_ok());
+        cfg.sub_units = Some(SubUnitsConfig(vec![SubUnitItemConfig {
+            label: "Battery".to_string(),
+            key: Some("battery".to_string()),
+            serial_number: Some(UnitFieldConfig {
+                prefix: Some("BAT ".to_string()), // space → charset violation
+                ..Default::default()
+            }),
+        }]));
+        let err = cfg.validate_affixes().unwrap_err();
+        assert!(err.contains("sub_units.battery"), "got: {err}");
     }
 
     #[test]

@@ -549,6 +549,45 @@ async fn dispatch(
             args_json,
             kwargs_json,
         } => plug_debug_call(state, plug_key, method, args_json, kwargs_json).await,
+        StudioRequest::ValidatePattern { pattern, value } => {
+            // The web editors' window into the daemon's pattern_messages
+            // module — the single source of operator-facing pattern
+            // wording (TP-760). `pattern: None` = the unit-identity
+            // charset, so clients never hardcode it.
+            let pattern = pattern.unwrap_or_else(|| {
+                station_protocol::pattern_messages::UNIT_FIELD_CHARSET_PATTERN.to_string()
+            });
+            // Compiled the way the station will compile it at run time
+            // (full-match, TP-1086) — the editor must not green-light a
+            // pattern the operator's entry would then be judged by
+            // differently.
+            let valid = station_protocol::pattern_messages::compile_field_pattern(&pattern).is_ok();
+            StudioResponse::PatternVerdict {
+                valid,
+                derivable: valid
+                    && station_protocol::pattern_messages::is_derivable_pattern(&pattern),
+                message: value.filter(|v| !v.is_empty()).and_then(|v| {
+                    let matches =
+                        station_protocol::pattern_messages::compile_field_pattern(&pattern)
+                            .map(|re| re.is_match(v.trim()))
+                            .unwrap_or(true);
+                    if matches {
+                        None
+                    } else {
+                        station_protocol::pattern_messages::derive_pattern_error(&pattern, v.trim())
+                    }
+                }),
+            }
+        }
+        StudioRequest::ValidateResponse { components, values } => {
+            // Straight through to the one validator every submit path
+            // runs (TP-760). Pure: no run, no session, no state — the
+            // web Studio's screen preview calls it so an authored screen
+            // can be felt rejecting the way the station rejects.
+            StudioResponse::ResponseVerdict {
+                errors: station_protocol::validate::validate_response(&components, &values),
+            }
+        }
         StudioRequest::PlugDebugSessions {} => StudioResponse::PlugDebugSessionList {
             plug_keys: state.plug_debug.session_keys().await,
         },
@@ -1048,8 +1087,11 @@ async fn get_sequence(config: &StudioConfig, root: &Path) -> StudioResponse {
             placeholder: f.placeholder.clone(),
             description: f.description.clone(),
             pattern: f.pattern.clone(),
+            pattern_message: f.pattern_message.clone(),
             min_length: f.min_length.map(|v| v.min(u32::MAX as usize) as u32),
             max_length: f.max_length.map(|v| v.min(u32::MAX as usize) as u32),
+            prefix: f.prefix.clone(),
+            suffix: f.suffix.clone(),
         }
     }
 

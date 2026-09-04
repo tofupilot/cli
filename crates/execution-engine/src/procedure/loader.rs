@@ -256,6 +256,10 @@ pub fn inspect_procedure_definition(content: &str) -> LoadOutcome {
             errors.push(LoadError::text(format!("Validation failed: {}", e)));
         }
 
+        if let Err(e) = unit.validate_affixes() {
+            errors.push(LoadError::text(format!("Validation failed: {}", e)));
+        }
+
         if let Some(md) = &unit.metadata {
             if let Err(e) = crate::procedure::schema::validate_metadata_keys(
                 md.keys().map(|k| k.as_str()),
@@ -263,6 +267,18 @@ pub fn inspect_procedure_definition(content: &str) -> LoadOutcome {
             ) {
                 errors.push(LoadError::text(format!("Validation failed: {}", e)));
             }
+        }
+    }
+
+    // `operated_by` is free text server-side (no charset), but its
+    // affixes still carry the length bound.
+    if let Some(operated_by) = &procedure_def.operated_by {
+        if let Err(e) = crate::procedure::schema::validate_unit_field_affixes(
+            "operated_by",
+            operated_by,
+            false,
+        ) {
+            errors.push(LoadError::text(format!("Validation failed: {}", e)));
         }
     }
 
@@ -278,6 +294,7 @@ pub fn inspect_procedure_definition(content: &str) -> LoadOutcome {
                         comp.validate_aspect(),
                         comp.validate_fit(),
                         comp.validate_options_count(),
+                        comp.validate_identity_affixes(),
                     ] {
                         if let Err(e) = check {
                             errors.push(LoadError::text(e));
@@ -1153,6 +1170,19 @@ main:
         let broken = inspect_procedure_definition("name: A\nmain:\n  - key: [x\n");
         assert!(broken.definition.is_none());
         assert_eq!(broken.errors.len(), 1);
+    }
+
+    #[test]
+    fn bound_identity_affix_outside_the_server_charset_fails_at_load() {
+        // The same guard `unit:` fields get, on the phase-prompt path
+        // that composes the affix into the recorded serial: catch the
+        // bad character here, not at upload after the test has run.
+        let yaml = "name: A\nmain:\n  - key: id\n    name: Identify\n    ui:\n      components:\n        - key: sn\n          type: text_input\n          bind: unit.serial_number\n          prefix: \"SN#\"\n";
+        let outcome = inspect_procedure_definition(yaml);
+        assert_eq!(outcome.errors.len(), 1, "got: {:?}", outcome.errors);
+        assert!(outcome.errors[0].message.contains("prefix 'SN#'"), "{:?}", outcome.errors);
+        let ok = yaml.replace("\"SN#\"", "\"SN-\"");
+        assert!(inspect_procedure_definition(&ok).errors.is_empty());
     }
 
     #[test]

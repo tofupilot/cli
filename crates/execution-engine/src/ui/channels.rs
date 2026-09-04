@@ -3,6 +3,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex, RwLock};
 
+use super::types::UiComponent;
+
+/// A prompt awaiting its operator response: the oneshot that resolves
+/// the waiting phase, plus the component spec that rendered the form.
+/// Carrying the spec here lets the submission chokepoint validate the
+/// operator's values against exactly what was asked (reject-on-submit,
+/// TP-760) with the same lifecycle as the channel itself — registered
+/// together, removed together, no separate registry to leak or drift.
+pub struct PendingUi {
+    pub sender: oneshot::Sender<HashMap<String, String>>,
+    pub components: Vec<UiComponent>,
+}
+
 /// Global map of UI response channels keyed by request_id.
 ///
 /// # Timeout Handling
@@ -13,9 +26,8 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 /// If the frontend never responds AND the phase has no timeout, the channel
 /// will remain in memory. This is acceptable as native UI phases are typically
 /// user-facing and have configured timeouts.
-pub static UI_RESPONSE_CHANNELS: Lazy<
-    Arc<Mutex<HashMap<String, oneshot::Sender<HashMap<String, String>>>>>,
-> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+pub static UI_RESPONSE_CHANNELS: Lazy<Arc<Mutex<HashMap<String, PendingUi>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 /// Slot each pending UI request belongs to (`None` = shared phase), so a
 /// slot stop can close only that slot's prompts. Kept beside
@@ -38,9 +50,16 @@ pub async fn register_ui_channel(
     request_id: String,
     slot_id: Option<String>,
     tx: oneshot::Sender<HashMap<String, String>>,
+    components: Vec<UiComponent>,
 ) {
     UI_CHANNEL_SLOTS.lock().await.insert(request_id.clone(), slot_id);
-    UI_RESPONSE_CHANNELS.lock().await.insert(request_id, tx);
+    UI_RESPONSE_CHANNELS.lock().await.insert(
+        request_id,
+        PendingUi {
+            sender: tx,
+            components,
+        },
+    );
 }
 
 /// Forget a request the worker is done with (answered, dismissed, or
@@ -154,8 +173,8 @@ mod tests {
     async fn slot_close_spares_the_other_slot() {
         let (tx_a, rx_a) = oneshot::channel();
         let (tx_b, mut rx_b) = oneshot::channel();
-        register_ui_channel("req-a".into(), Some("A".into()), tx_a).await;
-        register_ui_channel("req-b".into(), Some("B".into()), tx_b).await;
+        register_ui_channel("req-a".into(), Some("A".into()), tx_a, Vec::new()).await;
+        register_ui_channel("req-b".into(), Some("B".into()), tx_b, Vec::new()).await;
 
         close_slot_ui_channels_with_reason("A", "Slot 'A' aborted by phase 'x'".into()).await;
 

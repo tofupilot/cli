@@ -250,16 +250,19 @@ impl ActiveUiRequest {
     }
 
     /// Validate all input components. Populates `errors`, returns true if clean.
+    ///
+    /// Runs the ONE shared validator (station-protocol, TP-760) on the
+    /// same wire strings `collect_response` would send — so the TUI
+    /// recites byte-for-byte what the kiosk's reject-on-submit and the
+    /// engine's identify backstop recite. No TUI-local wording.
     pub fn validate(&mut self) -> bool {
-        self.errors.clear();
-        for (comp, state) in self.components.iter().zip(self.states.iter()) {
-            if !comp.is_input {
-                continue;
-            }
-            if let Some(err) = validate_one(comp, state) {
-                self.errors.insert(comp.key.clone(), err);
-            }
-        }
+        let resolved: std::collections::HashMap<String, String> = self
+            .components
+            .iter()
+            .zip(self.states.iter())
+            .filter_map(|(comp, state)| state.to_response(comp).map(|v| (comp.key.clone(), v)))
+            .collect();
+        self.errors = execution_engine::ui::validate_response(&self.components, &resolved);
         self.errors.is_empty()
     }
 
@@ -297,64 +300,6 @@ impl ActiveUiRequest {
         }
         out
     }
-}
-
-fn validate_one(comp: &UiComponent, state: &ComponentState) -> Option<String> {
-    let label = comp.label.as_deref().unwrap_or(&comp.key);
-
-    let is_empty = match state {
-        ComponentState::Text(s) | ComponentState::Number(s) | ComponentState::Textarea(s) => {
-            s.is_empty()
-        }
-        ComponentState::SingleChoice { value, .. } => value.is_none(),
-        ComponentState::MultiChoice { selected, .. } => selected.is_empty(),
-        ComponentState::Switch(_) | ComponentState::Slider(_) | ComponentState::Display => false,
-    };
-
-    if comp.required && is_empty {
-        return Some(format!("{label} is required"));
-    }
-    if is_empty {
-        return None;
-    }
-
-    if let ComponentState::Text(s) | ComponentState::Textarea(s) = state {
-        if let Some(min) = comp.min_length {
-            if s.chars().count() < min as usize {
-                return Some(format!("Minimum {min} characters"));
-            }
-        }
-        if let Some(max) = comp.max_length {
-            if s.chars().count() > max as usize {
-                return Some(format!("Maximum {max} characters"));
-            }
-        }
-        if let Some(ref pattern) = comp.pattern {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if !re.is_match(s) {
-                    return Some(format!("Must match pattern: {pattern}"));
-                }
-            }
-        }
-    }
-
-    if let ComponentState::Number(s) = state {
-        let Ok(n) = s.parse::<f64>() else {
-            return Some("Must be a number".to_string());
-        };
-        if let Some(min) = comp.min {
-            if n < min {
-                return Some(format!("Minimum {min}"));
-            }
-        }
-        if let Some(max) = comp.max {
-            if n > max {
-                return Some(format!("Maximum {max}"));
-            }
-        }
-    }
-
-    None
 }
 
 pub struct TuiState {
@@ -807,6 +752,44 @@ mod tests {
             phase_key: phase_key.into(),
             slot_id: None,
         }
+    }
+
+    /// The TUI's validate() wiring: it feeds the wire strings
+    /// `to_response` would send into the ONE shared validator
+    /// (station-protocol), so the TUI recites byte-for-byte what the
+    /// kiosk's reject-on-submit and the engine's identify backstop
+    /// recite (TP-760). This locks the glue, not the wording — the
+    /// wording suite lives in station-protocol.
+    #[test]
+    fn validate_recites_the_shared_validator_verbatim() {
+        use execution_engine::ui::{ComponentType, UiComponent};
+
+        let mut request = ui_request("req-1", "phase-1");
+        request.config.requires_input = Some(true);
+        request.config.components = vec![UiComponent {
+            key: "serial_number".into(),
+            required: true,
+            pattern: Some("^[A-Z0-9-]+$".into()),
+            ..UiComponent::new(ComponentType::TextInput)
+        }];
+        let mut active = ActiveUiRequest::new(&request);
+
+        // Empty required field: the shared wording, not a TUI-local one.
+        assert!(!active.validate());
+        assert_eq!(active.errors["serial_number"], "Required");
+
+        active.states[0] = ComponentState::Text("AB 1".into());
+        assert!(!active.validate());
+        assert_eq!(
+            active.errors["serial_number"],
+            "Remove the space (character 3) — allowed: uppercase letters, digits, -"
+        );
+
+        // `trim` (default true) applies before the check — a pasted
+        // value with stray whitespace validates as it will be sent.
+        active.states[0] = ComponentState::Text("  AB-1  ".into());
+        assert!(active.validate());
+        assert!(active.errors.is_empty());
     }
 
     fn radio_with_bind(key: &str, bind: &str, options: &[&str]) -> UiComponent {

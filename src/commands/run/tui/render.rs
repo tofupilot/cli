@@ -1005,11 +1005,32 @@ fn draw_text_input(
         Style::default()
     };
     let cursor = if is_focused { "_" } else { "" };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(format!("{focus_marker} {label}: "), label_style),
-        Span::styled(display_val, val_style),
-        Span::styled(cursor.to_string(), Style::default().fg(palette::RUNNING)),
-    ])];
+    // Affixes render as locked chrome around the input, mirroring the
+    // web operator UI's adornments: the operator types only the middle
+    // (the engine composes `prefix + input + suffix` for text inputs;
+    // number affixes are display-only units). Muted + bold so they read
+    // as fixed text, distinct from both the typed value and the muted
+    // placeholder — without the cue an operator would type the prefix
+    // themselves and get it doubled in the stored value.
+    let affix_style = Style::default()
+        .fg(palette::MUTED)
+        .add_modifier(Modifier::BOLD);
+    let mut value_spans = vec![Span::styled(
+        format!("{focus_marker} {label}: "),
+        label_style,
+    )];
+    if let Some(prefix) = comp.prefix.as_deref().filter(|p| !p.is_empty()) {
+        value_spans.push(Span::styled(prefix.to_string(), affix_style));
+    }
+    value_spans.push(Span::styled(display_val, val_style));
+    value_spans.push(Span::styled(
+        cursor.to_string(),
+        Style::default().fg(palette::RUNNING),
+    ));
+    if let Some(suffix) = comp.suffix.as_deref().filter(|s| !s.is_empty()) {
+        value_spans.push(Span::styled(suffix.to_string(), affix_style));
+    }
+    let mut lines = vec![Line::from(value_spans)];
     // Helper text below the input, mirroring operator-ui's FieldDescription.
     // Indented to align under the label, muted to read as a hint not a value.
     if let Some(desc) = comp.description.as_deref() {

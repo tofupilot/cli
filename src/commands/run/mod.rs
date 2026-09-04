@@ -1223,10 +1223,20 @@ pub async fn start(
     // UiResponse pump: drain the run-scoped ui_response_rx and
     // dispatch each response to the matching prompt. The pump exits
     // when the sender is dropped (run task tears down).
+    //
+    // Operator submissions are the validated path (TP-760): the one
+    // shared validator runs against the prompt's component spec, and a
+    // failing submission leaves the prompt pending and broadcasts
+    // `UiResponseRejected` with per-field messages — the kiosk / web
+    // console / dashboard render those on the still-open form. This is
+    // where the engine-derived pattern message reaches every remote
+    // surface; no client validates locally.
+    let ui_response_event_tx = event_tx.clone();
     let ui_response_handle = tokio::spawn(async move {
         while let Some(cmd) = ui_response_rx.recv().await {
             if let station_protocol::StationCommand::UiResponse { request_id, values } = cmd {
-                ui_response::send(&request_id, values).await;
+                let event = ui_response::submit(request_id, values).await;
+                let _ = ui_response_event_tx.send(event);
             }
             // Anything other than UiResponse on this channel is a
             // protocol bug at the sender — log and drop in debug,

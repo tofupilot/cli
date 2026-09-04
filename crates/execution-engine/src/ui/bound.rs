@@ -9,6 +9,8 @@
 //!
 //! The web reference is `packages/operator-ui/src/run-state.ts`.
 
+use std::collections::HashMap;
+
 use super::types::{ComponentType, UiComponent};
 
 /// Build the `__bound_measurements__` JSON payload from components that
@@ -118,6 +120,121 @@ where
     serde_json::to_string(&serde_json::Value::Object(out)).ok()
 }
 
+/// Compose `prefix + input + suffix` into the bound string values of a
+/// parsed `__bound_measurements__` payload, in place. This is the
+/// identify-unit contract (`identify_unit/resolve.rs`) applied to phase
+/// prompts: every surface validates and submits the operator's TYPED
+/// input, and the engine composes the affixes into the recorded value —
+/// so a text input with `prefix: "PCB-"` records "PCB-1234" no matter
+/// which UI ran the phase, and `pattern`/`min_length`/`max_length`
+/// never have to describe the affixes.
+///
+/// Only `text_input` components compose: their affixes render as locked
+/// adornments around the typed string. Number/slider affixes are
+/// display-only units ("kg", "V") whose bound values are JSON numbers,
+/// and no other type renders affixes at all.
+/// Blank / whitespace-only strings stay as-submitted: a deliberately
+/// cleared input still records its empty string (see the builder's
+/// empty-string note above) but must not record a bare prefix.
+pub fn compose_bound_affixes(
+    components: &[UiComponent],
+    bound: &mut HashMap<String, serde_json::Value>,
+) {
+    // bind target → (prefix, suffix). On a duplicate bind the later
+    // component wins, matching the builder's insert order (its value
+    // wins there too).
+    let mut affixes: HashMap<&str, (&str, &str)> = HashMap::new();
+    for comp in components {
+        if comp.component_type != ComponentType::TextInput {
+            continue;
+        }
+        let prefix = comp.prefix.as_deref().unwrap_or("");
+        let suffix = comp.suffix.as_deref().unwrap_or("");
+        if prefix.is_empty() && suffix.is_empty() {
+            continue;
+        }
+        if let Some(bind) = comp.bind.as_deref() {
+            affixes.insert(bind, (prefix, suffix));
+        }
+    }
+    if affixes.is_empty() {
+        return;
+    }
+
+    let wrap = |bind: &str, value: &mut serde_json::Value| {
+        let Some((prefix, suffix)) = affixes.get(bind) else {
+            return;
+        };
+        let Some(s) = value.as_str() else { return };
+        if s.trim().is_empty() {
+            return;
+        }
+        *value = serde_json::Value::String(format!("{prefix}{s}{suffix}"));
+    };
+
+    for (key, value) in bound.iter_mut() {
+        match key.as_str() {
+            "__unit__" => rewrite_nested(value, |obj| {
+                for field in [
+                    "serial_number",
+                    "part_number",
+                    "revision_number",
+                    "batch_number",
+                ] {
+                    if let Some(v) = obj.get_mut(field) {
+                        wrap(&format!("unit.{field}"), v);
+                    }
+                }
+                if let Some(serde_json::Value::Object(sub)) = obj.get_mut("sub_units") {
+                    for (sub_key, v) in sub.iter_mut() {
+                        wrap(&format!("unit.sub_units.{sub_key}"), v);
+                    }
+                }
+            }),
+            "__run__" => rewrite_nested(value, |obj| {
+                if let Some(v) = obj.get_mut("operated_by") {
+                    wrap("run.operated_by", v);
+                }
+            }),
+            name => {
+                // The builder accepts both bind spellings; try the
+                // canonical one first so a (pathological) procedure
+                // binding both never composes twice.
+                let long = format!("measurements.{name}");
+                if affixes.contains_key(long.as_str()) {
+                    wrap(&long, value);
+                } else {
+                    wrap(&format!("measurement.{name}"), value);
+                }
+            }
+        }
+    }
+}
+
+/// Apply `f` to a nested bound object that ships either as a JSON
+/// object or as a JSON-encoded string (`__unit__` / `__run__` — see the
+/// wire-form note in `build_bound_measurements_payload`), preserving
+/// whichever representation it arrived in.
+fn rewrite_nested(
+    value: &mut serde_json::Value,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    match value {
+        serde_json::Value::Object(obj) => f(obj),
+        serde_json::Value::String(s) => {
+            if let Ok(serde_json::Value::Object(mut obj)) =
+                serde_json::from_str::<serde_json::Value>(s)
+            {
+                f(&mut obj);
+                if let Ok(encoded) = serde_json::to_string(&serde_json::Value::Object(obj)) {
+                    *s = encoded;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +338,125 @@ mod tests {
             ..UiComponent::new(ComponentType::NumberInput)
         };
         assert!(build_bound_measurements_payload(&[num], |_| Some(String::new())).is_none());
+    }
+
+    fn affixed_text(key: &str, bind: &str, prefix: Option<&str>, suffix: Option<&str>) -> UiComponent {
+        UiComponent {
+            key: key.into(),
+            bind: Some(bind.into()),
+            prefix: prefix.map(Into::into),
+            suffix: suffix.map(Into::into),
+            ..UiComponent::new(ComponentType::TextInput)
+        }
+    }
+
+    fn bound_map(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn compose_wraps_bound_measurement_string() {
+        let comps = vec![affixed_text(
+            "pn",
+            "measurements.part_number",
+            Some("PCB-"),
+            Some("-REV"),
+        )];
+        let mut bound = bound_map(&[("part_number", serde_json::json!("1234"))]);
+        compose_bound_affixes(&comps, &mut bound);
+        assert_eq!(bound["part_number"], "PCB-1234-REV");
+    }
+
+    #[test]
+    fn compose_supports_singular_bind_spelling() {
+        let comps = vec![affixed_text("fw", "measurement.fw", Some("v"), None)];
+        let mut bound = bound_map(&[("fw", serde_json::json!("2.4.1"))]);
+        compose_bound_affixes(&comps, &mut bound);
+        assert_eq!(bound["fw"], "v2.4.1");
+    }
+
+    #[test]
+    fn compose_skips_blank_and_non_string_values() {
+        let comps = vec![
+            affixed_text("a", "measurements.a", Some("P-"), None),
+            affixed_text("b", "measurements.b", Some("P-"), None),
+        ];
+        // A cleared text input ships "" — must not become a bare "P-".
+        let mut bound = bound_map(&[
+            ("a", serde_json::json!("")),
+            ("b", serde_json::json!(42.0)),
+        ]);
+        compose_bound_affixes(&comps, &mut bound);
+        assert_eq!(bound["a"], "");
+        assert_eq!(bound["b"], 42.0);
+    }
+
+    #[test]
+    fn compose_ignores_non_text_components() {
+        // Number/slider affixes are display-only units, never composed.
+        let num = UiComponent {
+            key: "w".into(),
+            bind: Some("measurements.w".into()),
+            suffix: Some("kg".into()),
+            ..UiComponent::new(ComponentType::NumberInput)
+        };
+        let mut bound = bound_map(&[("w", serde_json::json!("12"))]);
+        compose_bound_affixes(&[num], &mut bound);
+        assert_eq!(bound["w"], "12");
+    }
+
+    #[test]
+    fn compose_wraps_unit_and_run_fields_in_string_form() {
+        let comps = vec![
+            affixed_text("sn", "unit.serial_number", Some("SN-"), None),
+            affixed_text("bat", "unit.sub_units.battery", Some("BAT-"), None),
+            affixed_text("op", "run.operated_by", None, Some("@acme.com")),
+        ];
+        // `__unit__` / `__run__` ship as JSON strings on the wire.
+        let unit = serde_json::json!({
+            "serial_number": "0042",
+            "part_number": "PCB",
+            "sub_units": { "battery": "001" }
+        });
+        let run = serde_json::json!({ "operated_by": "jane" });
+        let mut bound = bound_map(&[
+            ("__unit__", serde_json::json!(unit.to_string())),
+            ("__run__", serde_json::json!(run.to_string())),
+        ]);
+        compose_bound_affixes(&comps, &mut bound);
+
+        let unit_out: serde_json::Value =
+            serde_json::from_str(bound["__unit__"].as_str().unwrap()).unwrap();
+        assert_eq!(unit_out["serial_number"], "SN-0042");
+        // No affix configured for part_number — untouched.
+        assert_eq!(unit_out["part_number"], "PCB");
+        assert_eq!(unit_out["sub_units"]["battery"], "BAT-001");
+        let run_out: serde_json::Value =
+            serde_json::from_str(bound["__run__"].as_str().unwrap()).unwrap();
+        assert_eq!(run_out["operated_by"], "jane@acme.com");
+    }
+
+    #[test]
+    fn compose_wraps_unit_fields_in_object_form() {
+        // The engine's extractor accepts `__unit__` as a nested object
+        // too — compose must handle both wire forms.
+        let comps = vec![affixed_text("sn", "unit.serial_number", Some("SN-"), None)];
+        let mut bound = bound_map(&[(
+            "__unit__",
+            serde_json::json!({ "serial_number": "7" }),
+        )]);
+        compose_bound_affixes(&comps, &mut bound);
+        assert_eq!(bound["__unit__"]["serial_number"], "SN-7");
+    }
+
+    #[test]
+    fn compose_no_affixes_is_a_noop() {
+        let comps = vec![affixed_text("x", "measurements.x", None, None)];
+        let mut bound = bound_map(&[("x", serde_json::json!("keep"))]);
+        compose_bound_affixes(&comps, &mut bound);
+        assert_eq!(bound["x"], "keep");
     }
 }

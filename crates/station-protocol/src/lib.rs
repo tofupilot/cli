@@ -6,6 +6,19 @@ use specta::Type;
 mod shrink;
 pub use shrink::MAX_EVENT_BYTES;
 
+/// Operator-facing messages derived from a field's regex (TP-760).
+/// Lives in this crate — not the engine — because it is the single
+/// source of truth for every surface that shows a validation message:
+/// the engine and TUI call it natively, Studio's embedded runner
+/// depends on this crate for it, and the browser surfaces receive its
+/// output over the wire (`UiResponseRejected`, the studio-ws
+/// validate request). No client re-implements any of it.
+pub mod pattern_messages;
+
+/// Operator-response validation against a prompt's component spec —
+/// the one validator behind every submit path. See the module docs.
+pub mod validate;
+
 // ---------------------------------------------------------------------------
 // Station events (CLI -> Dashboard via Centrifugo)
 // ---------------------------------------------------------------------------
@@ -545,6 +558,32 @@ pub enum StationEvent {
         execution_id: Option<String>,
     },
 
+    /// An operator submission (`StationCommand::UiResponse`) failed
+    /// validation against the prompt's component spec. The prompt stays
+    /// pending — the waiting phase never sees the values — and the
+    /// submitting surface renders `errors` on the still-open form.
+    /// Covers phase prompts and identify-unit prompts alike (both park
+    /// on the same response channel). Correlation is by `request_id`
+    /// only: a rejection for a prompt the client no longer shows is
+    /// dropped on the floor.
+    ///
+    /// Messages come from `validate::validate_response` — the single
+    /// validator — so every surface shows identical wording. Clients
+    /// must not pre-validate and re-word.
+    UiResponseRejected {
+        request_id: String,
+        /// Component key → operator-facing message.
+        errors: std::collections::HashMap<String, String>,
+    },
+    /// The counterpart: the submission passed validation and resolved
+    /// the waiting phase — or the prompt was no longer pending (already
+    /// answered elsewhere, timed out, run moved on), which the client
+    /// treats identically: close the form. Submitting surfaces stay
+    /// pessimistic — they keep the form open in its submitting state
+    /// until one of Accepted / Rejected arrives, instead of the old
+    /// optimistic clear-on-send that a rejection could never reopen.
+    UiResponseAccepted { request_id: String },
+
     // -- Identify-unit lifecycle --
     //
     // Identity is run metadata, not a phase. These three events form
@@ -1054,6 +1093,34 @@ pub enum StudioRequest {
     /// on mount to resync after a reload — sessions live in the daemon
     /// and survive the browser.
     PlugDebugSessions {},
+    /// Classify a field regex and optionally diagnose a value against
+    /// it, using the daemon's `pattern_messages` module — the single
+    /// source of operator-facing pattern wording (TP-760). The web
+    /// Studio editors call this instead of re-implementing any of it
+    /// client-side: the sequence editor for its authoring nudge and
+    /// for checking author-typed unit values.
+    ValidatePattern {
+        /// Regex to check; `None` means the server's unit-identity
+        /// charset (`UNIT_FIELD_CHARSET_PATTERN`), so the client never
+        /// hardcodes it.
+        pattern: Option<String>,
+        /// Value to diagnose; `None` / empty classifies only.
+        value: Option<String>,
+    },
+    /// Judge a whole prompt submission against its components with
+    /// `validate::validate_response` — the same call the `ui_response`
+    /// chokepoint makes before it resolves a waiting phase. The web
+    /// Studio's screen preview submits through this so the preview
+    /// rejects exactly what a run would reject; the daemon touches no
+    /// run state answering it, and a preview needs no run.
+    ValidateResponse {
+        /// The prompt's components, as the previewed screen renders
+        /// them.
+        components: Vec<UiComponent>,
+        /// Component key -> submitted wire string, the shape
+        /// `StationCommand::UiResponse` carries.
+        values: std::collections::HashMap<String, String>,
+    },
 }
 
 /// A project root the session can switch to.
@@ -1214,6 +1281,26 @@ pub enum StudioResponse {
     },
     PlugDebugSessionList {
         plug_keys: Vec<String>,
+    },
+    /// Reply to `ValidateResponse`: component key -> operator-facing
+    /// message, empty when the submission would be accepted. Same map
+    /// as `StationEvent::UiResponseRejected.errors`, produced by the
+    /// same validator — a preview and a run cannot word a rejection
+    /// differently.
+    ResponseVerdict {
+        errors: std::collections::HashMap<String, String>,
+    },
+    /// Reply to `ValidatePattern`.
+    PatternVerdict {
+        /// Whether the pattern parses as a regex at all.
+        valid: bool,
+        /// Whether operator messages derive from the pattern by itself
+        /// — when false, the authoring nudge fires (a `pattern_message`
+        /// is the only way the operator learns the expected format).
+        derivable: bool,
+        /// Derived message for `value`: `None` when the value matches,
+        /// no value was sent, or nothing can be derived.
+        message: Option<String>,
     },
     Error {
         code: StudioErrorCode,
@@ -1401,9 +1488,15 @@ pub struct StudioSequenceUnitField {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
 }
 
 /// A phase's `executable:` block, projected for the editor.
@@ -1841,6 +1934,11 @@ pub struct UiComponent {
     pub max_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Author-written error shown when the value fails `pattern`.
+    /// Without it, clients derive a message from charset-only patterns
+    /// and fall back to a generic one for structural patterns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern_message: Option<String>,
     // Textarea-specific.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rows: Option<u32>,
@@ -1893,6 +1991,7 @@ impl UiComponent {
             min_length: None,
             max_length: None,
             pattern: None,
+            pattern_message: None,
             rows: None,
             prefix: None,
             suffix: None,
@@ -2367,6 +2466,8 @@ mod tests {
             execution_id: "e".into(),
             phases: vec![],
             slots: vec![],
+            slot_names: Default::default(),
+            slot_units: Default::default(),
             plugs: vec![],
             timestamp: None,
             run_id: None,

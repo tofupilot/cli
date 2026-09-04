@@ -302,6 +302,7 @@ impl Worker {
                 request_id.clone(),
                 job.slot_id.clone(),
                 tx,
+                job.ui_config.components.clone(),
             )
             .await;
 
@@ -490,7 +491,7 @@ impl Worker {
                                 log::debug!("UI already submitted for phase {}", job.phase_name);
                                 crate::ui::channels::unregister_ui_channel(&request_id).await;
                                 if let Some((unit_info, bound)) =
-                                    extract_bound_measurements(&ui_values)
+                                    extract_bound_measurements(&ui_values, &job.ui_config.components)
                                 {
                                     ui_unit_info = unit_info;
                                     ui_bound_measurements = Some(bound);
@@ -517,7 +518,7 @@ impl Worker {
                                             );
                                             crate::ui::channels::unregister_ui_channel(&request_id).await;
                                             if let Some((unit_info, bound)) =
-                                                extract_bound_measurements(&ui_values)
+                                                extract_bound_measurements(&ui_values, &job.ui_config.components)
                                             {
                                                 ui_unit_info = unit_info;
                                                 ui_bound_measurements = Some(bound);
@@ -1070,6 +1071,7 @@ impl Worker {
                     request_id.clone(),
                     job.slot_id.clone(),
                     tx,
+                    job.ui_config.components.clone(),
                 )
                 .await;
 
@@ -1111,7 +1113,7 @@ impl Worker {
             if let Some((request_id, rx)) = ui_response_rx {
                 let outcome = match rx.await {
                     Ok(ui_values) => {
-                        if let Some((ui_unit, bound)) = extract_bound_measurements(&ui_values) {
+                        if let Some((ui_unit, bound)) = extract_bound_measurements(&ui_values, &job.ui_config.components) {
                             // Mid-run native-phase identify: merge with
                             // the unit known when this job started so a
                             // partial scan (e.g. just a sub-unit serial)
@@ -1357,12 +1359,18 @@ fn extract_unit_info_from_json(
 
 fn extract_bound_measurements(
     ui_values: &HashMap<String, String>,
+    components: &[crate::ui::UiComponent],
 ) -> Option<(
     Option<crate::unit::UnitInfo>,
     HashMap<String, serde_json::Value>,
 )> {
     let bound_json = ui_values.get("__bound_measurements__")?;
     let mut bound: HashMap<String, serde_json::Value> = serde_json::from_str(bound_json).ok()?;
+    // Clients submit the operator's typed input; the recorded value for
+    // affixed text inputs is `prefix + input + suffix` — composed here,
+    // once, so every surface (web, TUI, agent, Studio) records the same
+    // value. Same contract as identify_unit/resolve.rs.
+    crate::ui::compose_bound_affixes(components, &mut bound);
 
     let mut unit_info = if let Some(unit_value) = bound.remove("__unit__") {
         let unit_data_opt = match &unit_value {

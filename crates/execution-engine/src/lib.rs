@@ -30,6 +30,11 @@ pub mod measurements;
 pub mod monitoring;
 pub mod orchestrator;
 pub mod path_utils;
+// The derived-message module lives in `station-protocol` (single
+// source for every surface, including Studio's embedded runner, which
+// doesn't depend on this crate). Re-exported so the historical
+// `execution_engine::pattern_messages::` paths keep working.
+pub use station_protocol::pattern_messages;
 pub mod plugs;
 pub mod procedure;
 pub mod protocol;

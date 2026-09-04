@@ -11,7 +11,11 @@
 //! `min_length` / `max_length` / `pattern` are forwarded to the UI for
 //! client-side feedback; the authoritative validation runs server-side
 //! in `crate::unit::validate_unit_info` against the same `UnitConfig`
-//! after the operator submits.
+//! after the operator submits. `prefix` / `suffix` are forwarded too:
+//! the UI renders them as adornments around the input, the operator
+//! types only the middle, and `resolve` validates that typed input
+//! against the length/pattern constraints before composing
+//! `prefix + input + suffix` as the stored value.
 
 use crate::procedure::{SubUnitsConfig, UnitConfig, UnitFieldConfig};
 use crate::ui::{ComponentType, ComponentValue, UiComponent};
@@ -39,20 +43,20 @@ pub fn build_components(
         .ok_or_else(|| "unit config missing part_number".to_string())?;
 
     let mut components = Vec::new();
-    components.push(text_input_component(
+    components.push(unit_identity_component(
         "serial_number",
         "Serial Number",
         serial_cfg,
         true,
     ));
-    components.push(text_input_component(
+    components.push(unit_identity_component(
         "part_number",
         "Part Number",
         part_cfg,
         true,
     ));
     if let Some(rev_cfg) = cfg.revision_number.as_ref() {
-        components.push(text_input_component(
+        components.push(unit_identity_component(
             "revision_number",
             "Revision Number",
             rev_cfg,
@@ -60,7 +64,7 @@ pub fn build_components(
         ));
     }
     if let Some(batch_cfg) = cfg.batch_number.as_ref() {
-        components.push(text_input_component(
+        components.push(unit_identity_component(
             "batch_number",
             "Batch Number",
             batch_cfg,
@@ -68,6 +72,8 @@ pub fn build_components(
         ));
     }
     if let Some(operated_cfg) = operated_by {
+        // A RUN property, free text server-side (an operator email
+        // needs its `@`) — never charset-defaulted.
         components.push(text_input_component(
             "operated_by",
             "Operated By",
@@ -103,9 +109,30 @@ fn build_sub_unit_components(cfg: &SubUnitsConfig) -> Vec<UiComponent> {
             let key = format!("sub_unit:{}", item.get_key());
             let label = item.label.clone();
             let field_cfg = item.serial_number.clone().unwrap_or_default();
-            text_input_component(&key, &label, &field_cfg, true)
+            unit_identity_component(&key, &label, &field_cfg, true)
         })
         .collect()
+}
+
+/// A unit-identity field (serial / part / revision / batch /
+/// sub-unit): like `text_input_component`, but a field the author left
+/// pattern-less still carries the server's identity charset — so the
+/// shared validator refuses a scan `runs.create` would reject, at
+/// submit time, with the recital derived from the charset itself.
+/// `operated_by` and `metadata:<key>` are free text server-side and
+/// must NOT come through here.
+fn unit_identity_component(
+    key: &str,
+    label: &str,
+    field: &UnitFieldConfig,
+    required: bool,
+) -> UiComponent {
+    let mut component = text_input_component(key, label, field, required);
+    if component.pattern.is_none() {
+        component.pattern =
+            Some(station_protocol::pattern_messages::UNIT_FIELD_CHARSET_PATTERN.to_string());
+    }
+    component
 }
 
 fn text_input_component(
@@ -127,6 +154,9 @@ fn text_input_component(
         min_length: field.min_length.map(|n| n as u32),
         max_length: field.max_length.map(|n| n as u32),
         pattern: field.pattern.clone(),
+        pattern_message: field.pattern_message.clone(),
+        prefix: field.prefix.clone(),
+        suffix: field.suffix.clone(),
         ..UiComponent::new(ComponentType::TextInput)
     }
 }
@@ -146,6 +176,9 @@ mod tests {
                 min_length: Some(4),
                 max_length: Some(24),
                 pattern: Some("^SN-".to_string()),
+                pattern_message: None,
+                prefix: None,
+                suffix: None,
             }),
             part_number: Some(UnitFieldConfig {
                 default_value: Some("PCB-V2".to_string()),
@@ -203,6 +236,40 @@ mod tests {
         assert_eq!(serial.max_length, Some(24));
         assert_eq!(serial.pattern.as_deref(), Some("^SN-"));
         assert!(serial.required);
+    }
+
+    /// A pattern-less unit-identity field carries the server's identity
+    /// charset so the shared submit validator refuses what `runs.create`
+    /// would reject. `operated_by` stays free text (emails need `@`).
+    #[test]
+    fn pattern_less_identity_fields_default_to_the_unit_charset() {
+        let mut cfg = cfg_with_required_fields();
+        cfg.serial_number = Some(UnitFieldConfig::default());
+        let components = build_components(&cfg, Some(&UnitFieldConfig::default())).unwrap();
+        let serial = components.iter().find(|c| c.key == "serial_number").unwrap();
+        assert_eq!(
+            serial.pattern.as_deref(),
+            Some(station_protocol::pattern_messages::UNIT_FIELD_CHARSET_PATTERN)
+        );
+        let operated = components.iter().find(|c| c.key == "operated_by").unwrap();
+        assert_eq!(operated.pattern, None);
+    }
+
+    #[test]
+    fn forwards_prefix_and_suffix() {
+        let mut cfg = cfg_with_required_fields();
+        cfg.serial_number = Some(UnitFieldConfig {
+            prefix: Some("SN-".to_string()),
+            suffix: Some("-EU".to_string()),
+            ..Default::default()
+        });
+        let components = build_components(&cfg, None).unwrap();
+        let serial = components
+            .iter()
+            .find(|c| c.key == "serial_number")
+            .unwrap();
+        assert_eq!(serial.prefix.as_deref(), Some("SN-"));
+        assert_eq!(serial.suffix.as_deref(), Some("-EU"));
     }
 
     #[test]
@@ -290,6 +357,7 @@ mod tests {
                 key: Some("rf_module".to_string()),
                 serial_number: Some(UnitFieldConfig {
                     pattern: Some("^RF-".to_string()),
+                    pattern_message: None,
                     ..Default::default()
                 }),
             },
@@ -317,6 +385,7 @@ mod tests {
             UnitFieldConfig {
                 placeholder: Some("MOD-42".to_string()),
                 pattern: Some("^MOD-[0-9]+$".to_string()),
+                pattern_message: None,
                 ..Default::default()
             },
         );

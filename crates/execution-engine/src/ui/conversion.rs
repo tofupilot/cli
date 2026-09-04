@@ -35,6 +35,7 @@ impl From<&SchemaUIComponent> for UiComponent {
             min_length: c.min_length,
             max_length: c.max_length,
             pattern: c.pattern.clone(),
+            pattern_message: c.pattern_message.clone(),
             prefix: c.prefix.clone(),
             suffix: c.suffix.clone(),
             trim: c.trim,

@@ -7,8 +7,75 @@
 
 use std::collections::HashMap;
 
-use crate::procedure::UnitConfig;
+use crate::procedure::{UnitConfig, UnitFieldConfig};
 use crate::unit::{validate_unit_info, UnitInfo};
+
+/// Wrap a present value with the field's configured `prefix` / `suffix`.
+/// The stored value is `prefix + input + suffix`, applied AFTER
+/// `validate_unit_info` — `pattern` / `min_length` / `max_length`
+/// describe the operator's typed input, not the composed value (so a
+/// prefix never has to be repeated inside the pattern). The reuse path
+/// ("Run again") replays stored values as-is and revalidates nothing.
+/// Absent / blank values stay absent: an optional field left empty must
+/// not materialize as a bare prefix.
+fn with_affixes(cfg: Option<&UnitFieldConfig>, value: Option<String>) -> Option<String> {
+    let value = value?;
+    let Some(cfg) = cfg else { return Some(value) };
+    let prefix = cfg.prefix.as_deref().unwrap_or("");
+    let suffix = cfg.suffix.as_deref().unwrap_or("");
+    if prefix.is_empty() && suffix.is_empty() {
+        return Some(value);
+    }
+    Some(format!("{prefix}{value}{suffix}"))
+}
+
+/// Compose every field of an already-validated `UnitInfo` with its
+/// configured affixes. Shared by the operator-response and
+/// auto-identify paths so both store identical values.
+pub fn apply_affixes(
+    cfg: &UnitConfig,
+    operated_by_cfg: Option<&UnitFieldConfig>,
+    info: UnitInfo,
+) -> UnitInfo {
+    let sub_units = info.sub_units.map(|map| {
+        let cfg_by_key: HashMap<String, &UnitFieldConfig> = cfg
+            .sub_units
+            .as_ref()
+            .map(|sub| {
+                sub.0
+                    .iter()
+                    .filter_map(|item| item.serial_number.as_ref().map(|f| (item.get_key(), f)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        map.into_iter()
+            .map(|(key, val)| {
+                let wrapped = with_affixes(cfg_by_key.get(&key).copied(), Some(val))
+                    .expect("value was present");
+                (key, wrapped)
+            })
+            .collect()
+    });
+    let metadata = info.metadata.map(|map| {
+        map.into_iter()
+            .map(|(key, val)| {
+                let field_cfg = cfg.metadata.as_ref().and_then(|md| md.get(&key));
+                let wrapped = with_affixes(field_cfg, Some(val)).expect("value was present");
+                (key, wrapped)
+            })
+            .collect()
+    });
+    UnitInfo {
+        serial_number: with_affixes(cfg.serial_number.as_ref(), info.serial_number),
+        part_number: with_affixes(cfg.part_number.as_ref(), info.part_number),
+        revision_number: with_affixes(cfg.revision_number.as_ref(), info.revision_number),
+        batch_number: with_affixes(cfg.batch_number.as_ref(), info.batch_number),
+        operated_by: with_affixes(operated_by_cfg, info.operated_by),
+        sub_units,
+        status: info.status,
+        metadata,
+    }
+}
 
 /// Parse the operator's response and validate it against the unit
 /// config. Sub-unit values are routed via the `sub_unit:<key>` prefix
@@ -91,8 +158,11 @@ pub fn resolve_response(
         },
     };
 
+    // Validate the typed input, then compose the affixes — the
+    // constraints describe what the operator enters, the affixes are a
+    // storage-side formatting step.
     validate_unit_info(&unit_info, &Some(cfg.clone()), operated_by_cfg)?;
-    Ok(unit_info)
+    Ok(apply_affixes(cfg, operated_by_cfg, unit_info))
 }
 
 /// Build a `UnitInfo` from `default_value` fields when
@@ -162,8 +232,12 @@ pub fn auto_identify_unit_info(
         metadata,
     };
 
+    // `default_value` pre-fills the *input* on the manual identify form,
+    // so it is validated as typed input and composed afterwards, exactly
+    // like a manual submit — auto and manual identify store the same
+    // value.
     validate_unit_info(&unit_info, &Some(cfg.clone()), operated_by_cfg)?;
-    Ok(unit_info)
+    Ok(apply_affixes(cfg, operated_by_cfg, unit_info))
 }
 
 #[cfg(test)]
@@ -433,6 +507,7 @@ mod tests {
             "modification".to_string(),
             UnitFieldConfig {
                 pattern: Some("^MOD-[0-9]+$".to_string()),
+                pattern_message: None,
                 ..Default::default()
             },
         );
@@ -480,6 +555,139 @@ mod tests {
 
         let info = resolve_response(&cfg, None, values).unwrap();
         assert!(info.metadata.is_none());
+    }
+
+    #[test]
+    fn resolve_response_wraps_value_with_affixes() {
+        let mut cfg = cfg_minimal();
+        cfg.serial_number = Some(UnitFieldConfig {
+            prefix: Some("SN-".to_string()),
+            suffix: Some("-EU".to_string()),
+            // Constraints describe the operator's typed input; the
+            // affixes are composed after validation.
+            pattern: Some("^[0-9]+$".to_string()),
+            pattern_message: None,
+            min_length: Some(4),
+            ..Default::default()
+        });
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), " 0042 ".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+
+        let info = resolve_response(&cfg, None, values).unwrap();
+        assert_eq!(info.serial_number.as_deref(), Some("SN-0042-EU"));
+    }
+
+    #[test]
+    fn resolve_response_validates_typed_input_not_composed_value() {
+        let mut cfg = cfg_minimal();
+        cfg.serial_number = Some(UnitFieldConfig {
+            prefix: Some("SN-".to_string()),
+            pattern: Some("^[0-9]{4}$".to_string()),
+            pattern_message: None,
+            ..Default::default()
+        });
+        // Too short for the typed-input pattern — rejected even though
+        // a composed-value reading ("SN-42" vs the pattern) would give
+        // a different failure shape.
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "42".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+        let err = resolve_response(&cfg, None, values).unwrap_err();
+        assert!(err.contains("serial_number"), "got: {err}");
+
+        // The full typed pattern passes without mentioning the prefix.
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "0042".to_string());
+        values.insert("part_number".to_string(), "PCB".to_string());
+        let info = resolve_response(&cfg, None, values).unwrap();
+        assert_eq!(info.serial_number.as_deref(), Some("SN-0042"));
+    }
+
+    #[test]
+    fn resolve_response_blank_optional_field_is_not_wrapped() {
+        let mut cfg = cfg_minimal();
+        cfg.revision_number = Some(UnitFieldConfig {
+            prefix: Some("REV-".to_string()),
+            ..Default::default()
+        });
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN".to_string());
+        values.insert("part_number".to_string(), "PN".to_string());
+        values.insert("revision_number".to_string(), "  ".to_string());
+
+        let info = resolve_response(&cfg, None, values).unwrap();
+        // No bare "REV-" from an empty input.
+        assert!(info.revision_number.is_none());
+    }
+
+    #[test]
+    fn resolve_response_wraps_sub_unit_and_metadata_and_operated_by() {
+        let mut cfg = cfg_minimal();
+        cfg.sub_units = Some(SubUnitsConfig(vec![SubUnitItemConfig {
+            label: "Battery".to_string(),
+            key: Some("battery".to_string()),
+            serial_number: Some(UnitFieldConfig {
+                prefix: Some("BAT-".to_string()),
+                ..Default::default()
+            }),
+        }]));
+        let mut md = std::collections::BTreeMap::new();
+        md.insert(
+            "modification".to_string(),
+            UnitFieldConfig {
+                prefix: Some("MOD-".to_string()),
+                ..Default::default()
+            },
+        );
+        cfg.metadata = Some(md);
+        let operated = UnitFieldConfig {
+            suffix: Some("@acme.com".to_string()),
+            ..Default::default()
+        };
+
+        let mut values = HashMap::new();
+        values.insert("serial_number".to_string(), "SN".to_string());
+        values.insert("part_number".to_string(), "PN".to_string());
+        values.insert("sub_unit:battery".to_string(), "001".to_string());
+        values.insert("metadata:modification".to_string(), "42".to_string());
+        values.insert("operated_by".to_string(), "jane".to_string());
+
+        let info = resolve_response(&cfg, Some(&operated), values).unwrap();
+        assert_eq!(
+            info.sub_units.unwrap().get("battery").map(String::as_str),
+            Some("BAT-001")
+        );
+        assert_eq!(
+            info.metadata.unwrap().get("modification").map(String::as_str),
+            Some("MOD-42")
+        );
+        assert_eq!(info.operated_by.as_deref(), Some("jane@acme.com"));
+    }
+
+    #[test]
+    fn auto_identify_wraps_defaults_with_affixes() {
+        let cfg = UnitConfig {
+            auto_identify: true,
+            serial_number: Some(UnitFieldConfig {
+                default_value: Some("0042".to_string()),
+                prefix: Some("SN-".to_string()),
+                ..Default::default()
+            }),
+            part_number: Some(UnitFieldConfig {
+                default_value: Some("PCB".to_string()),
+                suffix: Some("-V2".to_string()),
+                ..Default::default()
+            }),
+            revision_number: None,
+            batch_number: None,
+            sub_units: None,
+            metadata: None,
+        };
+        let info = auto_identify_unit_info(&cfg, None).unwrap();
+        // Same stored value as a manual submit of the pre-filled default.
+        assert_eq!(info.serial_number.as_deref(), Some("SN-0042"));
+        assert_eq!(info.part_number.as_deref(), Some("PCB-V2"));
     }
 
     #[test]

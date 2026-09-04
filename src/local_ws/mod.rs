@@ -377,12 +377,19 @@ struct HelloPayload {
     #[serde(rename = "userName", skip_serializing_if = "Option::is_none")]
     user_name: Option<String>,
     /// Feature capabilities of this server, advertised so remote hosts
-    /// (dashboard Studio) can gate UI on what the daemon supports
-    /// instead of hanging on unanswered requests. Empty on kiosk-only
-    /// servers; `enable_studio` appends `"studio-rpc-v1"`.
+    /// (kiosk, dashboard Studio) can gate UI on what the daemon supports
+    /// instead of hanging on unanswered requests. Every server carries
+    /// `BASE_CAPABILITIES`; `enable_studio` appends the studio set.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     capabilities: Vec<String>,
 }
+
+/// Capabilities of every local server, studio or kiosk-only.
+///
+/// `ui_response_verdict`: each `ui_response` is answered with
+/// `ui_response_accepted` / `ui_response_rejected` (`ui_response::submit`),
+/// so the operator UI waits for the verdict instead of a grace timer.
+const BASE_CAPABILITIES: &[&str] = &["ui_response_verdict"];
 
 impl HelloPayload {
     /// The one identity→payload fan-out, shared by `Server::start` and
@@ -901,7 +908,7 @@ impl Server {
             user_id: None,
             user_email: None,
             user_name: None,
-            capabilities: Vec::new(),
+            capabilities: BASE_CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         };
         hello_payload.apply_identity(identity);
         let hello = Arc::new(Mutex::new(hello_payload));
@@ -1132,6 +1139,7 @@ impl Server {
             "idle_files",
             "plug_debug",
             "phase_executable",
+            "preview_validate",
         ] {
             if !hello.capabilities.iter().any(|c| c == cap) {
                 hello.capabilities.push(cap.to_string());

@@ -297,7 +297,7 @@ fn coerce_value(
                         }
                     }
                     if let Some(ref pattern) = component.pattern {
-                        match regex::Regex::new(pattern) {
+                        match station_protocol::pattern_messages::compile_field_pattern(pattern) {
                             Ok(re) if !re.is_match(trimmed) => {
                                 return Err(ValidationError {
                                     reason: UiErrorReason::InvalidValue,

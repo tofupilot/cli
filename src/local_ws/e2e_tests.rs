@@ -861,3 +861,49 @@ async fn rpc_pick_project_grants_nothing_when_a_run_started_mid_dialog() {
         "a voided pick must not leave a granted root behind",
     );
 }
+
+/// The Studio screen preview submits through `validate_response` — the
+/// browser's only way to reach the station's validator. Locks the wire
+/// shape end to end: the exact JSON the preview posts (identify-unit
+/// components with every optional absent, the shape
+/// `fallbackUnitComponents()` builds) must come back as a verdict
+/// keyed by component, never as a parse or dispatch failure. When this
+/// broke silently, the preview accepted everything.
+#[tokio::test]
+async fn rpc_validate_response_judges_a_previewed_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_project(dir.path());
+    let server = studio_server(dir.path()).await;
+    let token = server.session_token().to_string();
+
+    // A pattern the operator's entry violates, plus an empty required
+    // field: two failures, one round trip.
+    let body = r#"{"op":"validate_response","components":[
+        {"key":"serial_number","type":"text_input","label":"Serial Number","is_input":true,"required":true,"pattern":"^[A-Z0-9-]+$"},
+        {"key":"part_number","type":"text_input","label":"Part Number","is_input":true,"required":true}
+    ],"values":{"serial_number":"sn 1","part_number":""}}"#;
+    let (status, value) = rpc(&server, Some(&token), body).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(value["result"], "response_verdict", "got {value}");
+    // Both fields are named, and neither message leaks the raw regex.
+    let errors = &value["errors"];
+    assert!(errors["serial_number"].is_string(), "got {value}");
+    assert!(
+        !errors["serial_number"]
+            .as_str()
+            .unwrap()
+            .contains("^[A-Z0-9-]+$"),
+        "the operator must never be shown the regex: {errors}"
+    );
+    assert_eq!(errors["part_number"], "Required");
+
+    // The accepted case answers with an empty map, not an absent key —
+    // the preview reads `Object.keys(errors).length`.
+    let ok = r#"{"op":"validate_response","components":[
+        {"key":"serial_number","type":"text_input","label":"Serial Number","is_input":true,"required":true,"pattern":"^[A-Z0-9-]+$"}
+    ],"values":{"serial_number":"SN-1"}}"#;
+    let (status, value) = rpc(&server, Some(&token), ok).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(value["result"], "response_verdict", "got {value}");
+    assert_eq!(value["errors"], serde_json::json!({}), "got {value}");
+}
