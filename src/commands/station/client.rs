@@ -24,6 +24,9 @@ struct StreamingChannels {
 }
 
 /// Messages from the event listener to the station loop.
+// `Event` is the hot path; boxing it would cost an allocation per
+// published event to save a few hundred bytes on the other variants.
+#[allow(clippy::large_enum_variant)]
 pub enum StreamMsg {
     Command(StationCommand),
     /// A `StationEvent` published by someone else on this station's
@@ -527,6 +530,7 @@ mod tests {
         let (msg_tx, mut msg_rx) = mpsc::channel::<StreamMsg>(8);
 
         let command = StationCommand::Run {
+            reuse_units: None,
             procedure_id: Some("proc_1".to_string()),
             reuse_unit: None,
             operated_by: None,

@@ -518,6 +518,8 @@ fn run_started() -> StationEvent {
         execution_id: "exec-1".into(),
         phases: Vec::new(),
         slots: Vec::new(),
+        slot_names: Default::default(),
+        slot_units: Default::default(),
         plugs: Vec::new(),
         timestamp: None,
         run_id: None,
@@ -529,6 +531,7 @@ fn run_started() -> StationEvent {
 
 fn run_complete() -> StationEvent {
     StationEvent::RunComplete {
+        slot_outcomes: Default::default(),
         outcome: "PASS".into(),
         run_id: None,
         execution_id: Some("exec-1".into()),

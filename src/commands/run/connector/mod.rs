@@ -674,6 +674,8 @@ pub async fn run_openhtf(
                         execution_id: eid.clone(),
                         phases: plans,
                         slots: Vec::new(),
+                        slot_names: Default::default(),
+                        slot_units: Default::default(),
                         plugs: Vec::new(),
                         timestamp: Some(chrono::Utc::now().to_rfc3339()),
                         run_id: None,
@@ -746,7 +748,7 @@ pub async fn run_openhtf(
                     phases.push(event);
                 }
                 PythonEvent::TestEnd { outcome } => {
-                    super::emit::run_complete(&tx, &outcome, &eid, None);
+                    super::emit::run_complete(&tx, &outcome, &eid, None, Default::default());
                     test_end = Some(event);
                 }
                 PythonEvent::Prompt {
@@ -1185,7 +1187,13 @@ pub async fn run_openhtf(
             // every cancelled-mid-prompt run; the leak is per-process
             // but accumulates across multi-procedure CLI invocations.
             super::ui_response::cancel_all().await;
-            super::emit::run_complete(&crash_tx, super::outcomes::ABORTED, execution_id, None);
+            super::emit::run_complete(
+                &crash_tx,
+                super::outcomes::ABORTED,
+                execution_id,
+                None,
+                Default::default(),
+            );
             if let Some(ref agent) = agent {
                 agent.emitter.enqueue(CliEvent::RunCrashed {
                     exit_code,

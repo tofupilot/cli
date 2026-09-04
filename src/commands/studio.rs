@@ -543,6 +543,7 @@ async fn run_dispatcher(
                         Some(true),
                         Some(server.clone()),
                         reuse_unit,
+                        None,
                         operated_by,
                         // Local project driven from the browser: provision
                         // the venv without a terminal prompt — the operator

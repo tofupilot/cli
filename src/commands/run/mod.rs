@@ -656,6 +656,9 @@ pub async fn start(
     // `identify_resolved` event with these values directly, so the
     // run begins with the same unit as the previous cycle.
     reuse_unit: Option<station_protocol::UnitInfo>,
+    // Multi-slot "Run again": unit to reuse per slot key; slots absent
+    // from the map fall back to `reuse_unit`, then to their prompt.
+    reuse_units: Option<std::collections::HashMap<String, station_protocol::UnitInfo>>,
     // Email forwarded to `runs.create` as `operated_by`. Set when the
     // run was triggered from the web operator UI; None for kiosk and
     // CLI-driven runs.
@@ -1318,7 +1321,8 @@ pub async fn start(
             || kiosk_enabled
             || local_ws_server.is_some()
             || has_publisher
-            || reuse_unit.is_some();
+            || reuse_unit.is_some()
+            || reuse_units.is_some();
         let run_fut = run_test(
             &proc_id,
             &proc_name,
@@ -1335,6 +1339,7 @@ pub async fn start(
             agent_for_test,
             has_ui,
             reuse_unit,
+            reuse_units,
             operated_by,
             cancel_rx,
             run_opts.clone(),
@@ -1479,6 +1484,7 @@ pub async fn run_cmd(
         None,
         // Standalone runs always identify normally — the
         // "Run again" flow only exists in station mode.
+        None,
         None,
         // Standalone CLI runs are unattributed; only web-mode operator
         // UI runs forward an `operated_by` email.
@@ -1837,6 +1843,9 @@ async fn run_test(
     // of hanging on a unit prompt nobody can answer.
     has_ui: bool,
     reuse_unit: Option<station_protocol::UnitInfo>,
+    // Multi-slot "Run again": unit to reuse per slot key; slots absent
+    // from the map fall back to `reuse_unit`, then to their prompt.
+    reuse_units: Option<std::collections::HashMap<String, station_protocol::UnitInfo>>,
     // Email forwarded to `runs.create` as `operated_by`. Set when the
     // run was triggered from the web operator UI; None for kiosk and
     // CLI-driven runs.
@@ -1881,6 +1890,7 @@ async fn run_test(
                 agent,
                 has_ui,
                 reuse_unit,
+                reuse_units,
                 operated_by,
                 cancel_rx,
                 run_opts,

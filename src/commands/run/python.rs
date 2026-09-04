@@ -237,6 +237,8 @@ pub async fn execute(
             execution_id: c.execution_id.clone(),
             phases: Vec::new(),
             slots: Vec::new(),
+            slot_names: Default::default(),
+            slot_units: Default::default(),
             plugs: Vec::new(),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
             run_id: None,
@@ -336,6 +338,7 @@ pub async fn execute(
             super::outcomes::from_exit_code(exit_code),
             &c.execution_id,
             None,
+            Default::default(),
         );
     }
     exit_code

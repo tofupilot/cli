@@ -26,18 +26,24 @@ impl Orchestrator {
             ),
         };
 
+        // Stop scope = job scope: a phase finishing while ITS slot is
+        // stopping (or the execution is) was cut short, whatever it
+        // reports. Single slot: identical to reading the execution flag.
         let (shutdown_requested, should_stop_on_first_failure) = {
             let state = self.state.read().await;
-            (state.shutdown_requested, state.should_stop_on_first_failure)
+            (
+                state.is_stopping_for(event.original_job.slot_id.as_deref()),
+                state.should_stop_on_first_failure,
+            )
         };
 
-        // When operator stops the run, the worker process is killed mid-phase
-        // and the python phase body raises, surfacing a traceback in
-        // `job_result.error`. That error is a consequence of the stop, not a
-        // real phase failure — drop it so the outcome resolver classifies the
-        // phase as STOP, not ERROR. Without this the UI flickers from
-        // "aborted" (emitted by the shutdown handler) to "error" (emitted
-        // here when the killed phase finally reports back).
+        // When a stop cuts a phase, the worker surfaces the cut as an error
+        // (a killed body's traceback, a cancelled operator prompt's
+        // "required input missing"). That error is a consequence of the
+        // stop, not a real phase failure — drop it so the outcome resolver
+        // classifies the phase as STOP, not ERROR. Without this the UI
+        // flickers from "aborted" to "error" when the phase reports back,
+        // and a slot whose neighbour phase failed reads ERROR.
         if shutdown_requested {
             job_result.error = None;
         }

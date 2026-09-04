@@ -784,6 +784,8 @@ mod tests {
             execution_id: "exec-test".into(),
             phases,
             slots: Vec::new(),
+            slot_names: Default::default(),
+            slot_units: Default::default(),
             plugs: Vec::new(),
             timestamp: None,
             run_id: None,
@@ -971,6 +973,7 @@ mod tests {
         s.set_ui_request(&ui_request("r1", "k1"));
         assert!(s.active_ui.is_some());
         let terminal = s.apply(StationEvent::RunComplete {
+            slot_outcomes: Default::default(),
             outcome: "PASS".into(),
             run_id: None,
             execution_id: None,
@@ -1044,6 +1047,8 @@ mod tests {
                 },
             ],
             slots: vec!["s1".into(), "s2".into()],
+            slot_names: Default::default(),
+            slot_units: Default::default(),
             plugs: Vec::new(),
             timestamp: None,
             run_id: None,

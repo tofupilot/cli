@@ -467,6 +467,7 @@ pub async fn upload_queued_run(
             let _ = bus.send(StationEvent::RunUploaded {
                 procedure_id: queued.request.procedure_id.clone(),
                 run_id: run_id.clone(),
+                slot_key: slot_key_of(&queued.request),
                 dashboard_url,
             });
         }
@@ -523,6 +524,14 @@ fn record_failure(
             error: cls.error.clone(),
             next_retry_at: next_retry_at.map(|t| t.to_rfc3339()),
         });
+    }
+}
+
+/// The slot a queued run belongs to, on multi-slot uploads.
+fn slot_key_of(request: &RunCreateRequest) -> Option<String> {
+    match &request.slot_key {
+        tofupilot_sdk::types::NullableField::Value(v) => Some(v.clone()),
+        _ => None,
     }
 }
 
@@ -694,6 +703,7 @@ pub fn enqueue(
             queue_id: queue_id.to_string(),
             procedure_id: queued.request.procedure_id.clone(),
             outcome: queued.request.outcome.to_string(),
+            slot_key: slot_key_of(&queued.request),
             serial_number: Some(queued.request.serial_number.clone()),
             attachment_count: queued.attachments.len() as u32,
             queued_at: queued
@@ -843,6 +853,7 @@ pub fn snapshot_events() -> Vec<StationEvent> {
             queue_id: queue_id.clone(),
             procedure_id: q.request.procedure_id.clone(),
             outcome: q.request.outcome.to_string(),
+            slot_key: slot_key_of(&q.request),
             serial_number: Some(q.request.serial_number.clone()),
             attachment_count: q.attachments.len() as u32,
             queued_at: q

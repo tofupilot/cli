@@ -1,0 +1,67 @@
+# Demo fixture for the multi-slot operator UI: four slots, slow enough to
+# watch, one operator prompt per slot and one shared prompt. Not run in
+# CI (ci_smoke would sit on the prompts); the CI fixture is
+# ../yaml_multislot.
+name: Multi-slot demo
+version: 1.0.0
+description: Four-nest burn-in fixture with operator checks
+
+execution:
+  strategy: phase_first
+  workers: 4
+  slots:
+    - key: s1
+      name: Nest 1
+    - key: s2
+      name: Nest 2
+    - key: s3
+      name: Nest 3
+    - key: s4
+      name: Nest 4
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: "DEMO-{slot}"
+  part_number:
+    default_value: "PCB-DEMO"
+  batch_number:
+    default_value: "{slot_name}"
+
+setup:
+  - key: power_on
+    name: Power on rack
+    scope: execution
+    python: phases.rack:power_on
+  - key: prep
+    name: Prepare nest
+    python: phases.nest:prep
+
+main:
+  - key: seat
+    name: Confirm board seated
+    python: phases.nest:seat
+    ui:
+      components:
+        - type: text
+          key: hint
+          label: Check the board is fully seated in the nest, then confirm.
+        - type: switch
+          key: seated
+          label: Board seated
+          required: true
+  - key: measure
+    name: Measure
+    python: phases.nest:measure
+  - key: burn_in
+    name: Burn-in
+    python: phases.nest:burn_in
+
+teardown:
+  - key: release
+    name: Release nest
+    python: phases.nest:release
+  - key: power_off
+    name: Power off rack
+    scope: execution
+    python: phases.rack:power_off

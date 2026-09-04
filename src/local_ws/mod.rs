@@ -2345,6 +2345,7 @@ mod tests {
             StationCommand::Run {
                 procedure_id: None,
                 reuse_unit: None,
+                reuse_units: None,
                 operated_by: None,
                 only_phase: None,
             },

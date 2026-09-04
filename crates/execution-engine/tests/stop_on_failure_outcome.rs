@@ -235,9 +235,9 @@ main:
 /// failed, and must read FAIL, not STOP. This is the shape a
 /// multi-fixture station runs in; single-worker tests never produce it.
 ///
-/// Since stop scope follows job scope, the failure stops the slot without
-/// raising the execution flag, so `Slow` keeps its real outcome (PASS)
-/// instead of a manufactured Stop.
+/// Stop scope follows job scope: the failure stops the slot, and `Slow`,
+/// finishing under its slot's stop, reads Stop exactly as it did when the
+/// execution flag carried the stop.
 #[tokio::test]
 async fn failing_phase_with_a_sibling_in_flight_reports_fail() {
     let Some(python) = python3() else {
@@ -267,7 +267,7 @@ main:
     assert_eq!(events.outcome_of("bad"), Some(Outcome::Fail));
     assert_eq!(
         events.outcome_of("slow"),
-        Some(Outcome::Pass),
-        "a sibling finishing after the failure keeps its real outcome"
+        Some(Outcome::Stop),
+        "a sibling finishing under its slot's stop reads Stop, never a failure of its own"
     );
 }

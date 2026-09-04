@@ -24,11 +24,14 @@ pub fn run_complete(
     outcome: &str,
     execution_id: &str,
     run_id: Option<String>,
+    // Per-slot outcomes on a multi-slot run; empty otherwise.
+    slot_outcomes: std::collections::HashMap<String, String>,
 ) {
     let _ = tx.send(StationEvent::RunComplete {
         outcome: outcome.to_string(),
         run_id,
         execution_id: Some(execution_id.to_string()),
+        slot_outcomes,
     });
 }
 
@@ -55,7 +58,7 @@ pub fn run_crashed(
         error_kind: error_kind.to_string(),
         execution_id: Some(execution_id.to_string()),
     });
-    run_complete(tx, outcomes::ERROR, execution_id, None);
+    run_complete(tx, outcomes::ERROR, execution_id, None, Default::default());
     if let Some(agent) = agent {
         agent.emitter.enqueue(CliEvent::RunCrashed {
             exit_code,

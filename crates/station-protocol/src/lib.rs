@@ -112,6 +112,17 @@ pub enum StationEvent {
         /// where `slot_id` on phase events is `None`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         slots: Vec<String>,
+        /// Display names of the declared slots (`execution.slots[].name`),
+        /// keyed by slot id. Empty when the procedure declares none.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        slot_names: std::collections::HashMap<String, String>,
+        /// Multi-slot: the unit identified for each slot before the run
+        /// started, keyed by slot id. Lets a consumer that joins mid-run
+        /// (hydration replay) show every slot's serial without folding the
+        /// pre-run `identify_resolved` events. Empty on single-slot runs,
+        /// where `unit` carries the one unit.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        slot_units: std::collections::HashMap<String, UnitInfo>,
         /// Plug definitions declared by the procedure. Lets consumers
         /// pre-seed their plug state instead of materializing entries
         /// on the first `plug_status` / `plug_log` event — avoids
@@ -290,6 +301,11 @@ pub enum StationEvent {
         outcome: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+        /// Multi-slot procedures: each slot's own outcome (`slot_id` →
+        /// outcome string), the outcome its uploaded run carries. Empty on
+        /// single-slot runs, whose `outcome` already is the run's.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        slot_outcomes: std::collections::HashMap<String, String>,
         /// Matches the `execution_id` from `RunStarted`. Lets consumers
         /// drop a terminal event whose run is no longer the active one
         /// (e.g. a cancelled run's `RunComplete(ABORTED)` arriving after
@@ -305,6 +321,10 @@ pub enum StationEvent {
     RunUploaded {
         procedure_id: String,
         run_id: String,
+        /// Slot whose run this is, on multi-slot procedures. None on a
+        /// single-slot run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot_key: Option<String>,
         /// Absolute URL the operator can hit to view the run in the
         /// dashboard. Built by the CLI from its `base_url` so the
         /// client doesn't have to guess between cloud and self-hosted.
@@ -324,6 +344,9 @@ pub enum StationEvent {
         queue_id: String,
         procedure_id: String,
         outcome: String,
+        /// Slot whose run this is, on multi-slot procedures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         serial_number: Option<String>,
         attachment_count: u32,
@@ -669,6 +692,12 @@ pub enum StationCommand {
         /// the normal identify flow.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reuse_unit: Option<UnitInfo>,
+        /// Multi-slot "Run again": the unit to reuse per slot key. A slot
+        /// absent from the map is identified as usual, so a fixture can
+        /// rerun with some nests reloaded. Takes precedence over
+        /// `reuse_unit` for the slots it names.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reuse_units: Option<std::collections::HashMap<String, UnitInfo>>,
         /// Email of the dashboard user who pressed Run from the web
         /// operator UI. Forwarded to `runs.create` v2 as `operated_by`
         /// so the resulting run is attributed to that user. None when

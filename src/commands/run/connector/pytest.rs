@@ -505,6 +505,8 @@ pub async fn run_pytest(
                         execution_id: eid.clone(),
                         phases: plans,
                         slots: Vec::new(),
+                        slot_names: Default::default(),
+                        slot_units: Default::default(),
                         plugs: Vec::new(),
                         timestamp: Some(chrono::Utc::now().to_rfc3339()),
                         run_id: None,
@@ -564,7 +566,7 @@ pub async fn run_pytest(
                     phases.push(event);
                 }
                 PythonEvent::TestEnd { outcome } => {
-                    super::super::emit::run_complete(&tx, &outcome, &eid, None);
+                    super::super::emit::run_complete(&tx, &outcome, &eid, None, Default::default());
                     test_end = Some(event);
                 }
                 PythonEvent::Prompt { .. } => {
@@ -670,6 +672,7 @@ pub async fn run_pytest(
             super::super::outcomes::ABORTED,
             execution_id,
             None,
+            Default::default(),
         );
         if let Some(ref agent) = agent {
             agent.emitter.enqueue(CliEvent::RunCrashed {

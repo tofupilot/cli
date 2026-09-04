@@ -681,6 +681,7 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                 Some(&only),
                 None,
                 None,
+                None,
                 json_mode,
                 creds,
                 client.as_ref(),
@@ -1363,6 +1364,7 @@ async fn handle_command(
         StationCommand::Run {
             procedure_id,
             reuse_unit,
+            reuse_units,
             operated_by,
             // Partial runs are a Studio feature; the station operator UI
             // never sends a phase selection.
@@ -1426,6 +1428,7 @@ async fn handle_command(
             *active_run = try_start_run(
                 resolved_id.as_deref(),
                 reuse_unit,
+                reuse_units,
                 operated_by,
                 json_mode,
                 creds,
@@ -1804,6 +1807,7 @@ fn web_ui_line(creds: &Credentials, station_id: &str) -> String {
 async fn try_start_run(
     procedure_id: Option<&str>,
     reuse_unit: Option<station_protocol::UnitInfo>,
+    reuse_units: Option<std::collections::HashMap<String, station_protocol::UnitInfo>>,
     operated_by: Option<String>,
     json_mode: bool,
     creds: &Credentials,
@@ -1879,6 +1883,7 @@ async fn try_start_run(
             None,
             local_ws_server.cloned(),
             reuse_unit,
+            reuse_units,
             operated_by,
             // Station mode runs only manifested deployments; bootstrap
             // is a no-op for those (the path is gated on

@@ -212,6 +212,10 @@ struct CliEventSink {
     /// execution: on a multi-slot run the last identified slot wins,
     /// and consumers read each slot's unit off `identify_resolved`.
     resolved_unit: Arc<std::sync::Mutex<Option<station_protocol::UnitInfo>>>,
+    /// Per-slot twin of `resolved_unit`, stamped on `RunStarted.slot_units`
+    /// so a consumer joining mid-run sees every slot's serial.
+    resolved_units:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, station_protocol::UnitInfo>>>,
     /// Tickets of the deferred `RunData` writes spawned by `emit()`
     /// (phase accumulation, stats, outcome, attachments, mid-run unit
     /// updates). `emit` is sync, so each write runs as a spawned task;
@@ -234,6 +238,8 @@ struct CliEventSink {
     /// A mid-run unit update from a shared stage (no slot) applies to
     /// every one of them.
     slots: Vec<String>,
+    /// Display names of the declared slots, stamped on `RunStarted`.
+    slot_names: std::collections::HashMap<String, String>,
     /// Flipped on the first post-submit sign of life from the engine
     /// (job dispatched, plug status, UI request, log line…). The
     /// dispatch-stall watchdog in `run_yaml_procedure` races this flag:
@@ -245,6 +251,7 @@ struct CliEventSink {
 }
 
 impl CliEventSink {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         tx: broadcast::Sender<StationEvent>,
         ui_tx: Option<mpsc::Sender<UiRequestData>>,
@@ -255,6 +262,7 @@ impl CliEventSink {
         deployment_id: Option<String>,
         only_phase: Option<String>,
         slots: Vec<String>,
+        slot_names: std::collections::HashMap<String, String>,
     ) -> Self {
         let router = EventRouter::new(tx.clone(), agent.clone(), execution_id.clone());
         Self {
@@ -268,6 +276,7 @@ impl CliEventSink {
             deployment_id,
             only_phase,
             slots,
+            slot_names,
             data: Arc::new(Mutex::new(RunData {
                 phases: Vec::new(),
                 run_outcome: None,
@@ -281,6 +290,7 @@ impl CliEventSink {
                 attachments: Vec::new(),
             })),
             resolved_unit: Arc::new(std::sync::Mutex::new(None)),
+            resolved_units: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_writes: Arc::new(std::sync::Mutex::new(Vec::new())),
             progressed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -365,6 +375,12 @@ impl EventSink for CliEventSink {
                     execution_id: self.execution_id.clone(),
                     phases: plan,
                     slots: slots.clone(),
+                    slot_names: self.slot_names.clone(),
+                    slot_units: self
+                        .resolved_units
+                        .lock()
+                        .map(|m| m.clone())
+                        .unwrap_or_default(),
                     plugs: plug_defs,
                     timestamp: Some(chrono::Utc::now().to_rfc3339()),
                     run_id: None,
@@ -560,27 +576,33 @@ impl EventSink for CliEventSink {
                     .as_ref()
                     .map(super::outcomes::from_execution_outcome)
                     .unwrap_or("UNKNOWN");
+                // Multi-slot: each slot's own outcome rides the wire and the
+                // agent protocol. Single slot keeps both as they were.
+                let wire_slot_outcomes: std::collections::HashMap<String, String> =
+                    if slot_outcomes.len() > 1 {
+                        slot_outcomes
+                            .iter()
+                            .map(|(slot, o)| {
+                                (
+                                    slot.clone(),
+                                    super::outcomes::from_execution_outcome(o).to_string(),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Default::default()
+                    };
                 super::emit::run_complete(
                     &self.tx,
                     outcome_str,
                     &self.execution_id,
                     run_id.clone(),
+                    wire_slot_outcomes.clone(),
                 );
-
-                // Multi-slot: hand the agent protocol each slot's outcome
-                // for `run_finished`. Single slot keeps the wire as it was.
-                if slot_outcomes.len() > 1 {
+                if !wire_slot_outcomes.is_empty() {
                     if let Some(ref agent) = self.agent {
                         if let Ok(mut map) = agent.slot_outcomes.lock() {
-                            *map = slot_outcomes
-                                .iter()
-                                .map(|(slot, o)| {
-                                    (
-                                        slot.clone(),
-                                        super::outcomes::from_execution_outcome(o).to_string(),
-                                    )
-                                })
-                                .collect();
+                            *map = wire_slot_outcomes;
                         }
                     }
                 }
@@ -941,6 +963,11 @@ impl EventSink for CliEventSink {
                 let wire_unit = unit_info_to_wire(unit_info);
                 if let Ok(mut guard) = self.resolved_unit.lock() {
                     *guard = Some(wire_unit.clone());
+                }
+                if let Some(slot) = slot_id {
+                    if let Ok(mut map) = self.resolved_units.lock() {
+                        map.insert(slot.clone(), wire_unit.clone());
+                    }
                 }
                 // Fan out the dedicated `identify_resolved` event so
                 // operator-UI / dashboard / agent stream learn about
@@ -1834,6 +1861,10 @@ pub async fn run_yaml_procedure(
     // (UI, dashboard upload) see the same wire signal as a normal
     // identify path.
     reuse_unit: Option<station_protocol::UnitInfo>,
+    // Multi-slot "Run again": unit to reuse per slot key. A slot absent
+    // from the map falls back to `reuse_unit`, then to its identify
+    // prompt.
+    reuse_units: Option<std::collections::HashMap<String, station_protocol::UnitInfo>>,
     // Email forwarded to `runs.create` as `operated_by`. Set when the
     // run was triggered from the web operator UI; None for kiosk and
     // CLI-driven runs.
@@ -2039,6 +2070,7 @@ pub async fn run_yaml_procedure(
         super::deployment_id::lookup_deployment_id(procedure_id),
         only_phase.clone(),
         slots.clone(),
+        slot_names.clone(),
     );
     let run_data = sink.data.clone();
     let pending_run_data_writes = sink.pending_writes.clone();
@@ -2091,35 +2123,38 @@ pub async fn run_yaml_procedure(
     // event is also emitted on the sink for downstream observers
     // (TUI / agent / dashboard) that prefer a structured signal over
     // peeking at RunData.
-    let unit_infos: std::collections::HashMap<String, execution_engine::unit::UnitInfo> =
-        match (unit_cfg.as_ref(), reuse_unit) {
-            // "Run again" path: operator UI supplied the unit from the
-            // previous run. Skip the identify-unit prompt entirely,
-            // populate every slot with the same unit, and emit
-            // `UnitIdentified` (which fans out to `identify_resolved`
-            // on the wire) so consumers see the same signal as a
-            // normal identify resolution.
-            //
-            // Gated on `unit_cfg.is_some()`: a procedure that didn't
-            // declare a `unit:` block has no schema for what a unit
-            // looks like, so honoring `reuse_unit` here would let the
-            // wire shape leak in unchecked. The reuse is silently
-            // ignored in that case (next cycle starts with no unit,
-            // matching the procedure's declaration).
-            (Some(cfg), Some(reused)) => {
-                // Validate against the procedure's `unit_cfg` so a
-                // stale or hand-crafted reuse can't bypass regex /
-                // required-field constraints the procedure declared.
-                // `validate_unit_info` is the same check the normal
-                // identify path runs after parsing the operator
-                // response.
+    // Per-slot unit resolution. A slot whose unit the caller supplied
+    // ("Run again": `reuse_units[slot]`, else the whole-fixture
+    // `reuse_unit`) skips its identify prompt; every other slot is
+    // identified as usual, one prompt at a time. Reuse is gated on
+    // `unit_cfg` (always Some thanks to the default block above): a
+    // procedure with no unit schema cannot validate a reused unit.
+    let identify_host = identify_host::CliIdentifyHost {
+        router: EventRouter::new(event_tx.clone(), agent.clone(), execution_id.to_string()),
+        ui_tx: ui_tx.clone(),
+        agent: agent.clone(),
+        procedure_id: procedure_id.to_string(),
+        has_ui,
+    };
+    let mut identify_cancel = cancel_rx.clone();
+    let mut unit_infos: std::collections::HashMap<String, execution_engine::unit::UnitInfo> =
+        std::collections::HashMap::new();
+    for slot_id in &slots {
+        let Some(cfg) = unit_cfg.as_ref() else { break };
+        let reused = reuse_units
+            .as_ref()
+            .and_then(|m| m.get(slot_id).cloned())
+            .or_else(|| reuse_unit.clone());
+        let info = match reused {
+            Some(reused) => {
+                // Validate against the procedure's `unit_cfg` so a stale
+                // or hand-crafted reuse can't bypass regex / required-
+                // field constraints; same check the identify path runs
+                // on the operator's answer. The root `operated_by:` too.
                 let info = wire_unit_to_engine(reused);
                 if let Err(err) = execution_engine::unit::validate_unit_info(
                     &info,
                     &Some(cfg.clone()),
-                    // The root `operated_by:` config too: a reused unit
-                    // carries the previous run's attribution, and the
-                    // identify path validates it against this same config.
                     operated_by_cfg.as_ref(),
                 ) {
                     emit_crash(
@@ -2134,105 +2169,74 @@ pub async fn run_yaml_procedure(
                     let _ = orchestrator.shutdown().await;
                     return (1, Vec::new());
                 }
-                let mut infos = std::collections::HashMap::new();
-                for slot_id in &slots {
-                    apply_unit_info_to_run_data(&run_data, slot_id, &info).await;
-                    event_sink.emit(&ExecutionEvent::UnitIdentified {
-                        slot_id: Some(slot_id.clone()),
-                        unit_info: info.clone(),
-                    });
-                    infos.insert(slot_id.clone(), info.clone());
-                }
-                infos
+                info
             }
-            (None, Some(_)) => {
-                // Unreachable in practice — `unit_cfg` above is always
-                // Some thanks to the default-block fallback. Kept only
-                // to satisfy the match on the Option; empty unit info
-                // is the least-wrong answer if it ever fires.
-                std::collections::HashMap::new()
-            }
-            (Some(cfg), None) => {
-                let host = identify_host::CliIdentifyHost {
-                    router: EventRouter::new(
-                        event_tx.clone(),
-                        agent.clone(),
-                        execution_id.to_string(),
-                    ),
-                    ui_tx: ui_tx.clone(),
-                    agent: agent.clone(),
-                    procedure_id: procedure_id.to_string(),
-                    has_ui,
+            None => {
+                // Race the operator prompt against cancellation: a Stop
+                // while parked on identify-unit must not hang the run
+                // task. `execution_engine::identify` parks on a oneshot
+                // inside the IdentifyHost; without this select neither it
+                // nor the orchestrator cancel loop (which only runs after
+                // identify resolves) ever sees the signal.
+                let identify_fut = execution_engine::identify(
+                    cfg,
+                    operated_by_cfg.as_ref(),
+                    Some(execution_engine::SlotRef::new(
+                        slot_id,
+                        slot_names.get(slot_id).map(String::as_str),
+                    )),
+                    &identify_host,
+                );
+                tokio::pin!(identify_fut);
+                let result = tokio::select! {
+                    r = &mut identify_fut => Some(r),
+                    _ = identify_cancel.wait_any() => None,
                 };
-                let mut infos = std::collections::HashMap::new();
-                let mut identify_cancel = cancel_rx.clone();
-                for slot_id in &slots {
-                    // Race the operator prompt against cancellation: a
-                    // Stop while parked on identify-unit must not hang
-                    // the run task. `execution_engine::identify` parks
-                    // on a oneshot inside the IdentifyHost; without
-                    // this select, neither it nor the orchestrator
-                    // cancel loop (which only runs after identify
-                    // resolves) ever sees the signal, and the operator
-                    // is stuck on a prompt with no way out.
-                    let identify_fut = execution_engine::identify(
-                        cfg,
-                        operated_by_cfg.as_ref(),
-                        Some(execution_engine::SlotRef::new(
-                            slot_id,
-                            slot_names.get(slot_id).map(String::as_str),
-                        )),
-                        &host,
-                    );
-                    tokio::pin!(identify_fut);
-                    let result = tokio::select! {
-                        r = &mut identify_fut => Some(r),
-                        _ = identify_cancel.wait_any() => None,
-                    };
-                    match result {
-                        Some(Ok(info)) => {
-                            apply_unit_info_to_run_data(&run_data, slot_id, &info).await;
-                            event_sink.emit(&ExecutionEvent::UnitIdentified {
-                                slot_id: Some(slot_id.clone()),
-                                unit_info: info.clone(),
-                            });
-                            infos.insert(slot_id.clone(), info);
-                        }
-                        Some(Err(err)) => {
-                            emit_crash(
-                                &event_tx,
-                                &agent,
-                                procedure_id,
-                                execution_id,
-                                "identify_unit_failed",
-                                1,
-                                format!("{err}"),
-                            );
-                            let _ = orchestrator.shutdown().await;
-                            return (1, Vec::new());
-                        }
-                        None => {
-                            // Cancel during identify: drop any parked
-                            // UI prompt sender so consumers stop
-                            // waiting, then crash with ABORTED so the
-                            // operator-UI flips off the prompt screen.
-                            crate::commands::run::ui_response::cancel_all().await;
-                            super::emit::run_complete(
-                                &event_tx,
-                                super::outcomes::ABORTED,
-                                execution_id,
-                                None,
-                            );
-                            let _ = orchestrator.shutdown().await;
-                            return (1, Vec::new());
-                        }
+                match result {
+                    Some(Ok(info)) => info,
+                    Some(Err(err)) => {
+                        emit_crash(
+                            &event_tx,
+                            &agent,
+                            procedure_id,
+                            execution_id,
+                            "identify_unit_failed",
+                            1,
+                            format!("{err}"),
+                        );
+                        let _ = orchestrator.shutdown().await;
+                        return (1, Vec::new());
+                    }
+                    None => {
+                        // Cancel during identify: drop any parked UI
+                        // prompt sender so consumers stop waiting, then
+                        // crash with ABORTED so the operator-UI flips off
+                        // the prompt screen.
+                        crate::commands::run::ui_response::cancel_all().await;
+                        super::emit::run_complete(
+                            &event_tx,
+                            super::outcomes::ABORTED,
+                            execution_id,
+                            None,
+                            Default::default(),
+                        );
+                        let _ = orchestrator.shutdown().await;
+                        return (1, Vec::new());
                     }
                 }
-                infos
             }
-            // Unreachable in practice, like `(None, Some(_))` above.
-            (None, None) => std::collections::HashMap::new(),
         };
+        // Written into RunData synchronously (before `submit_procedure`)
+        // so the upload always sees the real serial, even for runs that
+        // abort before any phase; `UnitIdentified` fans out to
+        // `identify_resolved` on the wire for every observer.
+        apply_unit_info_to_run_data(&run_data, slot_id, &info).await;
+        event_sink.emit(&ExecutionEvent::UnitIdentified {
+            slot_id: Some(slot_id.clone()),
+            unit_info: info.clone(),
+        });
+        unit_infos.insert(slot_id.clone(), info);
+    }
 
     if let Err(e) = orchestrator
         .submit_procedure(slots.clone(), strategy, unit_infos, only_phase.as_deref())
