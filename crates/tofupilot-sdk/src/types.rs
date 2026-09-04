@@ -3526,6 +3526,8 @@ pub struct RunListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_keys: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_names: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environments: Option<Vec<Environment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_numbers: Option<Vec<String>>,
@@ -3598,6 +3600,7 @@ pub struct RunListRequestBuilder {
     deployment_ids: Option<Vec<String>>,
     execution_ids: Option<Vec<String>>,
     slot_keys: Option<Vec<String>>,
+    slot_names: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
@@ -3670,6 +3673,12 @@ impl RunListRequestBuilder {
     /// Set the `slot_keys` field.
     pub fn slot_keys(mut self, value: impl Into<Vec<String>>) -> Self {
         self.slot_keys = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_names` field.
+    pub fn slot_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.slot_names = Some(value.into());
         self
     }
 
@@ -3838,6 +3847,7 @@ impl RunListRequestBuilder {
             deployment_ids: self.deployment_ids,
             execution_ids: self.execution_ids,
             slot_keys: self.slot_keys,
+            slot_names: self.slot_names,
             environments: self.environments,
             serial_numbers: self.serial_numbers,
             samples: self.samples,

@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "tofupilot"
-version = "2.19.0"
+version = "2.19.1"
 dependencies = [
  "chrono",
  "fastrand",

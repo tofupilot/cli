@@ -128,6 +128,9 @@ pub struct LsArgs {
     /// slot_keys
     #[arg(long, num_args = 1..)]
     pub slot_keys: Option<Vec<String>>,
+    /// slot_names
+    #[arg(long, num_args = 1..)]
+    pub slot_names: Option<Vec<String>>,
     /// environments
     #[arg(long, num_args = 1..)]
     pub environments: Option<Vec<String>>,
@@ -459,6 +462,9 @@ async fn execute_list(client: &TofuPilot, args: LsArgs, json_mode: bool) -> i32 
     }
     if let Some(ref v) = args.slot_keys {
         builder = builder.slot_keys(v.clone());
+    }
+    if let Some(ref v) = args.slot_names {
+        builder = builder.slot_names(v.clone());
     }
     if let Some(ref v) = args.environments {
         let mut parsed: Vec<Environment> = Vec::new();

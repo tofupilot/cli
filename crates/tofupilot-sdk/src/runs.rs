@@ -515,6 +515,7 @@ pub struct ListBuilder<'a> {
     deployment_ids: Option<Vec<String>>,
     execution_ids: Option<Vec<String>>,
     slot_keys: Option<Vec<String>>,
+    slot_names: Option<Vec<String>>,
     environments: Option<Vec<Environment>>,
     serial_numbers: Option<Vec<String>>,
     samples: Option<Vec<Sample>>,
@@ -555,6 +556,7 @@ impl<'a> ListBuilder<'a> {
             deployment_ids: None,
             execution_ids: None,
             slot_keys: None,
+            slot_names: None,
             environments: None,
             serial_numbers: None,
             samples: None,
@@ -629,6 +631,12 @@ impl<'a> ListBuilder<'a> {
     /// Set the `slot_keys` query parameter.
     pub fn slot_keys(mut self, value: impl Into<Vec<String>>) -> Self {
         self.slot_keys = Some(value.into());
+        self
+    }
+
+    /// Set the `slot_names` query parameter.
+    pub fn slot_names(mut self, value: impl Into<Vec<String>>) -> Self {
+        self.slot_names = Some(value.into());
         self
     }
 
@@ -852,6 +860,11 @@ impl<'a> ListBuilder<'a> {
         if let Some(ref val) = self.slot_keys {
             for item in val {
                 request = request.query(&[("slot_keys", item.to_string())]);
+            }
+        }
+        if let Some(ref val) = self.slot_names {
+            for item in val {
+                request = request.query(&[("slot_names", item.to_string())]);
             }
         }
         if let Some(ref val) = self.environments {
