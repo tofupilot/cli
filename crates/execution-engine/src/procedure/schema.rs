@@ -918,9 +918,70 @@ pub struct ExecutionConfig {
     #[serde(default = "default_stop")]
     pub on_first_failure: FirstFailureAction,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_slots"
+    )]
     #[validate(nested)]
     pub slots: Vec<SlotConfig>,
+}
+
+/// Cap on the `slots: N` integer shorthand: a typo must not spawn a job
+/// explosion. Explicit lists are uncapped, one line per slot is its own
+/// brake. The engine still bounds slots x phases at its job queue limit.
+const MAX_SLOT_COUNT_SHORTHAND: u64 = 1024;
+
+/// `slots:` accepts the explicit list or an integer shorthand
+/// (`slots: 80`), like GitLab's `parallel: N`. The shorthand expands to
+/// `slot_01..slot_NN` with ordinals zero-padded to the count, so
+/// lexicographic order equals numeric order everywhere downstream.
+/// A visitor rather than an untagged enum, so a bad list entry still
+/// reports its own error instead of "did not match any variant".
+fn deserialize_slots<'de, D>(deserializer: D) -> Result<Vec<SlotConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct SlotsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for SlotsVisitor {
+        type Value = Vec<SlotConfig>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a slot count or a list of slots")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Self::Value, E> {
+            if n == 0 {
+                return Err(E::custom("execution.slots: count must be at least 1"));
+            }
+            if n > MAX_SLOT_COUNT_SHORTHAND {
+                return Err(E::custom(format!(
+                    "execution.slots: count {n} exceeds the maximum of {MAX_SLOT_COUNT_SHORTHAND}"
+                )));
+            }
+            let width = n.to_string().len();
+            Ok((1..=n)
+                .map(|i| SlotConfig {
+                    key: format!("slot_{i:0width$}"),
+                    name: format!("Slot {i}"),
+                })
+                .collect())
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<Self::Value, E> {
+            if n < 1 {
+                return Err(E::custom("execution.slots: count must be at least 1"));
+            }
+            self.visit_u64(n as u64)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            Vec::<SlotConfig>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+        }
+    }
+
+    deserializer.deserialize_any(SlotsVisitor)
 }
 
 impl Default for ExecutionConfig {
@@ -3184,5 +3245,45 @@ python: instruments.power_supply:PowerSupply
         assert!(validate_python_identifier("invalid-name").is_err());
         assert!(validate_python_identifier("invalid name").is_err());
         assert!(validate_python_identifier("").is_err());
+    }
+
+    // `slots:` integer shorthand
+    #[test]
+    fn slots_integer_shorthand_expands_padded_ordinals() {
+        let cfg: ExecutionConfig = serde_yaml::from_str("slots: 16").unwrap();
+        assert_eq!(cfg.slots.len(), 16);
+        assert_eq!(cfg.slots[0].key, "slot_01");
+        assert_eq!(cfg.slots[0].name, "Slot 1");
+        assert_eq!(cfg.slots[15].key, "slot_16");
+
+        let cfg300: ExecutionConfig = serde_yaml::from_str("slots: 300").unwrap();
+        assert_eq!(cfg300.slots[0].key, "slot_001");
+        assert_eq!(cfg300.slots[299].key, "slot_300");
+    }
+
+    #[test]
+    fn slots_explicit_list_still_parses() {
+        let cfg: ExecutionConfig =
+            serde_yaml::from_str("slots:\n  - key: nest_a\n    name: Left Nest").unwrap();
+        assert_eq!(cfg.slots.len(), 1);
+        assert_eq!(cfg.slots[0].key, "nest_a");
+    }
+
+    #[test]
+    fn slots_shorthand_rejects_bad_counts_with_a_reason() {
+        let zero = serde_yaml::from_str::<ExecutionConfig>("slots: 0").unwrap_err();
+        assert!(zero.to_string().contains("at least 1"), "{zero}");
+        let neg = serde_yaml::from_str::<ExecutionConfig>("slots: -1").unwrap_err();
+        assert!(neg.to_string().contains("at least 1"), "{neg}");
+        let huge = serde_yaml::from_str::<ExecutionConfig>("slots: 100000").unwrap_err();
+        assert!(huge.to_string().contains("exceeds the maximum"), "{huge}");
+        let text = serde_yaml::from_str::<ExecutionConfig>("slots: \"80\"").unwrap_err();
+        assert!(text.to_string().contains("expected a slot count or a list of slots"), "{text}");
+    }
+
+    #[test]
+    fn slots_list_entry_errors_keep_their_own_message() {
+        let err = serde_yaml::from_str::<ExecutionConfig>("slots:\n  - key: nest_a").unwrap_err();
+        assert!(err.to_string().contains("name"), "{err}");
     }
 }
