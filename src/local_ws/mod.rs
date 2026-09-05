@@ -79,7 +79,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use include_dir::{include_dir, Dir};
 use station_protocol::{StationCommand, StationEvent};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -272,6 +272,18 @@ struct StampedEvent {
     event: StationEvent,
 }
 
+/// A pinned in-flight phase.
+#[derive(Clone)]
+struct OpenPhase {
+    started: StampedEvent,
+    /// The broadcast lagged after this phase started: its
+    /// `PhaseComplete` may be among the dropped frames. Still replayed
+    /// (the run is live and the reply says `lagged`), cleared by the
+    /// next event that proves the phase is still running, removed by
+    /// its completion or the run's end.
+    stale: bool,
+}
+
 #[derive(Clone)]
 struct HydrationSnapshot {
     /// Pinned `RunStarted` for the current run. Survives ring eviction
@@ -280,6 +292,12 @@ struct HydrationSnapshot {
     /// Subsequent events since `run_started`. VecDeque so eviction is
     /// O(1) amortised, not O(n) like Vec::remove(0).
     events: VecDeque<StampedEvent>,
+    /// Latest `PhaseStarted` per `(slot, phase)` with no `PhaseComplete`
+    /// yet. Pinned outside the ring like `run_started`: after a lag
+    /// (ring cleared) or a long run (ring evicted), a hydrate still
+    /// shows which phases are in flight. Bounded by the procedure's
+    /// slot count times its phase count.
+    open_phases: HashMap<(Option<String>, String), OpenPhase>,
     /// seq of the last event in `events`, or `run_started`'s seq if
     /// the ring is empty post-clear. `0` if no events have shipped
     /// yet. Used so the live pump knows where the snapshot ends.
@@ -795,6 +813,7 @@ impl Server {
 
         let hydration = Arc::new(Mutex::new(HydrationSnapshot {
             run_started: None,
+            open_phases: HashMap::new(),
             events: VecDeque::new(),
             last_seq: 0,
             lagged: false,
@@ -1580,10 +1599,7 @@ impl Server {
                         crate::log::warn(&format!(
                             "local-ui: lagged {n} broadcast event(s); hydration ring invalidated"
                         ));
-                        let mut h = hydration.lock().await;
-                        h.run_started = None;
-                        h.events.clear();
-                        h.lagged = true;
+                        on_lagged(&mut *hydration.lock().await);
                         // last_seq stays so live consumers don't
                         // re-emit an event that already shipped.
                         // The dropped frames may include the terminal
@@ -1679,15 +1695,95 @@ async fn update_ring(hydration: &Arc<Mutex<HydrationSnapshot>>, stamped: &Stampe
     h.last_seq = stamped.seq;
     if let StationEvent::RunStarted { .. } = &stamped.event {
         h.events.clear();
+        h.open_phases.clear();
         h.run_started = Some(stamped.clone());
         // Fresh run = fresh ring, lag is no longer relevant.
         h.lagged = false;
         return;
     }
+    match &stamped.event {
+        StationEvent::PhaseStarted {
+            phase_key, slot_id, ..
+        } => {
+            h.open_phases.insert(
+                (slot_id.clone(), phase_key.clone()),
+                OpenPhase {
+                    started: stamped.clone(),
+                    stale: false,
+                },
+            );
+        }
+        StationEvent::PhaseComplete {
+            phase_key, slot_id, ..
+        } => {
+            h.open_phases.remove(&(slot_id.clone(), phase_key.clone()));
+        }
+        // Anything the phase emits while running proves a pin that a
+        // lag made doubtful.
+        StationEvent::PhaseLog {
+            phase_key, slot_id, ..
+        }
+        | StationEvent::MeasurementUpdate {
+            phase_key, slot_id, ..
+        }
+        | StationEvent::AttachmentAdded {
+            phase_key, slot_id, ..
+        }
+        | StationEvent::UiRequest {
+            phase_key, slot_id, ..
+        } => {
+            if let Some(open) = h.open_phases.get_mut(&(slot_id.clone(), phase_key.clone())) {
+                open.stale = false;
+            }
+        }
+        // Nothing is in flight once the run is over; a pin left by a
+        // lagged completion must not outlive it.
+        StationEvent::RunComplete { .. } | StationEvent::RunCrashed { .. } => {
+            h.open_phases.clear();
+        }
+        _ => {}
+    }
     if h.events.len() >= HYDRATION_RING_CAP {
         h.events.pop_front();
     }
     h.events.push_back(stamped.clone());
+}
+
+/// The broadcast dropped events under this pump. The ring can no
+/// longer be replayed honestly, but the run did not end because the
+/// kiosk fell behind: `run_started` and the phases still open stay
+/// pinned, so a hydrate after the lag reconstructs a live run with its
+/// in-flight phases instead of an idle screen for the rest of an
+/// hours-long execution. The pins are marked stale: their completion
+/// may be among the dropped frames.
+fn on_lagged(h: &mut HydrationSnapshot) {
+    h.events.clear();
+    h.lagged = true;
+    for open in h.open_phases.values_mut() {
+        open.stale = true;
+    }
+}
+
+/// Events a hydrate replays, in seq order: the pinned `RunStarted`,
+/// then the pinned in-flight `PhaseStarted`s the ring no longer holds
+/// (evicted by a long run, or cleared by a lag), then the ring. A pin
+/// the ring still holds is replayed once, from the ring.
+fn replay_events(h: &HydrationSnapshot) -> Vec<StampedEvent> {
+    let mut events: Vec<StampedEvent> = Vec::new();
+    if let Some(rs) = &h.run_started {
+        events.push(rs.clone());
+    }
+    let ring_first = h.events.front().map(|e| e.seq);
+    let mut open: Vec<StampedEvent> = h
+        .open_phases
+        .values()
+        .filter(|open| ring_first.is_none_or(|first| open.started.seq < first))
+        .map(|open| open.started.clone())
+        .collect();
+    open.sort_by_key(|e| e.seq);
+    events.extend(open);
+    events.extend(h.events.iter().cloned());
+    events
 }
 
 // ---------------------------------------------------------------------------
@@ -1890,14 +1986,9 @@ async fn handle_text(
             ControlFrame::Hydrate { id } => {
                 let snapshot = {
                     let h = state.hydration.lock().await;
-                    let mut events: Vec<StampedEvent> = Vec::new();
-                    if let Some(rs) = &h.run_started {
-                        events.push(rs.clone());
-                    }
-                    events.extend(h.events.iter().cloned());
                     HydrationReply {
                         last_seq: h.last_seq,
-                        events,
+                        events: replay_events(&h),
                         lagged: h.lagged,
                     }
                 };
@@ -2302,6 +2393,233 @@ mod tests {
             request_id: "r1".into(),
             values: std::collections::HashMap::new(),
         }
+    }
+
+    fn stamped(seq: u64, event: StationEvent) -> StampedEvent {
+        StampedEvent { seq, event }
+    }
+
+    fn run_started() -> StationEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "run_started",
+            "procedure_id": "p",
+            "procedure_name": "",
+            "execution_id": "e",
+            "phases": [],
+            "slots": [],
+        }))
+        .unwrap()
+    }
+
+    fn phase_started(slot: &str, key: &str) -> StationEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "phase_started",
+            "phase_key": key,
+            "name": key,
+            "slot_id": slot,
+        }))
+        .unwrap()
+    }
+
+    fn phase_complete(slot: &str, key: &str) -> StationEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "phase_complete",
+            "phase_key": key,
+            "name": key,
+            "outcome": "PASS",
+            "measurements": [],
+            "slot_id": slot,
+        }))
+        .unwrap()
+    }
+
+    /// The customer case: an 80-slot burn-in outpaces the kiosk pump,
+    /// the broadcast reports `Lagged`, and the next hydrate used to
+    /// return nothing, so the kiosk sat idle for the rest of an
+    /// hours-long run. `RunStarted` and the in-flight phases are
+    /// pinned outside the ring and survive the lag.
+    #[tokio::test]
+    async fn hydrate_after_lag_still_returns_the_run_and_open_phases() {
+        let hydration = Arc::new(Mutex::new(HydrationSnapshot {
+            run_started: None,
+            open_phases: HashMap::new(),
+            events: VecDeque::new(),
+            last_seq: 0,
+            lagged: false,
+        }));
+
+        // Force a real `Lagged` from a broadcast the pump falls behind on.
+        let (tx, mut rx) = broadcast::channel::<StationEvent>(1);
+        tx.send(run_started()).unwrap();
+        tx.send(phase_started("s1", "soak")).unwrap();
+        tx.send(phase_started("s2", "soak")).unwrap();
+        // The pump had stamped the run and the first phase before the
+        // burst overran it.
+        update_ring(&hydration, &stamped(1, run_started())).await;
+        update_ring(&hydration, &stamped(2, phase_started("s1", "soak"))).await;
+        update_ring(&hydration, &stamped(3, phase_started("s2", "soak"))).await;
+        let lagged = matches!(rx.recv().await, Err(broadcast::error::RecvError::Lagged(_)));
+        assert!(lagged, "a capacity-1 broadcast with three sends must lag");
+
+        on_lagged(&mut *hydration.lock().await);
+
+        let h = hydration.lock().await;
+        assert!(h.lagged);
+        let events = replay_events(&h);
+        assert!(
+            matches!(
+                events.first().map(|e| &e.event),
+                Some(StationEvent::RunStarted { .. })
+            ),
+            "hydrate after lag must still open with RunStarted"
+        );
+        let open: Vec<(u64, Option<String>)> = events[1..]
+            .iter()
+            .map(|e| match &e.event {
+                StationEvent::PhaseStarted { slot_id, .. } => (e.seq, slot_id.clone()),
+                other => panic!("unexpected replay event {other:?}"),
+            })
+            .collect();
+        assert_eq!(open, vec![(2, Some("s1".into())), (3, Some("s2".into()))]);
+    }
+
+    /// A completed phase leaves the pinned set, so the post-lag replay
+    /// does not resurrect it as running.
+    #[tokio::test]
+    async fn completed_phase_is_not_replayed_as_open() {
+        let hydration = Arc::new(Mutex::new(HydrationSnapshot {
+            run_started: None,
+            open_phases: HashMap::new(),
+            events: VecDeque::new(),
+            last_seq: 0,
+            lagged: false,
+        }));
+        update_ring(&hydration, &stamped(1, run_started())).await;
+        update_ring(&hydration, &stamped(2, phase_started("s1", "soak"))).await;
+        update_ring(&hydration, &stamped(3, phase_complete("s1", "soak"))).await;
+        on_lagged(&mut *hydration.lock().await);
+        let h = hydration.lock().await;
+        assert_eq!(replay_events(&h).len(), 1, "only RunStarted remains");
+    }
+
+    fn phase_log(slot: &str, key: &str) -> StationEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "phase_log",
+            "phase_key": key,
+            "slot_id": slot,
+            "level": "INFO",
+            "message": "tick",
+        }))
+        .unwrap()
+    }
+
+    fn run_complete() -> StationEvent {
+        serde_json::from_value(serde_json::json!({
+            "type": "run_complete",
+            "outcome": "PASS",
+        }))
+        .unwrap()
+    }
+
+    fn empty_snapshot() -> Arc<Mutex<HydrationSnapshot>> {
+        Arc::new(Mutex::new(HydrationSnapshot {
+            run_started: None,
+            open_phases: HashMap::new(),
+            events: VecDeque::new(),
+            last_seq: 0,
+            lagged: false,
+        }))
+    }
+
+    /// An 11 h burn-in logs far more than the ring holds. Its
+    /// `PhaseStarted` is evicted long before the run ends, and a tab
+    /// refreshed then used to hydrate with no running phase at all. The
+    /// pin is replayed ahead of the ring; one the ring still holds is
+    /// not replayed twice.
+    #[tokio::test]
+    async fn hydrate_after_ring_eviction_still_returns_the_open_phase() {
+        let hydration = empty_snapshot();
+        update_ring(&hydration, &stamped(1, run_started())).await;
+        update_ring(&hydration, &stamped(2, phase_started("s1", "burnin"))).await;
+        let mut seq = 3;
+        for _ in 0..HYDRATION_RING_CAP + 5 {
+            update_ring(&hydration, &stamped(seq, phase_log("s1", "burnin"))).await;
+            seq += 1;
+        }
+        update_ring(&hydration, &stamped(seq, phase_started("s2", "burnin"))).await;
+
+        let h = hydration.lock().await;
+        assert!(!h.lagged);
+        let events = replay_events(&h);
+        assert!(matches!(events[0].event, StationEvent::RunStarted { .. }));
+        assert_eq!(
+            events[1].seq, 2,
+            "the evicted PhaseStarted is replayed before the ring"
+        );
+        assert!(matches!(events[1].event, StationEvent::PhaseStarted { .. }));
+        assert_eq!(
+            events[2].seq,
+            h.events.front().unwrap().seq,
+            "then the ring"
+        );
+        let s2_starts = events
+            .iter()
+            .filter(|e| matches!(&e.event, StationEvent::PhaseStarted { slot_id, .. } if slot_id.as_deref() == Some("s2")))
+            .count();
+        assert_eq!(
+            s2_starts, 1,
+            "a pin the ring holds is replayed once, from the ring"
+        );
+        let seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "replay is in seq order"
+        );
+    }
+
+    /// After a lag the pins are doubtful: the completion may have been
+    /// dropped. A later event from the phase clears the doubt, its
+    /// completion drops the pin, and the run's end drops every pin so a
+    /// lagged completion cannot leave a phase running forever.
+    #[tokio::test]
+    async fn lag_marks_pins_stale_until_the_phase_speaks_again() {
+        let hydration = empty_snapshot();
+        update_ring(&hydration, &stamped(1, run_started())).await;
+        update_ring(&hydration, &stamped(2, phase_started("s1", "soak"))).await;
+        update_ring(&hydration, &stamped(3, phase_started("s2", "soak"))).await;
+        on_lagged(&mut *hydration.lock().await);
+        {
+            let h = hydration.lock().await;
+            assert!(h.open_phases.values().all(|open| open.stale));
+            assert_eq!(replay_events(&h).len(), 3, "stale pins are still replayed");
+        }
+        update_ring(&hydration, &stamped(4, phase_log("s1", "soak"))).await;
+        update_ring(&hydration, &stamped(5, phase_complete("s2", "soak"))).await;
+        {
+            let h = hydration.lock().await;
+            let s1 = &h.open_phases[&(Some("s1".to_string()), "soak".to_string())];
+            assert!(
+                !s1.stale,
+                "a log line from the phase proves it is still running"
+            );
+            assert!(
+                !h.open_phases
+                    .contains_key(&(Some("s2".to_string()), "soak".to_string())),
+                "a completion drops the pin"
+            );
+            let events = replay_events(&h);
+            assert_eq!(
+                events[1].seq, 2,
+                "the surviving pin comes before the post-lag ring"
+            );
+            assert_eq!(events[2].seq, 4);
+        }
+        update_ring(&hydration, &stamped(6, run_complete())).await;
+        let h = hydration.lock().await;
+        assert!(
+            h.open_phases.is_empty(),
+            "nothing is in flight after the run ended"
+        );
     }
 
     /// Run-scoped commands never reach the station sink, in either

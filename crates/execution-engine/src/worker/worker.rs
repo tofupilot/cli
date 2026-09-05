@@ -807,6 +807,11 @@ impl Worker {
         self.force_shutdown().await
     }
 
+    /// Whether the interpreter is still up (not shut down or killed).
+    pub async fn is_alive(&self) -> bool {
+        self.inner.read().await.is_some()
+    }
+
     /// DEBUG-level startup-stage breadcrumb attached to the running
     /// phase. Streams through the normal `PhaseLogLine` channel so every
     /// consumer (operator-UI Advanced tab, TUI, agent protocol) shows

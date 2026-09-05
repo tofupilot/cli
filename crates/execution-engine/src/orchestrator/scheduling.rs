@@ -151,19 +151,36 @@ impl Orchestrator {
 
         // Auto-teardown: Destroy all remaining plugs at procedure end.
         //
+        // Not after a stop that left teardown phases queued: the loop
+        // ended on `shutdown_requested`, not on the queue draining, and
+        // `shutdown()` is about to run those phases. Destroying the
+        // execution-scope plugs here handed them an empty plug map, so
+        // `power_off(ps1)` errored on every operator stop and the bench
+        // stayed powered. `shutdown()` releases every plug itself once
+        // the teardown has run.
+        //
         // Lock order: take `state.read()` first, then `resource_manager.
         // write()`. Other code paths (`get_next_ready_job`) acquire
         // `state.write()` then `resource_manager.read()`, so reversing
         // the order here would set up a lock-order inversion. By
         // releasing `state` before taking `rm.write()` we keep the
         // global order `state → resource_manager` consistent.
-        let slot_ids: Vec<String> = {
+        let (slot_ids, keep_plugs_for_teardown): (Vec<String>, bool) = {
             let state = self.state.read().await;
-            state.slot_jobs.keys().cloned().collect()
+            (
+                state.slot_jobs.keys().cloned().collect(),
+                state.shutdown_requested && state.has_queued_teardown(),
+            )
         };
+        if keep_plugs_for_teardown {
+            log::info!("Stop with teardown phases queued: plugs stay up for them");
+        }
         let resource_manager = self.resource_manager.write().await;
 
         for slot_id in slot_ids {
+            if keep_plugs_for_teardown {
+                break;
+            }
             if resource_manager.has_each_scope_plugs(&slot_id).await {
                 match resource_manager
                     .destroy_each_scope_plugs(slot_id.clone(), &self.event_sink)
@@ -184,7 +201,7 @@ impl Orchestrator {
         }
 
         // Destroy all all-scope plugs
-        if resource_manager.has_all_scope_plugs().await {
+        if !keep_plugs_for_teardown && resource_manager.has_all_scope_plugs().await {
             match resource_manager
                 .destroy_all_scope_plugs(&self.event_sink)
                 .await

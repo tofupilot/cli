@@ -6,6 +6,7 @@ No external dependencies beyond the Python standard library.
 
 import importlib
 import importlib.util
+import os
 import sys
 import traceback
 import time
@@ -455,6 +456,92 @@ def handle_connection(conn: socket.socket, handler: PlugHandler):
         conn.close()
 
 
+def _start_parent_watchdog(on_parent_death):
+    """Exit when the spawning CLI process dies.
+
+    The service is a TCP server with no stdin pipe to the parent, so a
+    SIGKILLed parent (crash, force-quit, watchdog) otherwise leaves it
+    alive forever, holding its listen socket and, through the plug
+    instance, the instrument session the next run needs. Same mechanism
+    as tp_worker.py. Unix: poll getppid(); the kernel reparents orphans
+    to pid 1 (or a subreaper), so a change means the parent is gone.
+    Windows: hold a SYNCHRONIZE handle to the parent and wait on it.
+
+    `on_parent_death` runs on the watchdog thread and must end the
+    process itself.
+    """
+    parent_pid = os.getppid()
+
+    if os.name == "nt":
+        def wait_windows():
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+            if not handle:
+                return
+            ctypes.windll.kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            on_parent_death()
+
+        threading.Thread(target=wait_windows, daemon=True).start()
+        return
+
+    def poll_unix():
+        while True:
+            if os.getppid() != parent_pid:
+                on_parent_death()
+                return
+            time.sleep(1)
+
+    threading.Thread(target=poll_unix, daemon=True).start()
+
+
+# Seconds an orphan may spend releasing its instrument before it exits
+# regardless. Same budget Rust gives the Cleanup RPC.
+ORPHAN_CLEANUP_SECONDS = 5.0
+
+
+def _orphan_exit(handler: "PlugHandler", server: socket.socket):
+    """Release the instrument and exit once the parent is gone.
+
+    Mirrors the engine's own stop sequence (Cleanup, then Shutdown): the
+    Cleanup drops the plug instance so its __del__ closes the instrument
+    session. Nothing is left to answer an RPC, so the process exits
+    directly instead of unwinding serve().
+
+    The Cleanup runs __del__ inline on this thread, and nothing bounds
+    it here the way Rust bounds the RPC: an instrument close blocking on
+    a dead socket would keep the orphan alive for good, holding the
+    session the next run needs. The timer is the bound.
+
+    stderr is a pipe to the dead parent, so every write in here can
+    raise BrokenPipeError (the log stream included): the exit must not
+    depend on any of them.
+    """
+    timer = threading.Timer(ORPHAN_CLEANUP_SECONDS, lambda: os._exit(0))
+    timer.daemon = True
+    timer.start()
+    try:
+        try:
+            print(
+                f"Plug '{handler.display_name}': parent process gone, cleaning up and exiting",
+                file=_original_stderr,
+                flush=True,
+            )
+        except OSError:
+            pass
+        try:
+            handler._handle_cleanup()
+        except Exception:
+            pass
+        handler.shutdown_event.set()
+        try:
+            server.close()
+        except OSError:
+            pass
+    finally:
+        os._exit(0)
+
+
 def serve(
     procedure_dir: Path, plug_key: str, display_name: str, plug_config: Dict[str, Any]
 ):
@@ -485,6 +572,8 @@ def serve(
     )
 
     shutdown_event = handler.shutdown_event
+
+    _start_parent_watchdog(lambda: _orphan_exit(handler, server))
 
     try:
         while not shutdown_event.is_set():

@@ -38,6 +38,15 @@ sha2 = "0.10"
 specta = { version = "2.0.0-rc.22", features = ["chrono", "uuid"], optional = true }
 station-protocol = { path = "../station-protocol" }
 
+# Parent process for `tests/plug_orphan.rs`, which SIGKILLs it. A bin so
+# the test can locate it through `CARGO_BIN_EXE_*`; never shipped.
+[[bin]]
+name = "plug-orphan-helper"
+path = "tests/helpers/plug_orphan_helper.rs"
+test = false
+doc = false
+bench = false
+
 [dev-dependencies]
 tempfile = "3"
 # `test-util` enables tokio's paused clock (`start_paused`) for the

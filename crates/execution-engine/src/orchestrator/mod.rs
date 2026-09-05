@@ -25,6 +25,7 @@ pub use crate::procedure::schema::ExecutionStrategy;
 // The partial-run dependency closure, shared with the CLI's pre-run
 // ref gate so both filter the same phase set.
 pub use initialization::partial_main_phase_set;
+pub use shutdown::{ShutdownMode, TEARDOWN_TIMEOUT};
 
 #[derive(Debug)]
 pub struct JobCompletionEvent {

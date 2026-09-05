@@ -283,7 +283,7 @@ class ConnectRetryTest(unittest.TestCase):
     def test_retry_never_sleeps_past_the_phase_deadline(self):
         port = self._reserve_port()
         plug = tp_worker.Plug("dmm", f"127.0.0.1:{port}")
-        plug.deadline = time.time() + 0.03
+        plug.deadline = time.monotonic() + 0.03
         start = time.time()
         with self.assertRaises(Exception):
             plug.measure()

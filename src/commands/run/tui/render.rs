@@ -472,17 +472,17 @@ fn draw_footer(f: &mut Frame, state: &TuiState, area: Rect) {
         // Run in flight, no UI prompt — surface the abort shortcut.
         // Morphs after the first press: Stop on first Ctrl-X, Kill on
         // the second (matches the web button's progressive escalation).
-        Line::from(run_shortcut_hints(state.stop_pressed))
+        Line::from(run_shortcut_hints(state.stop_presses))
     };
     f.render_widget(Paragraph::new(footer_text), area);
 }
 
 /// Footer hints surfaced while the run is in flight (no UI prompt).
-/// First press of Ctrl-X publishes `Stop`; the hint then morphs to
-/// `Kill` so the operator sees that a second press will escalate to
-/// the force path. Style mirrors `shortcut_hints`: primary action
-/// blue+bold, descriptor muted.
-fn run_shortcut_hints(stop_pressed: bool) -> Vec<Span<'static>> {
+/// Each press of Ctrl-X climbs one rung of the cancel ladder (stop,
+/// interrupt, force kill); the hint always names the rung the next
+/// press takes and what the current one is doing. Style mirrors
+/// `shortcut_hints`: primary action blue+bold, descriptor muted.
+fn run_shortcut_hints(stop_presses: u8) -> Vec<Span<'static>> {
     let primary = Style::default()
         .fg(palette::RUNNING)
         .add_modifier(Modifier::BOLD);
@@ -490,21 +490,27 @@ fn run_shortcut_hints(stop_pressed: bool) -> Vec<Span<'static>> {
         .fg(palette::FAIL)
         .add_modifier(Modifier::BOLD);
     let muted = Style::default().fg(palette::MUTED);
-    if stop_pressed {
-        vec![
-            Span::raw("  "),
-            Span::styled("Ctrl-X", danger),
-            Span::styled(" force kill   ", muted),
-            Span::styled("Stopping...", muted),
-        ]
-    } else {
-        vec![
+    match stop_presses {
+        0 => vec![
             Span::raw("  "),
             Span::styled("Ctrl-X", primary),
             Span::styled(" stop   ", muted),
-            Span::styled("Ctrl-C", muted),
-            Span::styled(" quit", muted),
-        ]
+            Span::styled("q", muted),
+            Span::styled(" detach", muted),
+        ],
+        1 => vec![
+            Span::raw("  "),
+            Span::styled("Ctrl-X", danger),
+            Span::styled(" interrupt   ", muted),
+            Span::styled("Stopping: running phases finish, then teardown", muted),
+        ],
+        2 => vec![
+            Span::raw("  "),
+            Span::styled("Ctrl-X", danger),
+            Span::styled(" force kill   ", muted),
+            Span::styled("Interrupted: teardown running", muted),
+        ],
+        _ => vec![Span::raw("  "), Span::styled("Force killing...", danger)],
     }
 }
 

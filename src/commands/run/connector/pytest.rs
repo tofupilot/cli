@@ -650,6 +650,7 @@ pub async fn run_pytest(
         }
         signal = cancel_rx.wait_any() => {
             cancelled_by_signal = true;
+            cancel_rx.mark_teardown_started();
             crate::log::info(&format!(
                 "{} requested, killing pytest subprocess",
                 match signal {

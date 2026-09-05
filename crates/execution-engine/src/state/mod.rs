@@ -1,4 +1,5 @@
 use crate::job::{Job, JobResult};
+use crate::procedure::schema::StageScope;
 use std::collections::{HashMap, HashSet, VecDeque};
 use uuid::Uuid;
 
@@ -12,6 +13,9 @@ pub struct JobInfo {
     pub function: String,
     pub slot_id: Option<String>,
     pub dependency_id: Uuid,
+    /// Stage of the phase. An interrupt must not kill a teardown that
+    /// is already running (`interrupt_running_jobs`).
+    pub stage_scope: StageScope,
 }
 
 impl JobInfo {
@@ -22,7 +26,15 @@ impl JobInfo {
             function: job.function.clone(),
             slot_id: job.slot_id.clone(),
             dependency_id: job.dependency_id,
+            stage_scope: job.stage_scope,
         }
+    }
+
+    pub fn is_teardown(&self) -> bool {
+        matches!(
+            self.stage_scope,
+            StageScope::TeardownEach | StageScope::TeardownAll
+        )
     }
 }
 
@@ -48,6 +60,8 @@ impl PendingDelayedRetry {
             function: self.function.clone(),
             slot_id: self.slot_id.clone(),
             dependency_id: self.dependency_id,
+            // Only main phases retry.
+            stage_scope: StageScope::Main,
         }
     }
 }
@@ -388,11 +402,18 @@ impl OrchestratorState {
         aborted
     }
 
+    /// Teardown work still to run. After an operator stop these are the
+    /// jobs `shutdown()` runs on fresh workers, and they need the
+    /// scope plugs the run created. Under slot-first the shared
+    /// teardown waits in `teardown_procedure_jobs`, not in the queue.
+    pub fn has_queued_teardown(&self) -> bool {
+        !self.teardown_procedure_jobs.is_empty() || self.job_queue.iter().any(Self::is_teardown)
+    }
+
     fn is_teardown(job: &Job) -> bool {
         matches!(
             job.stage_scope,
-            crate::procedure::schema::StageScope::TeardownEach
-                | crate::procedure::schema::StageScope::TeardownAll
+            StageScope::TeardownEach | StageScope::TeardownAll
         )
     }
 
@@ -769,6 +790,22 @@ mod stop_scope_tests {
         with_shared.request_shutdown(ShutdownCause::Operator);
         with_shared.mark_outstanding_slots_stopped("Execution stopped by user");
         assert!(with_shared.is_slot_stopped("empty"));
+    }
+
+    /// Slot-first parks the shared teardown outside the queue; the
+    /// plug-keeping decision at the end of `execute_all` has to see it.
+    #[test]
+    fn has_queued_teardown_sees_the_parked_shared_teardown() {
+        let mut state = OrchestratorState::new(1);
+        assert!(!state.has_queued_teardown());
+        state.teardown_procedure_jobs.push(job(StageScope::TeardownAll));
+        assert!(state.has_queued_teardown());
+
+        let mut queued = OrchestratorState::new(1);
+        queued.enqueue_job(job(StageScope::Main));
+        assert!(!queued.has_queued_teardown());
+        queued.enqueue_job(slot_job(StageScope::TeardownEach, "a"));
+        assert!(queued.has_queued_teardown());
     }
 
     fn skipped() -> JobResult {

@@ -1459,16 +1459,18 @@ class Plug:
     def __init__(self, name: str, address: str):
         self.name = name
         self.address = address
-        # Epoch seconds when the owning phase times out, or None for no
-        # phase timeout. Stamped by execute_job_streaming before the
-        # phase thread starts.
+        # time.monotonic() value at which the owning phase times out, or
+        # None for no phase timeout. Stamped by execute_job_streaming
+        # before the phase thread starts. Monotonic, not wall-clock: an
+        # NTP step during an hours-long phase must not eat (or extend)
+        # its budget.
         self.deadline = None
 
     def _remaining(self, method: str) -> Optional[float]:
         """Seconds left before the phase deadline, None if unlimited."""
         if self.deadline is None:
             return None
-        remaining = self.deadline - time.time()
+        remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(
                 f"phase timed out before {method}() completed"
@@ -1914,7 +1916,10 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
             timeout_ms / 1000.0 if timeout_ms else None
         )
 
-        start_time = time.time()
+        # Monotonic: the timeout is a duration, and a wall-clock step
+        # (NTP sync mid-burn-in) would otherwise cut the phase short or
+        # let it overrun.
+        start_time = time.monotonic()
 
         # Plug RPC calls share the phase's deadline instead of carrying
         # their own: a plug call must be allowed to run exactly as long
@@ -1927,7 +1932,7 @@ def execute_job_streaming(command: Dict[str, Any], procedure_dir: Path):
         thread = threading.Thread(target=run_phase, daemon=False)
         thread.start()
         while thread.is_alive():
-            if timeout_seconds and (time.time() - start_time) > timeout_seconds:
+            if timeout_seconds and (time.monotonic() - start_time) > timeout_seconds:
                 event_queue.close()
                 yield {
                     "type": "result",

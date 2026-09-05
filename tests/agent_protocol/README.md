@@ -23,6 +23,12 @@ Two more scripts are CI-gated, on the YAML/Linux leg only (both override
   filled in from `whoami`, and the run that filled it in already uploads with
   a reference
 
+And one on the `yaml-multislot` leg, Linux **and** Windows:
+
+- `signal_teardown.py` — SIGTERM (Windows: CTRL_BREAK to the CLI's process
+  group) mid-phase still runs the execution-scoped teardown, exits 130 and
+  queues one ABORTED run per slot (`scenarios/yaml_signal_teardown`)
+
 The remaining scripts below are a deeper local regression harness; they hard-
 code `/tmp/` paths and require manual venv setup, so they are **not** in CI.
 

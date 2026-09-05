@@ -337,9 +337,16 @@ enum QueueCommand {
 ///   lock when the pipe consumer goes away.
 /// - Catch SIGTERM and SIGHUP. `tokio::signal::ctrl_c` only covers
 ///   SIGINT, so `kill <pid>` or closing the terminal tab would
-///   otherwise leave the CLI alive. Both trigger an immediate exit;
-///   the OS releases the redb file lock on process death.
+///   otherwise leave the CLI alive. A command with a run in flight
+///   (one-shot run, station) turns them into a graceful cancel so the
+///   teardown phases power the bench down and the partial runs are
+///   queued; any other command exits at once. The OS releases the
+///   redb file lock on process death.
+/// - Kill every worker and plug subprocess still registered when the
+///   process exits through `std::process::exit`, which skips the
+///   `Drop` that would otherwise reap them.
 fn install_global_signal_handlers() {
+    execution_engine::plugs::process::install_exit_hook();
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -355,12 +362,18 @@ fn install_global_signal_handlers() {
             let Ok(mut sighup) = signal(SignalKind::hangup()) else {
                 return;
             };
-            tokio::select! {
-                _ = sigterm.recv() => {},
-                _ = sighup.recv() => {},
+            loop {
+                let source = tokio::select! {
+                    _ = sigterm.recv() => "SIGTERM",
+                    _ = sighup.recv() => "SIGHUP",
+                };
+                // The listener owns the escalation ladder (second
+                // signal forces, third exits); this loop only feeds it.
+                let stop = commands::run::signals::Stop::signal(source);
+                if !commands::run::signals::request(stop) {
+                    std::process::exit(commands::run::signals::EXIT_SIGNALLED);
+                }
             }
-            // The redb lock is released by the OS on process death.
-            std::process::exit(130);
         });
     }
 }

@@ -343,14 +343,14 @@ pub struct TuiState {
     /// Mutually informative with `outcome` = "ERROR" but kept on its
     /// own field because plain phase-level failures don't populate it.
     pub run_error: Option<RunErrorState>,
-    /// Tracks whether the operator has already pressed the stop key
-    /// once. Mirrors the web operator-UI button morph: first press
-    /// publishes `Stop` (graceful), second press escalates to `Kill`
-    /// (force). Reset on a fresh run by virtue of a new `TuiState`
-    /// being constructed; not cleared mid-run because there's no
-    /// "un-stop" — once the operator commits to abort, the only
-    /// follow-up is escalation.
-    pub stop_pressed: bool,
+    /// How many times the operator pressed the stop key. The ladder:
+    /// first press stops gracefully (running phases finish, then
+    /// teardown), second interrupts (running phases are killed,
+    /// teardown still runs), third force kills (no teardown). Reset on
+    /// a fresh run by virtue of a new `TuiState` being constructed; not
+    /// cleared mid-run because there's no "un-stop" — once the
+    /// operator commits to abort, the only follow-up is escalation.
+    pub stop_presses: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -396,7 +396,7 @@ impl TuiState {
             presence: HashMap::new(),
             self_user_id: None,
             run_error: None,
-            stop_pressed: false,
+            stop_presses: 0,
         }
     }
 

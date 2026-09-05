@@ -327,7 +327,12 @@ pub async fn execute(
             }
         }
         _ = tokio::signal::ctrl_c() => graceful_shutdown(&mut child).await,
-        _ = cancel_rx.wait_any() => graceful_shutdown(&mut child).await,
+        _ = cancel_rx.wait_any() => {
+            // The subprocess stop is this run's whole teardown; the
+            // signal ladder's cap arms from here.
+            cancel_rx.mark_teardown_started();
+            graceful_shutdown(&mut child).await
+        }
     };
 
     let _ = stdout_handle.await;

@@ -22,6 +22,27 @@ use crate::procedure::schema::StageScope;
 
 use super::super::Orchestrator;
 
+/// Cap on the teardown phases `shutdown()` runs after a stop. Exported so
+/// the CLI's signal ladder can size its own escalation from it.
+pub const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Worker pool for the teardown phases `shutdown()` runs.
+const NUM_TEARDOWN_WORKERS: usize = 2;
+
+/// How much time `shutdown()` may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownMode {
+    /// Graceful worker stop, fresh teardown workers, Cleanup RPC on
+    /// every plug.
+    Normal,
+    /// An OS deadline of seconds is behind the stop (Windows console
+    /// close). Workers are killed outright, the teardown runs on a
+    /// pool worker that is already idle (one spawn only if none is),
+    /// and the plugs are killed without their Cleanup RPC: the exit
+    /// hook (Unix) or the Job Object (Windows) reaps them anyway.
+    Hurried,
+}
+
 impl Orchestrator {
     fn is_teardown_job(job: &Job) -> bool {
         matches!(
@@ -291,27 +312,47 @@ impl Orchestrator {
         futures::future::join_all(kill_futures).await;
     }
 
+    /// Run the teardown phases on `teardown_workers`, spawning fresh
+    /// ones when none was handed over. `Hurried` skips every grace
+    /// period on the way out.
     async fn execute_teardown_jobs(
         &mut self,
         teardown_jobs: Vec<Job>,
+        mut teardown_workers: Vec<Worker>,
+        mode: ShutdownMode,
     ) -> Result<(), String> {
-        const TEARDOWN_TIMEOUT_SECS: u64 = 30;
-        const NUM_TEARDOWN_WORKERS: usize = 2;
-
-        let mut teardown_workers = Vec::new();
-        for i in 0..NUM_TEARDOWN_WORKERS {
-            let mut worker = Worker::new_with_python(
-                i,
-                self.procedure_dir.clone(),
-                self.python_path.clone(),
-            );
-            worker.start(&self.event_sink).await?;
-            teardown_workers.push(worker);
+        if self.state.read().await.force_kill_requested {
+            Self::force_kill_workers_parallel(teardown_workers).await;
+            return Err("Force kill requested; teardown phases skipped".to_string());
         }
 
-        // Re-populate state with teardown jobs (phases stay pending until actually started)
+        if teardown_workers.is_empty() {
+            let spawn = match mode {
+                ShutdownMode::Normal => NUM_TEARDOWN_WORKERS,
+                ShutdownMode::Hurried => 1,
+            };
+            for i in 0..spawn {
+                let mut worker = Worker::new_with_python(
+                    i,
+                    self.procedure_dir.clone(),
+                    self.python_path.clone(),
+                );
+                worker.start(&self.event_sink).await?;
+                teardown_workers.push(worker);
+            }
+        }
+
+        // Re-populate state with teardown jobs (phases stay pending until
+        // actually started). A force kill that landed while the workers
+        // were spawning has already drained the queue and killed the
+        // plugs: nothing left to run the teardown against.
         {
             let mut state = self.state.write().await;
+            if state.force_kill_requested {
+                drop(state);
+                Self::force_kill_workers_parallel(teardown_workers).await;
+                return Err("Force kill requested; teardown phases skipped".to_string());
+            }
             for job in teardown_jobs {
                 state.enqueue_job(job);
             }
@@ -326,7 +367,7 @@ impl Orchestrator {
 
         // Execute teardown jobs with timeout
         let teardown_result = tokio::time::timeout(
-            Duration::from_secs(TEARDOWN_TIMEOUT_SECS),
+            TEARDOWN_TIMEOUT,
             self.run_teardown_loop(),
         )
         .await;
@@ -339,11 +380,18 @@ impl Orchestrator {
         self.state.write().await.shutdown_requested = true;
 
         // Shutdown teardown workers
-        let mut workers = self.workers.write().await;
-        for worker in workers.iter_mut() {
-            let _ = worker.shutdown_with_timeout(1000).await;
+        let workers = {
+            let mut guard = self.workers.write().await;
+            std::mem::take(&mut *guard)
+        };
+        match mode {
+            ShutdownMode::Normal => {
+                for mut worker in workers {
+                    let _ = worker.shutdown_with_timeout(1000).await;
+                }
+            }
+            ShutdownMode::Hurried => Self::force_kill_workers_parallel(workers).await,
         }
-        workers.clear();
 
         match teardown_result {
             Ok(Ok(())) => Ok(()),
@@ -376,7 +424,7 @@ impl Orchestrator {
                 }
                 Err(format!(
                     "Teardown execution timed out after {}s",
-                    TEARDOWN_TIMEOUT_SECS
+                    TEARDOWN_TIMEOUT.as_secs()
                 ))
             }
         }
@@ -393,7 +441,11 @@ impl Orchestrator {
         loop {
             let is_complete = {
                 let state = self.state.read().await;
-                state.job_queue.is_empty() && state.worker_state.count_busy() == 0
+                // A force kill during the teardown (`force_kill_immediate`
+                // from the CLI's second signal) killed the workers and
+                // drained the queue under us; do not schedule the rest.
+                state.force_kill_requested
+                    || (state.job_queue.is_empty() && state.worker_state.count_busy() == 0)
             };
 
             if is_complete {
@@ -419,9 +471,15 @@ impl Orchestrator {
     }
 
     async fn schedule_teardown_jobs(&self) -> Result<(), String> {
+        // The tracker still counts the pool's workers; only the first
+        // `teardown_pool` of those ids have a worker behind them now.
+        // Scheduling on a higher id used to fail the whole teardown
+        // ("Worker not found") as soon as a procedure had more teardown
+        // phases than teardown workers.
+        let teardown_pool = self.workers.read().await.len();
         let jobs_to_spawn = {
             let mut state = self.state.write().await;
-            let num_workers = state.worker_state.num_workers();
+            let num_workers = state.worker_state.num_workers().min(teardown_pool);
             let mut jobs = Vec::new();
 
             for worker_id in 0..num_workers {
@@ -461,6 +519,11 @@ impl Orchestrator {
     }
     /// Enhanced shutdown with graceful-to-force escalation
     pub async fn shutdown(&mut self) -> Result<(), String> {
+        self.shutdown_with(ShutdownMode::Normal).await
+    }
+
+    /// `shutdown` with its time budget spelled out, see [`ShutdownMode`].
+    pub async fn shutdown_with(&mut self, mode: ShutdownMode) -> Result<(), String> {
         // Check if force kill was requested
         {
             let state = self.state.read().await;
@@ -524,12 +587,20 @@ impl Orchestrator {
             std::mem::take(&mut *guard)
         };
 
-        Self::shutdown_workers_gracefully(
-            &mut workers,
-            &running_jobs_info,
-            &self.event_sink,
-        )
-        .await;
+        let teardown_workers = match mode {
+            ShutdownMode::Normal => {
+                Self::shutdown_workers_gracefully(
+                    &mut workers,
+                    &running_jobs_info,
+                    &self.event_sink,
+                )
+                .await;
+                Vec::new()
+            }
+            ShutdownMode::Hurried => {
+                Self::stop_workers_hurried(workers, &running_jobs_info, &self.event_sink).await
+            }
+        };
 
         Self::emit_job_events(
             &regular_jobs_info,
@@ -546,17 +617,29 @@ impl Orchestrator {
                 teardown_jobs.len()
             );
 
-            if let Err(e) = self.execute_teardown_jobs(teardown_jobs).await {
+            if let Err(e) = self
+                .execute_teardown_jobs(teardown_jobs, teardown_workers, mode)
+                .await
+            {
                 log::error!("Failed to execute teardown jobs: {}", e);
             }
+        } else {
+            Self::force_kill_workers_parallel(teardown_workers).await;
         }
 
-        // shutdown plug services
+        self.release_scope_plugs(mode).await;
+
+        // Catch-all for what the scope release above does not own
+        // (manual plugs, a service whose instance entry is gone).
         let plug_service_manager = {
             let resource_manager = self.resource_manager.read().await;
             Arc::clone(resource_manager.get_plug_service_manager())
         };
-        if let Err(e) = plug_service_manager.stop_all_services().await {
+        let stopped = match mode {
+            ShutdownMode::Normal => plug_service_manager.stop_all_services().await,
+            ShutdownMode::Hurried => plug_service_manager.force_kill_all_services().await,
+        };
+        if let Err(e) = stopped {
             log::error!(
                 "Failed to stop plug services during shutdown: {}",
                 e
@@ -564,6 +647,130 @@ impl Orchestrator {
         }
 
         Ok(())
+    }
+
+    /// Release the scope plugs a stop kept up for its teardown phases
+    /// (`execute_all` leaves them when teardown work is still queued).
+    /// Counts each release toward the run's progress exactly like the
+    /// end-of-run release does, so an operator stop still reaches 100%.
+    /// A run whose plugs were already released at the end of
+    /// `execute_all` finds nothing here.
+    async fn release_scope_plugs(&self, mode: ShutdownMode) {
+        let slot_ids: Vec<String> = {
+            let state = self.state.read().await;
+            state.slot_jobs.keys().cloned().collect()
+        };
+        let mut statuses: Vec<&'static str> = Vec::new();
+        {
+            let resource_manager = self.resource_manager.write().await;
+            match mode {
+                ShutdownMode::Normal => {
+                    for slot_id in slot_ids {
+                        if !resource_manager.has_each_scope_plugs(&slot_id).await {
+                            continue;
+                        }
+                        match resource_manager
+                            .destroy_each_scope_plugs(slot_id.clone(), &self.event_sink)
+                            .await
+                        {
+                            Ok(_) => statuses.push("pass"),
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to destroy each-scope plugs for {} at shutdown: {}",
+                                    slot_id, e
+                                );
+                                statuses.push("error");
+                            }
+                        }
+                    }
+                    if resource_manager.has_all_scope_plugs().await {
+                        match resource_manager
+                            .destroy_all_scope_plugs(&self.event_sink)
+                            .await
+                        {
+                            Ok(_) => statuses.push("pass"),
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to destroy all-scope plugs at shutdown: {}",
+                                    e
+                                );
+                                statuses.push("error");
+                            }
+                        }
+                    }
+                }
+                ShutdownMode::Hurried => {
+                    for slot_id in &slot_ids {
+                        if resource_manager.has_each_scope_plugs(slot_id).await {
+                            statuses.push("pass");
+                        }
+                    }
+                    if resource_manager.has_all_scope_plugs().await {
+                        statuses.push("pass");
+                    }
+                    if let Err(e) = resource_manager
+                        .force_destroy_all_plugs(&self.event_sink)
+                        .await
+                    {
+                        log::warn!("Failed to force destroy plugs at shutdown: {}", e);
+                    }
+                }
+            }
+        }
+        // Emitted with the resource manager released: the counter takes
+        // `state`, and the lock order is state before resource manager.
+        for status in statuses {
+            self.emit_plug_scope_event(status).await;
+        }
+    }
+
+    /// The hurried counterpart of `shutdown_workers_gracefully`: same
+    /// events, no grace. Idle workers whose interpreter is still up are
+    /// handed back for the teardown phases (a spawn is the slowest step
+    /// of a shutdown that has seconds); the rest are killed in parallel.
+    async fn stop_workers_hurried(
+        workers: Vec<Worker>,
+        running_jobs_info: &[(usize, uuid::Uuid, String, String, String)],
+        event_sink: &Arc<dyn EventSink>,
+    ) -> Vec<Worker> {
+        let running: Vec<(uuid::Uuid, String, String, String)> = running_jobs_info
+            .iter()
+            .map(|(_, job_id, phase_key, phase_name, slot_id)| {
+                (*job_id, phase_key.clone(), phase_name.clone(), slot_id.clone())
+            })
+            .collect();
+        let busy: std::collections::HashSet<usize> =
+            running_jobs_info.iter().map(|(worker_id, ..)| *worker_id).collect();
+
+        Self::emit_job_events(&running, JobStatus::Stopping, None, None, event_sink);
+
+        let mut keep = Vec::new();
+        let mut kill = Vec::new();
+        for (worker_id, worker) in workers.into_iter().enumerate() {
+            if keep.len() < NUM_TEARDOWN_WORKERS
+                && !busy.contains(&worker_id)
+                && worker.is_alive().await
+            {
+                keep.push(worker);
+            } else {
+                kill.push(worker);
+            }
+        }
+        log::info!(
+            "Hurried stop: {} idle worker(s) kept for the teardown, {} killed",
+            keep.len(),
+            kill.len()
+        );
+        Self::force_kill_workers_parallel(kill).await;
+
+        Self::emit_job_events(
+            &running,
+            JobStatus::Completed,
+            Some(Outcome::Stop),
+            Some("Execution stopped by user".to_string()),
+            event_sink,
+        );
+        keep
     }
 
     pub async fn force_kill(&mut self) -> Result<(), String> {
@@ -667,6 +874,60 @@ impl Orchestrator {
         log::info!("Execution force killed - all processes terminated");
 
         Ok(())
+    }
+
+    /// Stop the phases running right now without giving up the teardown.
+    ///
+    /// Raises the operator stop, then kills every worker busy with a
+    /// main or setup phase, in parallel: each interrupted job completes
+    /// as stopped under the raised flag (no replacement worker is
+    /// started), `execute_all` drains, and the caller's `shutdown()`
+    /// runs the teardown phases before the plugs are released. A worker
+    /// already running a teardown phase is left alone: killing it mid
+    /// power-off would leave the bench on with nothing to re-run it, and
+    /// `execute_all` waits for it. For stops with an external deadline
+    /// (console close, SIGTERM): a graceful stop waits for an hours-long
+    /// phase, a force kill skips powering the bench down.
+    pub async fn interrupt_running_jobs(
+        state: Arc<RwLock<OrchestratorState>>,
+        workers: Arc<RwLock<Vec<Worker>>>,
+    ) {
+        let (busy, spared) = {
+            let mut state = state.write().await;
+            state.request_shutdown(crate::state::ShutdownCause::Operator);
+            let mut busy = Vec::new();
+            let mut spared = 0usize;
+            for id in 0..state.worker_state.num_workers() {
+                let Some(job_id) = state.worker_state.get_worker_job(id) else {
+                    continue;
+                };
+                if state.job_info.get(&job_id).is_some_and(|info| info.is_teardown()) {
+                    spared += 1;
+                } else {
+                    busy.push(id);
+                }
+            }
+            (busy, spared)
+        };
+        if spared > 0 {
+            log::info!("{} teardown phase(s) already running are left to finish", spared);
+        }
+        if busy.is_empty() {
+            return;
+        }
+        log::info!("Interrupting {} running phase(s)", busy.len());
+        let targets: Vec<(usize, Worker)> = {
+            let workers = workers.read().await;
+            busy.into_iter()
+                .filter_map(|id| workers.get(id).cloned().map(|w| (id, w)))
+                .collect()
+        };
+        join_all(targets.into_iter().map(|(id, mut worker)| async move {
+            if let Err(e) = worker.interrupt_current_job().await {
+                log::warn!("Worker {} interrupt failed: {}", id, e);
+            }
+        }))
+        .await;
     }
 
     pub async fn force_kill_immediate(

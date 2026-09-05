@@ -1,0 +1,40 @@
+# e2e fixture for the signal ladder: two slots soaking for 30 s under a
+# shared power-on / power-off. SIGTERM (or a Windows console event) sent
+# mid-soak must still run the execution-scoped `power_off`, which writes
+# `teardown.marker` next to this file, and queue one ABORTED run per slot.
+name: Signal teardown
+version: 1.0.0
+description: Two-slot soak with an execution-scoped teardown marker
+
+execution:
+  strategy: phase_first
+  workers: 2
+  slots:
+    - key: s1
+      name: Nest 1
+    - key: s2
+      name: Nest 2
+
+unit:
+  auto_identify: true
+  serial_number:
+    default_value: "SIG-{slot}"
+  part_number:
+    default_value: "PCB-SIG"
+
+setup:
+  - key: power_on
+    name: Power on rack
+    scope: execution
+    python: phases.rack:power_on
+
+main:
+  - key: soak
+    name: Soak
+    python: phases.nest:soak
+
+teardown:
+  - key: power_off
+    name: Power off rack
+    scope: execution
+    python: phases.rack:power_off

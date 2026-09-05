@@ -21,6 +21,7 @@ pub(crate) mod procedure_version;
 pub(crate) mod python;
 pub(crate) mod queue;
 pub(crate) mod run_log;
+pub(crate) mod signals;
 pub(crate) mod teardown;
 pub(crate) mod time_fmt;
 mod tui;
@@ -91,6 +92,36 @@ impl RunHandle {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+    }
+
+    /// `abort` for a stop that came from the OS: the signal ladder
+    /// (`signals::escalate`) runs beside the task. Interrupt now, force
+    /// kill once the teardown overruns its cap or a second signal
+    /// lands, exit on a third. Returns once the run task has unwound;
+    /// the ladder is dropped with it, its `Drop` backstop aborting the
+    /// task if it never does.
+    pub async fn abort_signalled(
+        mut self,
+        stop: signals::Stop,
+        listener: signals::Listener,
+        json_mode: bool,
+    ) {
+        let ladder = tokio::spawn(signals::escalate(
+            self.cancel.clone(),
+            listener,
+            stop,
+            json_mode,
+        ));
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+        ladder.abort();
+    }
+
+    /// Clone of the run's cancel token, for cancellation sources that
+    /// outlive a borrow of the handle (the signal ladder).
+    pub fn cancel_token(&self) -> cancel::CancelToken {
+        self.cancel.clone()
     }
 
     /// Signal a graceful stop. Idempotent. Returns immediately —
@@ -786,12 +817,13 @@ pub async fn start(
         eprintln!();
     }
 
-    // 128 slots. Sized for typical procedures (phase+UI events, a handful
-    // per second). A phase streaming high-frequency measurements (>500/s)
-    // could lag a slow consumer — the TUI surfaces that via a one-frame
-    // "lagged N events" warning; the station publisher drops and moves on.
-    // Raise here if empirically needed; no hard ceiling.
-    let (event_tx, _) = broadcast::channel::<StationEvent>(128);
+    // 4096 slots. An 80-slot burn-in emits ~400 events per iteration in
+    // a burst; at the previous 128 a slow consumer lagged on every
+    // iteration, and a lagged kiosk pump lost its hydration ring. The
+    // TUI surfaces a lag via a one-frame "lagged N events" warning; the
+    // station publisher drops and moves on. Raise here if empirically
+    // needed; no hard ceiling.
+    let (event_tx, _) = broadcast::channel::<StationEvent>(4096);
 
     // Stamp the version of the binary actually executing this run — not
     // what a separate `tofupilot --version` invocation would say. A stale
@@ -1166,9 +1198,10 @@ pub async fn start(
             color: ident.color,
             tx: event_tx.clone(),
         });
-        // TUI keystrokes (Ctrl-C, q, kill) call `cancel_token.cancel()`
-        // / `kill()` directly. No mpsc adapter; one cancel surface for
-        // every cancellation source.
+        // TUI keystrokes call `cancel_token.cancel()` / `kill()`
+        // directly: Ctrl-C and Ctrl-X cancel, a second press forces.
+        // `q` only detaches the TUI; the run keeps going. No mpsc
+        // adapter; one cancel surface for every cancellation source.
         let tui_cancel = cancel_token.clone();
         let handle = tokio::spawn(async move {
             if let Err(e) = tui::run_tui(
@@ -1476,6 +1509,11 @@ pub async fn run_cmd(
         None
     };
 
+    // Subscribed before the run is set up: a SIGTERM during the venv
+    // bootstrap would otherwise find no listener and exit at once.
+    let signal_listener = signals::Listener::new();
+    signals::announce_console_close_budget(json_mode);
+
     let handle = start(
         &resolved.id,
         resolved.dir,
@@ -1503,7 +1541,21 @@ pub async fn run_cmd(
         resolved.entry_hint,
     )
     .await;
+    // Signals cancel through the same token as every other source; the
+    // driver is torn down with the run so a later Ctrl-C on the prompt
+    // is not swallowed by a stale stream.
+    let signal_driver = tokio::spawn(signals::drive_cancel(
+        handle.cancel_token(),
+        signal_listener,
+        json_mode,
+    ));
     let code = handle.join().await;
+    signal_driver.abort();
+    let code = if signals::requested().is_some() {
+        signals::EXIT_SIGNALLED
+    } else {
+        code
+    };
 
     // Linked dir, but the run stayed local. Surface the link once so the
     // user knows uploading is one flag away — without ever uploading

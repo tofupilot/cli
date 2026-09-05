@@ -76,6 +76,81 @@ use nix::sys::signal::{self, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
+/// Process groups of the children alive right now, by leader pid.
+///
+/// `std::process::exit` runs no destructors, so a child owned by a
+/// task that is still running when the CLI exits (a signal escalation,
+/// a command returning while a run winds down) would outlive it,
+/// holding its listen socket and, for a plug, the instrument session.
+/// Registered on spawn, removed once the child is observed to have
+/// exited or its handle is dropped, and swept by the exit hook.
+/// Unix only: on Windows every child is attached to a Job Object with
+/// `KILL_ON_JOB_CLOSE`, and the kernel closes that handle on exit.
+#[cfg(unix)]
+fn live_groups() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+fn register_group(id: u32) {
+    #[cfg(unix)]
+    live_groups()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id);
+    #[cfg(not(unix))]
+    let _ = id;
+}
+
+fn unregister_group(id: u32) {
+    #[cfg(unix)]
+    live_groups()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    #[cfg(not(unix))]
+    let _ = id;
+}
+
+/// SIGKILL every registered child process group. Returns how many were
+/// still registered. Safe to call from an `atexit` handler.
+pub fn kill_all_live_children() -> usize {
+    #[cfg(unix)]
+    {
+        let ids: Vec<u32> = live_groups()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        for id in &ids {
+            kill_process_group(*id);
+        }
+        ids.len()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+/// Run [`kill_all_live_children`] when the process exits through
+/// `std::process::exit` (libc `exit`, which runs `atexit` handlers).
+/// Call once from `main`. Not reached on SIGKILL: the children's own
+/// parent watchdogs cover that.
+pub fn install_exit_hook() {
+    #[cfg(unix)]
+    {
+        extern "C" fn sweep() {
+            kill_all_live_children();
+        }
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| unsafe {
+            nix::libc::atexit(sweep);
+        });
+    }
+}
+
 /// Kill a process group by its PID. Cross-platform.
 fn kill_process_group(id: u32) {
     #[cfg(unix)]
@@ -99,6 +174,10 @@ fn kill_process_group(id: u32) {
 pub struct ChildProcess {
     pub port: u16,
     pub process: AsyncGroupChild,
+    /// Leader pid captured at spawn. `Child::id()` is `None` once the
+    /// child has been reaped, which is exactly when the registry entry
+    /// has to go.
+    group_id: Option<u32>,
 }
 
 impl ChildProcess {
@@ -173,7 +252,11 @@ impl ChildProcess {
                 if let (Some(stderr_handle), Some(handler)) = (stderr.take(), stderr_handler) {
                     handler(stderr_handle);
                 }
-                Ok(Self { port, process })
+                let group_id = process.inner().id();
+                if let Some(id) = group_id {
+                    register_group(id);
+                }
+                Ok(Self { port, process, group_id })
             }
             failure => {
                 // Drain stderr BEFORE killing: on the timeout path the
@@ -235,6 +318,7 @@ impl ChildProcess {
         while waited < max_wait {
             match self.process.try_wait() {
                 Ok(Some(_status)) => {
+                    self.forget_group();
                     return Ok(());
                 }
                 Ok(None) => {
@@ -284,6 +368,7 @@ impl ChildProcess {
         while waited < max_wait {
             match self.process.try_wait() {
                 Ok(Some(_status)) => {
+                    self.forget_group();
                     return Ok(());
                 }
                 Ok(None) => {
@@ -320,11 +405,21 @@ impl ChildProcess {
             .kill()
             .await
             .map_err(|e| format!("Failed to kill process: {}", e))?;
-        let _ = tokio::time::timeout(
+        if tokio::time::timeout(
             Duration::from_millis(500),
             self.process.wait()
-        ).await;
+        ).await.is_ok() {
+            self.forget_group();
+        }
         Ok(())
+    }
+
+    /// The child is known to have exited: drop it from the live
+    /// registry so a later sweep cannot hit a recycled pid.
+    fn forget_group(&self) {
+        if let Some(id) = self.group_id {
+            unregister_group(id);
+        }
     }
 }
 
@@ -424,5 +519,6 @@ impl Drop for ChildProcess {
         if let Some(id) = self.process.inner().id() {
             kill_process_group(id);
         }
+        self.forget_group();
     }
 }

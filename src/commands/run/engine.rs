@@ -2252,6 +2252,10 @@ pub async fn run_yaml_procedure(
     let workers_arc = orchestrator.workers.clone();
     let resource_arc = orchestrator.resource_manager.clone();
     let event_sink_for_kill = event_sink.clone();
+    // Outlives the select below: the engine's shutdown reads the stop
+    // deadline from it and keeps watching for a force kill.
+    let mut shutdown_rx = cancel_rx.clone();
+    let mut force_fired = false;
 
     // Run `execute_all` inside a scope so its `&mut orchestrator` borrow
     // is released before we call `orchestrator.shutdown()` below. The
@@ -2267,9 +2271,11 @@ pub async fn run_yaml_procedure(
         // same receiver in two arms. Watch::Receiver clones are cheap
         // (one Arc).
         let mut graceful_rx = cancel_rx.clone();
+        let mut interrupt_rx = cancel_rx.clone();
         let mut force_rx = cancel_rx;
 
         let mut graceful_fired = false;
+        let mut interrupt_fired = false;
         loop {
             tokio::select! {
                 // Resolves when execution completes naturally (or after a
@@ -2332,11 +2338,27 @@ pub async fn run_yaml_procedure(
                         .request_shutdown(execution_engine::state::ShutdownCause::Operator);
                 }
 
+                // Interrupt: a stop with a deadline behind it (SIGTERM,
+                // console close). The running phases are killed so
+                // `execute_all` drains now instead of after an
+                // hours-long phase; the `shutdown()` below still runs
+                // the teardown phases and powers the bench down, which
+                // a force kill would skip.
+                _ = interrupt_rx.wait_interrupt(), if !interrupt_fired => {
+                    interrupt_fired = true;
+                    graceful_fired = true;
+                    Orchestrator::interrupt_running_jobs(
+                        state_arc.clone(),
+                        workers_arc.clone(),
+                    ).await;
+                }
+
                 // Kill: force_kill_immediate runs in parallel with
                 // execute_all (touching the same Arcs). After it returns,
                 // `execute_all` unblocks because workers are gone — await
                 // it once more to collect the result.
                 _ = force_rx.wait_force() => {
+                    force_fired = true;
                     if let Err(e) = Orchestrator::force_kill_immediate(
                         state_arc.clone(),
                         workers_arc.clone(),
@@ -2373,7 +2395,16 @@ pub async fn run_yaml_procedure(
             // Studio does this at every run-completion site; the
             // CLI station-mode loop spawns a fresh orchestrator per
             // run, and the previous one's workers leaked otherwise.
-            let _ = orchestrator.shutdown().await;
+            let _ = shutdown_engine(
+                &mut orchestrator,
+                &mut shutdown_rx,
+                force_fired,
+                &state_arc,
+                &workers_arc,
+                &resource_arc,
+                &event_sink_for_kill,
+            )
+            .await;
             // No upload queue runs on this path, so sweep any attachments
             // already written this run instead of leaking the scratch dir.
             if let Some(dir) = &attachment_dir {
@@ -2389,7 +2420,17 @@ pub async fn run_yaml_procedure(
     // mode this leaks ~7 processes per run (4 workers + 3 plugs
     // for the demo procedure), saturating the host within a few
     // dozen runs.
-    if let Err(e) = orchestrator.shutdown().await {
+    if let Err(e) = shutdown_engine(
+        &mut orchestrator,
+        &mut shutdown_rx,
+        force_fired,
+        &state_arc,
+        &workers_arc,
+        &resource_arc,
+        &event_sink_for_kill,
+    )
+    .await
+    {
         crate::log::warn(&format!("Orchestrator shutdown error: {e}"));
     }
 
@@ -2410,10 +2451,22 @@ pub async fn run_yaml_procedure(
     // single-slot procedure (the synthetic "default" slot included)
     // keeps the exact pre-multi-slot wire shape: no execution_id /
     // slot_key stamped, one QueuedRun.
+    // Last, and only while the OS still leaves time: under a console
+    // close the bench had priority, and a queue write the OS cuts short
+    // is a wasted transaction, not a queued run.
+    let stop_deadline_passed = shutdown_rx
+        .deadline()
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+    if stop_deadline_passed {
+        crate::log::warn("Stop deadline passed before the partial runs could be queued");
+    }
     let data = run_data.lock().await;
     let is_multi = slots.len() > 1;
     let mut queued_runs: Vec<QueuedRun> = Vec::with_capacity(slots.len());
     for (i, slot) in slots.iter().enumerate() {
+        if stop_deadline_passed {
+            break;
+        }
         let stamp: SlotStamp<'_> = is_multi.then_some((
             execution_id,
             slot.as_str(),
@@ -2454,6 +2507,58 @@ pub async fn run_yaml_procedure(
         }
     }
     (exit_code, queued_runs)
+}
+
+/// The engine's shutdown once `execute_all` has returned: the teardown
+/// phases, then the plug release. Reports the teardown started, so the
+/// signal ladder arms its cap now and not at the signal; takes the
+/// hurried path when an OS deadline is behind the stop; and keeps a
+/// force kill observable meanwhile. `shutdown()` reads the force flag
+/// on entry only, so without the watcher a second signal during a
+/// wedged power-off changed nothing until the engine's own cap.
+async fn shutdown_engine(
+    orchestrator: &mut Orchestrator,
+    cancel_rx: &mut super::cancel::Receiver,
+    force_fired: bool,
+    state: &Arc<tokio::sync::RwLock<execution_engine::state::OrchestratorState>>,
+    workers: &Arc<tokio::sync::RwLock<Vec<execution_engine::worker::Worker>>>,
+    resource_manager: &Arc<tokio::sync::RwLock<execution_engine::plugs::manager::ResourceManager>>,
+    event_sink: &Arc<dyn EventSink>,
+) -> Result<(), String> {
+    use execution_engine::orchestrator::ShutdownMode;
+
+    cancel_rx.mark_teardown_started();
+    let mode = if cancel_rx.deadline().is_some() {
+        crate::log::warn(
+            "Stop under an OS deadline: hurried teardown, plugs released without cleanup",
+        );
+        ShutdownMode::Hurried
+    } else {
+        ShutdownMode::Normal
+    };
+    let shutdown = orchestrator.shutdown_with(mode);
+    tokio::pin!(shutdown);
+    if force_fired {
+        return shutdown.await;
+    }
+    tokio::select! {
+        result = &mut shutdown => result,
+        _ = cancel_rx.wait_force() => {
+            crate::log::warn("Force kill during teardown; abandoning the teardown phases");
+            let kill = Orchestrator::force_kill_immediate(
+                state.clone(),
+                workers.clone(),
+                resource_manager.clone(),
+                None,
+                event_sink.clone(),
+            );
+            let (result, killed) = tokio::join!(&mut shutdown, kill);
+            if let Err(e) = killed {
+                crate::log::warn(&format!("force_kill_immediate failed: {e}"));
+            }
+            result
+        }
+    }
 }
 
 /// Emit a crash diagnostic on every channel that needs it:

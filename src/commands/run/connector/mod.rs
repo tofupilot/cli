@@ -1112,6 +1112,9 @@ pub async fn run_openhtf(
         }
         signal = cancel_rx.wait_any() => {
             cancelled_by_signal = true;
+            // The subprocess stop is this run's whole teardown; the
+            // signal ladder's cap arms from here.
+            cancel_rx.mark_teardown_started();
             crate::log::info(&format!(
                 "{} requested, killing procedure subprocess",
                 match signal {

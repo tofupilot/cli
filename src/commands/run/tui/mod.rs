@@ -174,7 +174,22 @@ pub async fn run_tui(
     // Unconditional cleanup even if the loop returned Err.
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    result
+    // Printed on the restored screen, not through the buffered console
+    // log: that log flushes only once the run ends, and this line is
+    // for the operator watching a run that has not.
+    if matches!(result, Ok(Detach::RunContinues)) {
+        crate::log::info("TUI detached, run continues; Ctrl-C to stop");
+    }
+    result.map(|_| ())
+}
+
+/// Why the TUI loop returned.
+#[derive(Debug, PartialEq, Eq)]
+enum Detach {
+    /// The run reached its terminal event (or its channels closed).
+    RunOver,
+    /// The operator pressed `q` while the run was still going.
+    RunContinues,
 }
 
 /// Identity + outbound channel the TUI uses to publish its own
@@ -328,7 +343,7 @@ async fn event_loop(
     presence_ctx: Option<PresenceContext>,
     mut presence_rx: mpsc::Receiver<StationEvent>,
     cancel: super::cancel::CancelToken,
-) -> crate::error::CliResult<()> {
+) -> crate::error::CliResult<Detach> {
     let mut app = TuiState::new();
     let mut images = ImageCache::new(procedure_dir);
     let mut input = EventStream::new();
@@ -438,7 +453,11 @@ async fn event_loop(
         presence.tick().await;
     }
 
-    Ok(())
+    Ok(if app.done {
+        Detach::RunOver
+    } else {
+        Detach::RunContinues
+    })
 }
 
 /// Classify each TUI message for presence side-effects. Keeps the
@@ -581,19 +600,24 @@ async fn handle_key(
 
     // Global quit / auto-continue dismiss happen regardless of focus.
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-        // Ctrl-X = abort. First press calls `cancel()` (graceful);
-        // second press escalates via `kill()` (force). Mirrors the web
-        // operator-UI button morph. Allowed even while a UI prompt
-        // is awaiting input — the operator should always be able to
-        // bail out of a hung prompt.
-        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.stop_pressed {
-                cancel.kill();
-            } else {
-                app.stop_pressed = true;
-                cancel.cancel();
+        // Ctrl-C and Ctrl-X = abort, one rung per press: `cancel()`
+        // (graceful: running phases finish, teardown runs, partial
+        // runs are queued), then `interrupt()` (running phases are
+        // killed, teardown still runs), then `kill()` (force, no
+        // teardown). The footer names the next rung. Allowed even
+        // while a UI prompt is awaiting input — the operator should
+        // always be able to bail out of a hung prompt. Ctrl-C used to
+        // detach the TUI like `q`, which left an operator who wanted
+        // the bench off with a headless run still driving it.
+        KeyCode::Char('c') | KeyCode::Char('x')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            match app.stop_presses {
+                0 => cancel.cancel(),
+                1 => cancel.interrupt(),
+                _ => cancel.kill(),
             }
+            app.stop_presses = app.stop_presses.saturating_add(1);
             return false;
         }
         KeyCode::Char('q') if !awaiting_input => return true,

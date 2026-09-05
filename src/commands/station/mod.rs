@@ -17,6 +17,7 @@ use tokio::sync::Mutex;
 use crate::commands::auth::credentials::Credentials;
 use crate::commands::config;
 use crate::commands::pull::sync::StagedDeployment;
+use crate::commands::run::signals;
 use crate::commands::run::teardown::{drain_prior_teardowns, park_prior_run};
 use crate::commands::update;
 use crate::http::RequestBuilderExt;
@@ -627,6 +628,14 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
     // procedure stations still wait for an explicit pick because the
     // choice is genuinely ambiguous.
     let mut active_run: Option<crate::commands::run::RunHandle> = None;
+    // Subscribed before the loop so a signal arriving between two
+    // iterations is never dropped (`request` forwards only while a
+    // listener exists).
+    let mut shutdown_signal = signals::Listener::new();
+    signals::announce_console_close_budget(json_mode);
+    // The signal that broke the loop, if one did: the active run is
+    // then aborted through the signal ladder rather than gracefully.
+    let mut pending_stop: Option<signals::Stop> = None;
     // Station-process-scoped owner of `scope: station` plugs. One per
     // station loop; every run borrows instrument instances from it so
     // connections survive across units. Shut down explicitly at loop
@@ -975,25 +984,45 @@ pub async fn run_cmd(creds: &Credentials, json_mode: bool) -> i32 {
                     eprintln!();
                     log::info("Disconnecting...");
                 }
-                // Second ^C during cleanup hard-exits. Without this
-                // a hung `disconnect().await` (unreachable WS, stalled
-                // TLS close) leaves the operator stuck pressing ^C
-                // forever — `tokio::signal::ctrl_c()` is one-shot and
-                // nothing else listens past this break.
-                tokio::spawn(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                    eprintln!("\nForce exit.");
-                    std::process::exit(130);
-                });
+                let stop = signals::Stop::signal("Ctrl-C");
+                signals::note(stop);
+                pending_stop = Some(stop);
                 // Standard convention for SIGINT.
-                exit_code = 130;
+                exit_code = signals::EXIT_SIGNALLED;
+                break;
+            }
+            // SIGTERM / SIGHUP, Ctrl-Break, or on Windows the console
+            // closing: the same stop as Ctrl-C. The active run's
+            // execution-scoped teardown runs before its partial runs
+            // are queued; under a console close only as far as the OS
+            // budget allows (see `signals`).
+            stop = shutdown_signal.wait() => {
+                if !json_mode {
+                    log::info(&format!("{}: stopping the run, teardown in progress", stop.source));
+                }
+                pending_stop = Some(stop);
+                exit_code = signals::EXIT_SIGNALLED;
                 break;
             }
         }
     }
 
     if let Some(handle) = active_run.take() {
-        handle.abort().await;
+        match pending_stop {
+            // The signal ladder, same as a one-shot run: a second
+            // signal forces, a third exits. Bounded either way: a
+            // wedged teardown must not turn the stop into a hang.
+            Some(stop) => {
+                handle
+                    .abort_signalled(stop, shutdown_signal, json_mode)
+                    .await;
+                shutdown_signal = signals::Listener::new();
+            }
+            None => handle.abort().await,
+        }
+    }
+    if pending_stop.is_some() {
+        spawn_force_exit(shutdown_signal);
     }
     // Release held station plugs (graceful Cleanup → Shutdown RPC per
     // instance). Must run after every borrower is gone — the active
@@ -2098,4 +2127,21 @@ mod web_ui_tests {
             "Web UI: https://x.app/org/operator/st_1",
         );
     }
+}
+
+/// Once the run is over, a further Ctrl-C or signal during the host's
+/// own cleanup hard-exits. Without this a hung `disconnect().await`
+/// (unreachable WS, stalled TLS close) leaves the operator stuck
+/// pressing ^C forever: `tokio::signal::ctrl_c()` is one-shot and
+/// nothing else listens past the loop's break. The child registry's
+/// exit hook reaps any worker or plug still alive.
+fn spawn_force_exit(mut shutdown_signal: signals::Listener) {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = shutdown_signal.wait() => {},
+        }
+        eprintln!("\nForce exit.");
+        std::process::exit(signals::EXIT_SIGNALLED);
+    });
 }
